@@ -1,1 +1,23 @@
-hello :)
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>TeslAA for Android Auto</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+    <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/>
+    <link rel="icon" href="favicon.ico" sizes="192x192"/>
+    <link rel="stylesheet" href="styles.css">
+    <meta name="HandheldFriendly" content="true"/>
+</head>
+
+<body id="body">
+<canvas></canvas>
+<span id="info"><p></p><b style="color:red">Latest Google Play Service update breaks TesAA. We are looking for potential workarounds, but options are limited.</b></p>Please connect to your phone's hotspot and make sure TeslAA is running on the phone...<span style="font-size:10pt;display:block;">Please make sure you have updated your TesAA app to version 2.3 or higher...</span></span>
+<span id="log"></span>
+<span id="warning"></span>
+</body>
+<script src="pcm-player.min.js"></script>
+<script src="main.js"></script>
+</html>

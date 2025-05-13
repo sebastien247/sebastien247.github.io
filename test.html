@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Connexion TesAA</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .test-card {
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .success {
+            color: green;
+            font-weight: bold;
+        }
+        .failure {
+            color: red;
+            font-weight: bold;
+        }
+        button {
+            padding: 8px 16px;
+            background: #4285f4;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        input {
+            padding: 8px;
+            width: 100%;
+            max-width: 300px;
+            margin-bottom: 10px;
+        }
+        .log {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test de Connexion TesAA</h1>
+    <p>Cette page permet de tester la connexion aux différents ports utilisés par TesAA</p>
+
+    <div class="test-card">
+        <h2>Test DNS</h2>
+        <p>Vérifier que le nom de domaine <code>taada.top</code> est correctement résolu</p>
+        <div>
+            <button onclick="testDNS()">Tester DNS</button>
+        </div>
+        <div id="dnsResult" class="log"></div>
+    </div>
+
+    <div class="test-card">
+        <h2>Test HTTPS (Port 8081)</h2>
+        <p>Vérifier la connexion au serveur HTTPS sur le port 8081</p>
+        <div>
+            <button onclick="testHTTPS()">Tester HTTPS</button>
+        </div>
+        <div id="httpsResult" class="log"></div>
+    </div>
+
+    <div class="test-card">
+        <h2>Test WebSocket (Port 9170)</h2>
+        <p>Vérifier la connexion au serveur WebSocket sur le port 9170</p>
+        <div>
+            <button onclick="testWS()">Tester WebSocket</button>
+        </div>
+        <div id="wsResult" class="log"></div>
+    </div>
+
+    <div class="test-card">
+        <h2>Test API getsocketport</h2>
+        <p>Vérifier l'API getsocketport</p>
+        <div>
+            <button onclick="testAPI()">Tester API</button>
+        </div>
+        <div id="apiResult" class="log"></div>
+    </div>
+
+    <div class="test-card">
+        <h2>Test audio WebSockets</h2>
+        <p>Vérifier les WebSockets audio (ports 9171 et 9172)</p>
+        <div>
+            <button onclick="testAudioWS()">Tester WebSockets Audio</button>
+        </div>
+        <div id="audioResult" class="log"></div>
+    </div>
+
+    <script>
+        function log(elementId, message, isError = false) {
+            const element = document.getElementById(elementId);
+            const messageDiv = document.createElement('div');
+            messageDiv.textContent = message;
+            if (isError) {
+                messageDiv.className = 'failure';
+            }
+            element.appendChild(messageDiv);
+            element.scrollTop = element.scrollHeight;
+        }
+
+        async function testDNS() {
+            const dnsResult = document.getElementById('dnsResult');
+            dnsResult.innerHTML = '';
+            
+            log('dnsResult', 'Tentative de résolution DNS pour taada.top...');
+            
+            try {
+                const response = await fetch('https://taada.top:8082/favicon.ico', {
+                    method: 'HEAD',
+                    mode: 'no-cors',
+                    cache: 'no-cache',
+                    timeout: 2000
+                });
+                log('dnsResult', 'DNS résolu avec succès!');
+            } catch (error) {
+                log('dnsResult', `Erreur de résolution DNS: ${error.message}`, true);
+            }
+        }
+
+        async function testHTTPS() {
+            const httpsResult = document.getElementById('httpsResult');
+            httpsResult.innerHTML = '';
+            
+            log('httpsResult', 'Test de connexion HTTPS sur le port 8082...');
+            
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 5000);
+                
+                const response = await fetch('https://taada.top:8082/api/test', {
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    log('httpsResult', `Connexion HTTPS réussie! Réponse: ${JSON.stringify(data)}`);
+                } else {
+                    log('httpsResult', `Connexion HTTPS échouée avec statut: ${response.status}`, true);
+                }
+            } catch (error) {
+                log('httpsResult', `Erreur de connexion HTTPS: ${error.message}`, true);
+            }
+        }
+
+        function testWS() {
+            const wsResult = document.getElementById('wsResult');
+            wsResult.innerHTML = '';
+            
+            log('wsResult', 'Test de connexion WebSocket sur le port 9170...');
+            
+            try {
+                const ws = new WebSocket('wss://taada.top:9170');
+                
+                ws.onopen = () => {
+                    log('wsResult', 'Connexion WebSocket réussie!');
+                    ws.send(JSON.stringify({action: 'PING'}));
+                    log('wsResult', 'Message PING envoyé');
+                    
+                    // Fermer après 3 secondes
+                    setTimeout(() => {
+                        ws.close();
+                        log('wsResult', 'Connexion WebSocket fermée');
+                    }, 3000);
+                };
+                
+                ws.onmessage = (event) => {
+                    log('wsResult', `Message reçu: ${event.data}`);
+                };
+                
+                ws.onerror = (error) => {
+                    log('wsResult', `Erreur WebSocket: ${error.message || 'Erreur inconnue'}`, true);
+                };
+                
+                ws.onclose = (event) => {
+                    if (!event.wasClean) {
+                        log('wsResult', `Connexion WebSocket fermée anormalement, code: ${event.code}`, true);
+                    }
+                };
+            } catch (error) {
+                log('wsResult', `Erreur d'initialisation WebSocket: ${error.message}`, true);
+            }
+        }
+
+        async function testAPI() {
+            const apiResult = document.getElementById('apiResult');
+            apiResult.innerHTML = '';
+            
+            log('apiResult', 'Test de l\'API getsocketport...');
+            
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 5000);
+                
+                const response = await fetch('https://taada.top:8082/getsocketport?w=1920&h=1080&webcodec=true', {
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    log('apiResult', `Appel API réussi! Réponse: ${JSON.stringify(data)}`);
+                } else {
+                    log('apiResult', `Appel API échoué avec statut: ${response.status}`, true);
+                }
+            } catch (error) {
+                log('apiResult', `Erreur d'appel API: ${error.message}`, true);
+            }
+        }
+
+        function testAudioWS() {
+            const audioResult = document.getElementById('audioResult');
+            audioResult.innerHTML = '';
+            
+            log('audioResult', 'Test des WebSockets audio sur les ports 9171 et 9172...');
+            
+            try {
+                log('audioResult', 'Test WebSocket Media (port 9171)...');
+                const mediaWs = new WebSocket('wss://taada.top:9171');
+                
+                mediaWs.onopen = () => {
+                    log('audioResult', 'Connexion WebSocket Media réussie!');
+                    
+                    // Fermer après 2 secondes
+                    setTimeout(() => {
+                        mediaWs.close();
+                        log('audioResult', 'Connexion WebSocket Media fermée');
+                    }, 2000);
+                };
+                
+                mediaWs.onerror = (error) => {
+                    log('audioResult', `Erreur WebSocket Media: ${error.message || 'Erreur inconnue'}`, true);
+                };
+                
+                // Test du WebSocket TTS
+                setTimeout(() => {
+                    log('audioResult', 'Test WebSocket TTS (port 9172)...');
+                    const ttsWs = new WebSocket('wss://taada.top:9172');
+                    
+                    ttsWs.onopen = () => {
+                        log('audioResult', 'Connexion WebSocket TTS réussie!');
+                        
+                        // Fermer après 2 secondes
+                        setTimeout(() => {
+                            ttsWs.close();
+                            log('audioResult', 'Connexion WebSocket TTS fermée');
+                        }, 2000);
+                    };
+                    
+                    ttsWs.onerror = (error) => {
+                        log('audioResult', `Erreur WebSocket TTS: ${error.message || 'Erreur inconnue'}`, true);
+                    };
+                }, 3000);
+                
+            } catch (error) {
+                log('audioResult', `Erreur d'initialisation WebSocket Audio: ${error.message}`, true);
+            }
+        }
+    </script>
+</body>
+</html> 
