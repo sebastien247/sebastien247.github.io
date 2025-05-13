@@ -1,9 +1,11 @@
 importScripts("Decoder.js");
-importScripts("direct_stream_decoder.js");
 
 // ========== Constants and Variable Declarations ==========
 
 const MAX_TEXTURE_POOL_SIZE = 5;
+const MAX_BUFFERED_FRAMES = 10;
+const NAL_SEPARATOR = new Uint8Array([0x00, 0x00, 0x00, 0x01]);
+
 let pendingFrames = [],
     underflow = true,
     night = false,
@@ -12,12 +14,20 @@ let pendingFrames = [],
     frameCounter = 0,
     sps, decoder = null, socket, height, width, port, gl, heart = 0,
     broadwayDecoder = null,
-    lastheart = 0, pongtimer, frameRate;
-
-// Nouveau: Gestion du flux direct
-let directDecoder = null;
-let isDirectMode = false;
-let directModeDetected = false;
+    lastAckTime = 0,
+    lastFrameTime = 0,
+    acksInFlight = 0,
+    lastheart = 0, pongtimer, frameRate,
+    // NOUVEAU: Flag pour mode direct (réception des NAL units H.264 brutes)
+    directMode = true,
+    nalBuffer = null,
+    // Stats de performance supplémentaires
+    decodeTimeTotal = 0,
+    decodeTimeCount = 0,
+    avgDecodeTime = 0,
+    framesReceived = 0,
+    framesSent = 0,
+    framesDropped = 0;
 
 const texturePool = [];
 
@@ -47,111 +57,6 @@ function getFrameStats() {
     return frameRate;
 }
 
-// ========== Direct Stream Support ==========
-
-/**
- * Initialise le décodeur de flux direct
- */
-function initDirectDecoder() {
-    if (directDecoder) {
-        return; // Déjà initialisé
-    }
-    
-    console.log("Initializing direct stream decoder");
-    
-    directDecoder = DirectStreamDecoder.init(
-        // Callback pour les frames décodées
-        (frame) => {
-            pendingFrames.push(frame);
-            if (underflow) {
-                renderFrame();
-            }
-        },
-        // Callback pour les statuts/statistiques
-        (status) => {
-            if (status.error) {
-                console.error("Direct decoder error:", status.error);
-                // Désactiver le mode direct en cas d'erreur critique
-                if (status.error.includes("No video decoder available")) {
-                    isDirectMode = false;
-                    directModeDetected = false;
-                    postMessage({warning: "Direct stream mode disabled: " + status.error});
-                }
-            }
-            
-            // Envoyer les statistiques à la page principale
-            postMessage({
-                fps: status.fps || getFrameStats(),
-                decodeQueueSize: pendingFrames.length,
-                pendingFrames: status.pendingFrames || 0,
-                codecType: status.codecType || "unknown"
-            });
-        },
-        // Force le décodeur logiciel si nécessaire
-        false // Laisser le décodeur décider
-    );
-}
-
-/**
- * Détecte si un message est au format flux direct
- * 
- * @param {ArrayBuffer} data Les données binaires reçues
- * @returns {boolean} True si le message semble être au format flux direct
- */
-function isDirectStreamMessage(data) {
-    // Si le mode direct a déjà été détecté, continuer à l'utiliser
-    if (directModeDetected) {
-        return true;
-    }
-    
-    if (!data || data.byteLength < 8) {
-        return false;
-    }
-    
-    try {
-        const view = new DataView(data);
-        // Tenter de lire la taille des métadonnées (4 premiers octets)
-        const metadataSize = view.getUint32(0);
-        
-        // Vérifier si la taille annoncée est cohérente avec la taille totale
-        if (metadataSize > 0 && metadataSize < 1000 && data.byteLength >= 4 + metadataSize) {
-            // Extraire les métadonnées et vérifier si c'est du JSON
-            const metadataBytes = new Uint8Array(data, 4, metadataSize);
-            const metadataStr = new TextDecoder().decode(metadataBytes);
-            const metadata = JSON.parse(metadataStr);
-            
-            // Vérifier si les métadonnées contiennent les champs attendus
-            if (metadata.hasOwnProperty('rawFormat') && 
-                metadata.hasOwnProperty('mediaMessageId')) {
-                
-                console.log("Direct stream mode detected!", metadata);
-                directModeDetected = true;
-                return true;
-            }
-        }
-    } catch (e) {
-        // Si l'analyse échoue, ce n'est probablement pas un message direct
-        return false;
-    }
-    
-    return false;
-}
-
-/**
- * Traite un message au format direct stream
- * 
- * @param {ArrayBuffer} data Les données binaires reçues
- * @returns {boolean} True si les données ont été traitées avec succès
- */
-function handleDirectStreamMessage(data) {
-    if (!directDecoder) {
-        initDirectDecoder();
-    }
-    
-    // Traiter le message et retourner true si un ACK doit être envoyé
-    return directDecoder.processMessage(data);
-}
-
 // ========== WebGL and Canvas Functions ==========
 
 function getTexture(gl) {
@@ -173,20 +78,8 @@ function drawImageToCanvas(image) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    
-    // Supporter les formats directs (VideoFrame) et anciens (Uint8Array)
-    if (image instanceof VideoFrame) {
-        // Direct mode via WebCodecs
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-    } else if (image.data && image.width && image.height) {
-        // Mode Broadway ou Direct Software
-        const w = image.width;
-        const h = image.height;
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, image.data);
-    } else {
-        // Ancien mode
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
-    }
+
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
 
     if (isPowerOf2(width) && isPowerOf2(height)) {
         gl.generateMipmap(gl.TEXTURE_2D);
@@ -198,13 +91,8 @@ function drawImageToCanvas(image) {
     gl.bindTexture(gl.TEXTURE_2D, null);
     releaseTexture(gl, texture);
 
-    // Supprimer proprement les objets VideoFrame
-    if (image instanceof VideoFrame || (image.close && typeof image.close === 'function')) {
-        try {
-            image.close();
-        } catch (e) {
-            // Ignorer les erreurs de fermeture
-        }
+    if (image.close) {
+        image.close();
     }
 }
 
@@ -225,21 +113,20 @@ function switchToBroadway() {
     decoder = null;
 
     broadwayDecoder = new Decoder({rgb: true});
-    broadwayDecoder.onPictureDecoded = function (buffer, width, height){
-        pendingFrames.push({
-            data: buffer,
-            width: width,
-            height: height
-        });
+    broadwayDecoder.onPictureDecoded = function (buffer){
+        pendingFrames.push(buffer);
         if(underflow) {
             renderFrame();
         }
-    }
+    };
 }
 
 function initCanvas(canvas, forceBroadway) {
     height = canvas.height;
     width = canvas.width;
+    
+    // NOUVEAU: Initialiser le buffer NAL pour le mode direct
+    nalBuffer = new Uint8Array(2 * 1024 * 1024); // 2MB buffer
 
     gl = canvas.getContext('webgl2');
 
@@ -294,28 +181,24 @@ function initCanvas(canvas, forceBroadway) {
         try {
             decoder = new VideoDecoder({
                 output: (frame) => {
+                    const decodeEndTime = performance.now();
                     pendingFrames.push(frame);
                     if (underflow) {
                         renderFrame();
                     }
                 },
                 error: (e) => {
+                    console.error("VideoDecoder error:", e);
                     switchToBroadway();
                 },
             });
         } catch(e) {
+            console.error("Error creating VideoDecoder:", e);
             switchToBroadway();
         }
     } else {
         console.log("Forcing to broadway decoder");
         switchToBroadway();
-    }
-
-    // Initialiser également le décodeur direct pour être prêt
-    try {
-        initDirectDecoder();
-    } catch (e) {
-        console.error("Failed to initialize direct decoder:", e);
     }
 
     startSocket();
@@ -331,263 +214,351 @@ async function renderFrame() {
     
     const frame = pendingFrames.shift();
     drawImageToCanvas(frame);
-
-    if (pendingFrames.length < 5) {
+    
+    // NOUVEAU: Optimisation des ACKs - envoyer un ACK tous les N frames ou si buffer faible
+    const now = performance.now();
+    if (pendingFrames.length < 3 || (now - lastAckTime > 100 && acksInFlight < 2)) {
         socket.sendObject({action: "ACK"});
+        acksInFlight++;
+        lastAckTime = now;
     }
     
-    // Envoyer les statistiques à la page principale
+    // NOUVEAU: Calcul des statistiques de performance
+    framesSent++;
+    const processTime = now - lastFrameTime;
+    lastFrameTime = now;
+    
     try {
         self.postMessage({
             fps: getFrameStats(),
             decodeQueueSize: decoder !== null ? decoder.decodeQueueSize : 0,
-            pendingFrames: pendingFrames.length
+            pendingFrames: pendingFrames.length,
+            avgDecodeTime: avgDecodeTime.toFixed(2),
+            received: framesReceived,
+            sent: framesSent,
+            dropped: framesDropped,
+            processTime: processTime.toFixed(2),
+            directMode: directMode
         });
     } catch (e) {
         self.postMessage({error: e.toString()});
     }
     
-    // Si d'autres frames sont disponibles, continuer le rendu
     if (pendingFrames.length > 0) {
-        setTimeout(renderFrame, 0);
+        // Continuer à traiter les frames si disponibles
+        renderFrame();
     }
 }
+
+// ========== NAL Processing Functions ==========
 
 function separateNalUnits(event){
-    const dat = new Uint8Array(event.data);
-    videoMagic(dat);
+    let i = -1;
+    return event
+        .reduce((output, value, index, self) => {
+            if (value === 0 && self[index + 1] === 0 && self[index + 2] === 0 && self[index + 3] === 1) {
+                i++;
+            }
+            if (!output[i]) {
+                output[i] = [];
+            }
+            output[i].push(value);
+            return output;
+        }, [])
+        .map(dat => Uint8Array.from(dat));
 }
 
-function videoMagic(dat) {
-    // Essayer d'abord avec le décodage direct si semble être le bon format
-    if (isDirectStreamMessage(dat.buffer || dat)) {
-        if (!isDirectMode) {
-            isDirectMode = true;
-            console.log("Switching to direct stream mode");
-            postMessage({warning: "Switching to direct stream mode"});
-        }
-        
-        const shouldAck = handleDirectStreamMessage(dat.buffer || dat);
-        if (shouldAck) {
-            socket.sendObject({action: "ACK"});
-        }
+function videoMagic(dat){
+    framesReceived++;
+    
+    // Si trop de frames en attente, abandonner cette frame
+    if (pendingFrames.length > MAX_BUFFERED_FRAMES) {
+        framesDropped++;
         return;
-    } else if (isDirectMode) {
-        // Si nous étions en mode direct mais ce message ne l'est pas,
-        // revenir au mode normal
-        isDirectMode = false;
-        console.log("Switching back to normal mode from direct mode");
     }
     
-    // Mode legacy - traitement normal des frames
+    const decodeStartTime = performance.now();
+    
     let unittype = (dat[4] & 0x1f);
     if (unittype === 1) {
-        headerMagic(dat);
-    } else if (unittype === 5) {
-        console.log("IDR FRAME");
-        headerMagic(dat);
-    } else if (unittype === 7) {
-        sps = dat;
-    } else if (unittype === 8 && sps) {
-        if(decoder) {
-            try {
-                console.log("DECODER CONFIGURE");
-                const config = {
-                    codec: "avc1.640028",
-                    codedWidth: width,
-                    codedHeight: height
-                };
-                const desc = appendByteArray(sps, dat);
-                const avcc = [0, 0, 0, 1];
-                if (desc[0] !== 0) config.description = Uint8Array.from(appendByteArray(avcc, appendByteArray(sps, appendByteArray(avcc, dat))));
-                else config.description = Uint8Array.from(appendByteArray(sps, dat));
-
-                decoder.configure(config);
-                decoder.decode(new EncodedVideoChunk({type: "key", timestamp: 0, data: config.description}));
-            } catch (e) {
-                switchToBroadway();
-                if(broadwayDecoder) {
-                    broadwayDecoder.decode(sps);
-                    broadwayDecoder.decode(dat);
+        if(decoder !== null) {
+            let chunk = new EncodedVideoChunk({
+                type: 'delta',
+                timestamp: decodeStartTime,
+                duration: 0,
+                data: dat
+            });
+            if (decoder.state !== 'closed') {
+                try {
+                    decoder.decode(chunk);
+                    
+                    // Mise à jour des stats de décodage
+                    decodeTimeTotal += (performance.now() - decodeStartTime);
+                    decodeTimeCount++;
+                    if (decodeTimeCount >= 10) {
+                        avgDecodeTime = decodeTimeTotal / decodeTimeCount;
+                        decodeTimeTotal = 0;
+                        decodeTimeCount = 0;
+                    }
+                } catch (e) {
+                    console.error("Video decoder error", e);
+                    switchToBroadway();
                 }
+            } else {
+                switchToBroadway();
             }
-        } else if(broadwayDecoder) {
-            broadwayDecoder.decode(sps);
+        }
+
+        if(broadwayDecoder !== null) {
             broadwayDecoder.decode(dat);
         }
-    } else {
-        console.log("Unknown NAL UNIT " + unittype);
+        return;
+    }
+
+    if (unittype === 5) {
+        let data = appendByteArray(sps, dat);
+        if(decoder !== null) {
+            let chunk = new EncodedVideoChunk({
+                type: 'key',
+                timestamp: decodeStartTime,
+                duration: 0,
+                data: data
+            });
+            if (decoder.state !== 'closed') {
+                try {
+                    decoder.decode(chunk);
+                    
+                    // Mise à jour des stats de décodage
+                    decodeTimeTotal += (performance.now() - decodeStartTime);
+                    decodeTimeCount++;
+                    if (decodeTimeCount >= 10) {
+                        avgDecodeTime = decodeTimeTotal / decodeTimeCount;
+                        decodeTimeTotal = 0;
+                        decodeTimeCount = 0;
+                    }
+                } catch (e) {
+                    console.error("Video decoder error", e);
+                    switchToBroadway();
+                }
+            } else {
+                switchToBroadway();
+            }
+        }
+
+        if(broadwayDecoder !== null) {
+            broadwayDecoder.decode(data);
+        }
     }
 }
 
 function headerMagic(dat) {
-    if(decoder && decoder.state === "configured") {
-        try {
-            decoder.decode(new EncodedVideoChunk({type: "key", timestamp: 0, data: dat}));
-        } catch (e) {
-            switchToBroadway();
-            if(broadwayDecoder) broadwayDecoder.decode(dat);
+    let unittype = (dat[4] & 0x1f);
+
+    if (unittype === 7) {
+        let config = {
+            codec: "avc1.",
+            codedHeight: height,
+            codedWidth: width,
+        };
+        for (let i = 5; i < 8; ++i) {
+            var h = dat[i].toString(16);
+            if (h.length < 2) {
+                h = '0' + h;
+            }
+            config.codec += h;
         }
-    } else if(broadwayDecoder) {
-        broadwayDecoder.decode(dat);
+        sps = dat;
+        if(decoder !== null) {
+            try {
+                decoder.configure(config);
+            } catch (exc) {
+                console.error("Error configuring decoder:", exc);
+                switchToBroadway();
+            }
+        }
+
+        return;
     }
+    else if (unittype === 8)
+        sps=appendByteArray(sps,dat);
+    else
+        videoMagic(dat);
 }
 
+// ========== Socket and Message Handling ==========
+
 function noPong() {
-    postMessage({error: "no pong received in 10s"});
+    self.postMessage({error: "no pong"});
 }
 
 function heartbeat() {
-    heart++;
-    clearTimeout(pongtimer);
-    pongtimer = setTimeout(noPong, 10000);
-    socket.sendObject(
-        {action: "PING", heart: heart, pendingFrames: pendingFrames.length}
-    );
+    if (lastheart !== 0) {
+        if ((Date.now() - lastheart) > 3000) {
+            if (socket.readyState === WebSocket.OPEN) {
+                try {
+                    socket.sendObject({action: "START"});
+                } catch (e) {
+                    self.postMessage({error: e});
+                    startSocket();
+                }
+            }
+        }
+    }
+
+    lastheart = Date.now();
+    socket.sendObject({action: "PING"});
 }
 
 function handleMessage(event) {
-    const data = event.data;
+    const dat = new Uint8Array(event.data);
     
-    // Détecter si c'est un buffer binaire ou un objet JSON
-    if (data instanceof ArrayBuffer) {
-        // Données binaires - vidéo
-        videoMagic(new Uint8Array(data));
-    } else if (data instanceof Uint8Array) {
-        // Compatibilité avec l'ancien format
-        videoMagic(data);
-    } else {
-        // Objet JSON - messages de contrôle
-        handleControlMessage(data);
+    // Réinitialiser le compteur d'ACKs à chaque message
+    acksInFlight = 0;
+    
+    // NOUVEAU: Si c'est une réponse spéciale
+    if (dat.length > 5 && dat[0] === 0xFF) {
+        if (dat[1] === 0x01) {
+            // Commande pour basculer le mode (0x01 = Switch Mode)
+            directMode = dat[2] === 1;
+            self.postMessage({
+                warning: "Mode changed to " + (directMode ? "DIRECT (Web decode)" : "LEGACY (Android decode)")
+            });
+        }
+        return;
     }
+    
+    handleVideoMessage(dat);
 }
 
-function handleControlMessage(data) {
-    if (data.heart) {
-        lastheart = data.heart;
+function handleVideoMessage(dat){
+    // Vérifier si c'est un PONG
+    let unittype = (dat[4] & 0x1f);
+    if (unittype === 31) {
+        if (pongtimer !== null)
+            clearTimeout(pongtimer);
+
+        pongtimer=setTimeout(noPong,3000);
+        return;
     }
     
-    if (data.action === "PONG") {
-        clearTimeout(pongtimer);
-    } else if (data.action === "NIGHT") {
-        night = data.night === 1;
+    if (directMode) {
+        // En mode direct, on traite tout comme des unités NAL H.264
+        separateNalUnits(dat).forEach(headerMagic);
+    } else {
+        // En mode legacy, on fait comme avant
+        if (unittype === 1 || unittype === 5)
+            videoMagic(dat);
+        else
+            separateNalUnits(dat).forEach(headerMagic);
     }
 }
 
 function startSocket() {
-    class WebSocketClient {
-        constructor(host, protocol) {
-            this.host = host;
-            this.protocol = protocol;
-            this.reconnectTimeoutId = null;
-            this.socket = null;
-            this.reconnectInterval = 1000;
+    socket = new WebSocket(`wss://taada.top:${port}`);
+    socket.sendObject = (obj) => {
+        try {
+            socket.send(JSON.stringify(obj));
         }
-
-        connect() {
-            try {
-                this.socket = new WebSocket(this.host, this.protocol);
-                this.socket.binaryType = "arraybuffer";
-
-                this.socket.addEventListener("open", () => {
-                    console.log("WebSocket connection established");
-                    setInterval(heartbeat, 1000);
-                    this.reconnectInterval = 1000;
-                });
-
-                this.socket.addEventListener("message", handleMessage);
-
-                this.socket.addEventListener("close", socketClose);
-
-                this.socket.addEventListener("error", (error) => {
-                    console.error("WebSocket error:", error);
-                });
-            } catch (e) {
-                console.error("Error creating WebSocket:", e);
-                this.scheduleReconnect();
-            }
-        }
-
-        sendObject(obj) {
-            if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-                this.socket.send(JSON.stringify(obj));
-            }
-        }
-
-        scheduleReconnect() {
-            clearTimeout(this.reconnectTimeoutId);
-            this.reconnectTimeoutId = setTimeout(() => {
-                postMessage({error: "Reconnecting..."});
-                this.connect();
-                this.reconnectInterval = Math.min(this.reconnectInterval * 1.5, 30000);
-            }, this.reconnectInterval);
+        catch (e)
+        {
+            self.postMessage({error:e});
         }
     }
 
-    socket = new WebSocketClient(`wss://taada.top:${port}`, "binary");
-    socket.connect();
+    socket.binaryType = "arraybuffer";
+    socket.addEventListener('open', () => {
+        socket.binaryType = "arraybuffer";
+        socket.sendObject({action: "START"});
+        socket.sendObject({action: "NIGHT", value: night});
+        
+        // NOUVEAU: Indiquer au serveur qu'on supporte le mode direct
+        socket.sendObject({action: "CAPABILITY", direct_decode: true});
+        
+        if (heart === 0) {
+            heart = setInterval(heartbeat, 200);
+            setInterval(updateFrameCounter, 1000);
+        }
+    });
+
+    socket.addEventListener('close', event => socketClose(event));
+    socket.addEventListener('error', event => socketClose(event));
+    socket.addEventListener('message', event => handleMessage(event));
 }
 
 function socketClose(event) {
-    postMessage({error: `WebSocket connection closed: ${event.reason || "No reason provided"}`});
-    socket.scheduleReconnect();
+    console.log('Error: Socket Closed ', event);
+    self.postMessage({error: "Reconnecting..."});
+    startSocket();
 }
 
 async function isWebCodecsWorkingWithDecode() {
     try {
-        if (typeof VideoDecoder === 'undefined') {
-            return false;
-        }
-
-        // Try creating a VideoDecoder instance
-        const decoder = new VideoDecoder({
-            output: () => {},
-            error: () => {}
+        const sample = new Uint8Array([
+            0,0,0,1,103,66,0,42,218,1,224,8,159,150,106,2,2,2,15,20,42,160,0,0,0,1,104,206,13,136,0,0,0,1,101,184,79,255,254,30,66,128,0,128,95,147,21,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,21,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,146,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,185,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,46,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,75,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,192
+        ]);
+        return await new Promise((resolve) => {
+            const decoder = new VideoDecoder({
+                output: (frame) => {
+                    frame.close();
+                    resolve(true);
+                },
+                error: () => resolve(false)
+            });
+            decoder.configure({codec: 'avc1.42002a', codedHeight: 1080, codedWidth: 1920});
+            const chunk = new EncodedVideoChunk({
+                type: "key",
+                timestamp: 0,
+                data: sample
+            });
+            decoder.decode(chunk);
+            // fallback in case output or error doesn't fire
+            setTimeout(() => resolve(false), 1000);
         });
-
-        // Clean up
-        decoder.close();
-        return true;
     } catch (e) {
         return false;
     }
 }
 
+
+let appVersion= 22;
+let initted = false;
+let postInitJobs = [];
 function messageHandler(message) {
-    const data = message.data;
-    
-    if (data.canvas) {
-        let useBroadway = false;
-        
-        if (data.broadway) {
-            useBroadway = true;
-        }
-        
-        initCanvas(data.canvas, useBroadway);
-        port = data.port;
-    } else if (data.action === "GPS") {
-        if (socket) {
-            socket.sendObject({
-                action: "GPS",
-                accuracy: data.accuracy,
-                latitude: data.latitude,
-                longitude: data.longitude,
-                altitude: data.altitude,
-                heading: data.heading,
-                speed: data.speed
-            });
-        }
-    } else if (data.action === "KEY") {
-        if (socket) {
-            socket.sendObject({
-                action: "KEY",
-                key: data.key
-            });
-        }
-    } else {
-        console.error("Unknown message:", data);
+    if (message.data.action === 'NIGHT') {
+        night = message.data.value;
+    }
+    if (socket.readyState === WebSocket.OPEN) {
+        socket.sendObject(message.data);
     }
 }
 
-// Écouter les messages de la page principale
-addEventListener("message", messageHandler);
+self.addEventListener('message', async (message) => {
+    if (message.data.action === 'INIT') {
+        port = message.data.port;
+        appVersion=parseInt(message.data.appVersion);
+
+
+        let useBroadway = message.data.broadway;
+
+        if(!useBroadway) {
+            const codecWorking = await isWebCodecsWorkingWithDecode();
+            if(codecWorking) {
+                console.log("webcodec functional");
+            } else {
+                console.log("webcodec broken");
+                useBroadway = true;
+            }
+        }
+
+        initCanvas(message.data.canvas, useBroadway);
+        initted = true;
+        if(postInitJobs.length > 0){
+            postInitJobs.forEach(msg => messageHandler(msg));
+            postInitJobs = []
+        }
+    } else if(!initted) {
+        postInitJobs.push(message);
+    } else {
+        messageHandler(message)
+    }
+});

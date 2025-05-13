@@ -43,3 +43,133 @@ span {
     color: red;
     font-size: 1.4em;
 }
+
+body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+    background-color: black;
+    color: white;
+    font-family: 'Montserrat', sans-serif;
+}
+
+canvas {
+    width: 100%;
+    height: 100vh;
+    object-fit: contain;
+    z-index: 1;
+    display: none;
+}
+
+#info {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    color: white;
+    z-index: 10;
+    text-align: center;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+#log {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    color: white;
+    background-color: rgba(0, 0, 0, 0.7);
+    padding: 5px 10px;
+    font-size: 12px;
+    z-index: 100;
+}
+
+#warning {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background-color: rgba(255, 0, 0, 0.8);
+    color: white;
+    padding: 20px;
+    border-radius: 10px;
+    font-size: 16px;
+    display: none;
+    z-index: 1000;
+    text-align: center;
+    max-width: 80%;
+}
+
+#muteicon {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    width: 40px;
+    height: 40px;
+    background-color: rgba(0, 0, 0, 0.5);
+    border-radius: 50%;
+    display: none;
+    z-index: 200;
+    cursor: pointer;
+    padding: 5px;
+}
+
+#muteicon img {
+    width: 100%;
+    height: 100%;
+}
+
+/* Styles pour les contrôles du POC */
+#controls {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 300;
+    background-color: rgba(0, 0, 0, 0.7);
+    border-radius: 8px;
+    padding: 10px;
+    color: white;
+    font-size: 14px;
+    width: auto;
+    max-width: 300px;
+}
+
+.control-panel {
+    margin-bottom: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.stats-panel {
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+button {
+    background-color: #2c87c5;
+    color: white;
+    border: none;
+    padding: 8px 15px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+button:hover {
+    background-color: #1a6ca3;
+}
+
+#decodeMode {
+    font-weight: 600;
+    margin-top: 5px;
+}
