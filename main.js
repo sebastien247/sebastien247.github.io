@@ -1,4 +1,4 @@
-const demuxDecodeWorker = new Worker("./async_decoder.js"),
+const demuxDecodeWorker = new Worker("./async_decoder_nal.js"),
     latestVersion = 2,
     logElement = document.getElementById('log'),
     warningElement = document.getElementById('warning'),
@@ -6,18 +6,6 @@ const demuxDecodeWorker = new Worker("./async_decoder.js"),
     bodyElement = document.querySelector('body'),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     urlToFetch = `https://taada.top:8081/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
-
-// Éléments UI pour le POC
-const toggleDecodeButton = document.getElementById('toggleDecode'),
-      decodeModeElement = document.getElementById('decodeMode'),
-      fpsValueElement = document.getElementById('fpsValue'),
-      decodeTimeElement = document.getElementById('decodeTime'),
-      framesReceivedElement = document.getElementById('framesReceived'),
-      framesSentElement = document.getElementById('framesSent'),
-      controlsElement = document.getElementById('controls');
-
-// État du décodage
-let isDirectMode = true; // Par défaut, décodage côté Web
 
 let zoom = Math.max(1, window.innerHeight / 1080),
     appVersion = 0,
@@ -31,10 +19,13 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     socket,
     port,
     drageventCounter=0,
+
     timeoutId;
 
 canvasElement.style.display = "none";
-controlsElement.style.display = "none";
+
+
+
 
 function handlepossition(possition){
     demuxDecodeWorker.postMessage({
@@ -100,41 +91,6 @@ function findGetParameter(parameterName) {
     return result;
 }
 
-// Fonction pour basculer le mode de décodage
-function toggleDecodeMode() {
-    isDirectMode = !isDirectMode;
-    
-    // Mettre à jour l'UI
-    decodeModeElement.textContent = `Mode actuel: ${isDirectMode ? 'Web (direct)' : 'Android (décodé)'}`;
-    
-    // Envoyer la commande au worker
-    demuxDecodeWorker.postMessage({
-        action: 'TOGGLE_DIRECT_MODE',
-        value: isDirectMode
-    });
-    
-    // Envoyer une commande spéciale au serveur Android (si connecté)
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        const data = {
-            action: "CODEC_MODE",
-            direct: isDirectMode
-        };
-        socket.send(JSON.stringify(data));
-    }
-    
-    // Afficher un message
-    warningElement.style.display = "block";
-    warningElement.innerText = `Changement vers le mode de décodage ${isDirectMode ? 'Web' : 'Android'}`;
-    setTimeout(() => {
-        warningElement.style.display = "none";
-    }, 2000);
-}
-
-// Attacher l'événement au bouton
-if (toggleDecodeButton) {
-    toggleDecodeButton.addEventListener('click', toggleDecodeMode);
-}
-
 function postWorkerMessages(json) {
     if (json.hasOwnProperty("wrongresolution")) {
         alert("Browser resolution doesn't match app resolution. Updating values and restarting app.");
@@ -192,9 +148,11 @@ function postWorkerMessages(json) {
     {
         usebt = json.usebt;
         document.getElementById("muteicon").style.display="block";
+
     }
 
     demuxDecodeWorker.addEventListener("message", function (e) {
+
         if (e.data.hasOwnProperty('error')) {
             console.error('Socket error received:', e.data.error);
             forcedRefreshCounter++;
@@ -212,7 +170,7 @@ function postWorkerMessages(json) {
                 // Use a delayed reload to allow logging to appear
                 setTimeout(function() {
                     console.log("Reloading page due to connection error");
-                    document.location.reload();
+            document.location.reload();
                 }, 2000);
             } else {
                 // For less critical errors, just show a warning
@@ -237,22 +195,10 @@ function postWorkerMessages(json) {
             },2000);
         }
 
-        // Affichage des infos de débogage
         if (debug) {
             logElement.innerText = `${height}p - FPS ${e.data.fps}, decoder que: ${e.data.decodeQueueSize}, pendingFrame: ${e.data.pendingFrames}, forced refresh counter: ${forcedRefreshCounter}`;
         }
-        
-        // Mise à jour des statistiques de performance pour l'UI du POC
-        if (e.data.hasOwnProperty('fps')) {
-            fpsValueElement.textContent = e.data.fps || 0;
-        }
-        if (e.data.hasOwnProperty('avgDecodeTime')) {
-            decodeTimeElement.textContent = `${e.data.avgDecodeTime || 0} ms`;
-        }
-        if (e.data.hasOwnProperty('received') && e.data.hasOwnProperty('sent')) {
-            framesReceivedElement.textContent = e.data.received || 0;
-            framesSentElement.textContent = e.data.sent || 0;
-        }
+
     });
 
     if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
@@ -266,7 +212,6 @@ function postWorkerMessages(json) {
     });
 
     canvasElement.style.display = "block";
-    controlsElement.style.display = "block";
     document.getElementById("info").style.display = "none";
     //setInterval(function(){navigator.geolocation.getCurrentPosition(handlepossition);},500);
 }
