@@ -62,22 +62,6 @@
             cursor: not-allowed;
         }
         
-        button.danger {
-            background-color: #e74c3c;
-        }
-        
-        button.danger:hover {
-            background-color: #c0392b;
-        }
-        
-        button.success {
-            background-color: #2ecc71;
-        }
-        
-        button.success:hover {
-            background-color: #27ae60;
-        }
-        
         .button-container {
             display: flex;
             flex-direction: column;
@@ -88,33 +72,9 @@
             min-height: 100px;
         }
         
-        .connection-status {
-            display: flex;
-            gap: 10px;
-            margin-top: 10px;
-        }
-        
-        .status-indicator {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background-color: #95a5a6;
-            margin-right: 5px;
-        }
-        
-        .status-indicator.active {
-            background-color: #2ecc71;
-        }
-        
-        .status-indicator.error {
-            background-color: #e74c3c;
-        }
-        
         .log-panel {
             flex: 1;
             min-height: 200px;
-            max-height: 300px;
             overflow-y: auto;
             font-family: monospace;
             white-space: pre-wrap;
@@ -206,12 +166,6 @@
         input:checked + .slider:before {
             transform: translateX(26px);
         }
-        
-        .actions-row {
-            display: flex;
-            gap: 10px;
-            margin-top: 10px;
-        }
     </style>
 </head>
 <body>
@@ -226,10 +180,6 @@
             <div class="button-container">
                 <button id="getPortsBtn">1. Récupérer les ports</button>
                 <button id="connectBtn" disabled>2. Connecter aux sockets et décoder</button>
-                <div class="actions-row">
-                    <button id="disconnectBtn" class="danger" disabled>Déconnecter</button>
-                    <button id="sendAckBtn" class="success" disabled>Envoyer ACK manuel</button>
-                </div>
                 <div class="mode-toggle">
                     <span>Mode de décodage:</span>
                     <label class="switch">
@@ -244,20 +194,6 @@
         <div class="panel status-panel">
             <h2>Statut</h2>
             <div id="status">En attente...</div>
-            <div class="connection-status">
-                <div>
-                    <span class="status-indicator" id="mainSocketStatus"></span>
-                    Socket Principal
-                </div>
-                <div>
-                    <span class="status-indicator" id="decoderStatus"></span>
-                    Décodeur
-                </div>
-                <div>
-                    <span class="status-indicator" id="frameStatus"></span>
-                    Réception Frames
-                </div>
-            </div>
         </div>
         
         <canvas id="videoCanvas"></canvas>
@@ -291,18 +227,11 @@
         // Éléments DOM
         const getPortsBtn = document.getElementById('getPortsBtn');
         const connectBtn = document.getElementById('connectBtn');
-        const disconnectBtn = document.getElementById('disconnectBtn');
-        const sendAckBtn = document.getElementById('sendAckBtn');
         const statusEl = document.getElementById('status');
         const logPanel = document.getElementById('logPanel');
         const canvasElement = document.getElementById('videoCanvas');
         const decodeModeToggle = document.getElementById('decodeMode');
         const decodeModeLabel = document.getElementById('decodeModeLabel');
-        
-        // Indicateurs de statut
-        const mainSocketStatus = document.getElementById('mainSocketStatus');
-        const decoderStatus = document.getElementById('decoderStatus');
-        const frameStatus = document.getElementById('frameStatus');
         
         // Éléments statistiques
         const fpsValueElement = document.getElementById('fpsValue');
@@ -312,14 +241,11 @@
         
         // Configuration
         const supportedWebCodec = true;
-        // Changer l'URL si nécessaire pour le test local
-        const baseUrl = window.location.protocol + '//' + window.location.hostname + ':8081';
+        const baseUrl = 'https://taada.top:8081';
         let demuxDecodeWorker = null;
         let offscreen = null;
         let socketPort = null;
         let isDirectMode = true;
-        let lastFrameTime = Date.now();
-        let frameTimeout = null;
         
         // Fonction de log avec timestamp
         function log(message, isError = false) {
@@ -338,23 +264,6 @@
             console.log(formattedMessage);
         }
         
-        // Mise à jour des indicateurs de statut
-        function updateStatus(element, status) {
-            element.className = 'status-indicator ' + status;
-        }
-        
-        // Vérification du timeout de frame
-        function checkFrameTimeout() {
-            const now = Date.now();
-            if (now - lastFrameTime > 5000) {
-                // Pas de frame depuis 5 secondes
-                updateStatus(frameStatus, 'error');
-                log('Aucune frame reçue depuis 5 secondes', true);
-            } else {
-                frameTimeout = setTimeout(checkFrameTimeout, 1000);
-            }
-        }
-        
         // Étape 1: Récupérer les ports
         getPortsBtn.addEventListener('click', async () => {
             try {
@@ -363,18 +272,15 @@
                 getPortsBtn.disabled = true;
                 
                 const urlToFetch = `${baseUrl}/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
-                log(`URL: ${urlToFetch}`);
                 
                 const response = await fetch(urlToFetch);
                 const data = await response.text();
                 
                 if (!isJson(data)) {
-                    log(`Réponse non-JSON: ${data}`, true);
                     throw new Error("Le serveur n'a pas renvoyé un JSON valide. Vérifiez que TeslAA 2.3+ est en cours d'exécution.");
                 }
                 
                 const json = JSON.parse(data);
-                log(`Réponse détaillée: ${JSON.stringify(json)}`);
                 
                 if (json.hasOwnProperty("wrongresolution")) {
                     throw new Error("La résolution du navigateur ne correspond pas à celle de l'application.");
@@ -417,13 +323,11 @@
                 
                 // Configurer les écouteurs d'événements
                 setupWorkerListeners();
-                updateStatus(decoderStatus, 'active');
                 
                 // Transférer le canvas au worker
                 offscreen = canvasElement.transferControlToOffscreen();
                 
                 // Initialiser le décodeur avec le canvas
-                log(`Initialisation du worker avec le port: ${socketPort}`);
                 demuxDecodeWorker.postMessage({
                     canvas: offscreen, 
                     port: socketPort, 
@@ -434,70 +338,10 @@
                 
                 log('Décodeur initialisé, connexion aux sockets établie');
                 statusEl.textContent = 'Connexion établie. Décodage en cours...';
-                
-                // Activer boutons supplémentaires
-                disconnectBtn.disabled = false;
-                sendAckBtn.disabled = false;
-                
-                // Démarrer la vérification des frames
-                updateStatus(mainSocketStatus, 'active');
-                lastFrameTime = Date.now();
-                frameTimeout = setTimeout(checkFrameTimeout, 1000);
-                
             } catch (error) {
                 log(`Erreur lors de la connexion: ${error.message}`, true);
                 statusEl.textContent = 'Erreur: ' + error.message;
                 connectBtn.disabled = false;
-                updateStatus(decoderStatus, 'error');
-            }
-        });
-        
-        // Déconnexion
-        disconnectBtn.addEventListener('click', () => {
-            if (demuxDecodeWorker) {
-                log('Déconnexion du décodeur...');
-                demuxDecodeWorker.terminate();
-                demuxDecodeWorker = null;
-                
-                // Réinitialiser UI
-                connectBtn.disabled = false;
-                disconnectBtn.disabled = true;
-                sendAckBtn.disabled = true;
-                updateStatus(mainSocketStatus, '');
-                updateStatus(decoderStatus, '');
-                updateStatus(frameStatus, '');
-                
-                // Créer un nouveau canvas (puisque l'ancien a été transféré)
-                const newCanvas = document.createElement('canvas');
-                newCanvas.id = 'videoCanvas';
-                newCanvas.width = canvasElement.width;
-                newCanvas.height = canvasElement.height;
-                newCanvas.style.width = '100%';
-                newCanvas.style.height = '300px';
-                newCanvas.style.backgroundColor = 'black';
-                newCanvas.style.marginTop = '20px';
-                newCanvas.style.borderRadius = '8px';
-                
-                canvasElement.parentNode.replaceChild(newCanvas, canvasElement);
-                canvasElement = newCanvas;
-                
-                statusEl.textContent = 'Déconnecté. Prêt à se reconnecter.';
-                
-                // Arrêter le timeout
-                if (frameTimeout) {
-                    clearTimeout(frameTimeout);
-                    frameTimeout = null;
-                }
-            }
-        });
-        
-        // Envoi d'un ACK manuel
-        sendAckBtn.addEventListener('click', () => {
-            if (demuxDecodeWorker) {
-                log('Envoi manuel d\'un ACK au serveur');
-                demuxDecodeWorker.postMessage({
-                    action: 'SEND_ACK'
-                });
             }
         });
         
@@ -507,7 +351,6 @@
                 if (e.data.hasOwnProperty('error')) {
                     log(`Erreur du décodeur: ${e.data.error}`, true);
                     statusEl.textContent = 'Erreur: ' + e.data.error;
-                    updateStatus(mainSocketStatus, 'error');
                     return;
                 }
                 
@@ -525,20 +368,8 @@
                 }
                 
                 if (e.data.hasOwnProperty('received') && e.data.hasOwnProperty('sent')) {
-                    // Mise à jour du timestamp de dernière frame
-                    lastFrameTime = Date.now();
-                    updateStatus(frameStatus, 'active');
-                    
-                    // Mettre à jour les compteurs
-                    const received = e.data.received || 0;
-                    const sent = e.data.sent || 0;
-                    framesReceivedElement.textContent = received;
-                    framesSentElement.textContent = sent;
-                    
-                    // Log détaillé pour les premières frames
-                    if (received <= 5 || received % 10 === 0) {
-                        log(`Frames: ${received} reçues, ${sent} envoyées, FPS: ${e.data.fps}, Décodage: ${e.data.avgDecodeTime || 0}ms`);
-                    }
+                    framesReceivedElement.textContent = e.data.received || 0;
+                    framesSentElement.textContent = e.data.sent || 0;
                 }
             });
         }
@@ -572,11 +403,6 @@
         
         // Initialisation
         log('Page de test initialisée');
-        
-        // Gestion des erreurs globales
-        window.addEventListener('error', function(event) {
-            log(`Erreur JavaScript: ${event.message} à ${event.filename}:${event.lineno}`, true);
-        });
     </script>
 </body>
 </html> 
