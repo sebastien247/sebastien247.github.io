@@ -7,7 +7,7 @@ const demuxDecodeWorker = new Worker("./async_decoder.js"),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     urlToFetch = `https://taada.top:8081/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
 
-let zoom = 1, // Valeur par défaut, sera calculé dynamiquement
+let zoom = Math.max(1, window.innerHeight / 1080),
     appVersion = 0,
     offscreen = null,
     forcedRefreshCounter = 0,
@@ -22,12 +22,7 @@ let zoom = 1, // Valeur par défaut, sera calculé dynamiquement
 
     timeoutId;
 
-// Initialisation des styles du canvas
 canvasElement.style.display = "none";
-canvasElement.style.margin = "0 auto";
-canvasElement.style.maxWidth = "100%";
-canvasElement.style.maxHeight = "100vh";
-canvasElement.style.objectFit = "contain";
 
 
 
@@ -103,6 +98,39 @@ function postWorkerMessages(json) {
         return;
     }
     
+    if (json.hasOwnProperty("resolutionChanged")) {
+        console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
+        
+        // Ajuster le canvas sans recharger la page
+        width = json.width;
+        height = json.height;
+        
+        canvasElement.width = width;
+        canvasElement.height = height;
+        
+        // Recalculer le zoom
+        zoom = Math.max(1, window.innerHeight / height);
+        canvasElement.style.transform = "scale(" + zoom + ")";
+        
+        // Informer le worker de la nouvelle résolution
+        demuxDecodeWorker.postMessage({
+            action: "RESIZE", 
+            width: width, 
+            height: height
+        });
+        
+        // Nettoyer les buffers existants et demander un nouveau keyframe
+        demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
+        
+        // Afficher un message temporaire
+        warningElement.style.display = "block";
+        logElement.style.display = "none";
+        warningElement.innerText = "Résolution ajustée à " + width + "x" + height;
+        setTimeout(function() {
+            warningElement.style.display = "none";
+            logElement.style.display = "block";
+        }, 3000);
+    }
     if (json.hasOwnProperty("debug")) {
         debug = json.debug;
     }
@@ -110,36 +138,21 @@ function postWorkerMessages(json) {
         usebt = json.usebt;
     }
     port = json.port;
-    
-    if (json.hasOwnProperty("width") && json.hasOwnProperty("height")) {
-        width = json.width;
-        height = json.height;
-        console.log("Resolution adjusted dynamically to " + width + "x" + height);
-        // Calcul optimal du zoom pour éviter déformation
-        zoom = Math.min(window.innerWidth / width, window.innerHeight / height);
-    } else if (json.resolution === 2) {
+    if (json.resolution === 2) {
         width = 1920;
         height = 1080;
-        zoom = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+        zoom = Math.max(1, window.innerHeight / 1080);
     } else if (json.resolution === 1) {
         width = 1280;
         height = 720;
-        zoom = Math.min(window.innerWidth / 1280, window.innerHeight / 720);
+        zoom = Math.max(1, window.innerHeight / 720);
+        document.querySelector("canvas").style.height = "max(100vh,720px)";
     } else {
         width = 800;
         height = 480;
-        zoom = Math.min(window.innerWidth / 800, window.innerHeight / 480);
+        zoom = Math.max(1, window.innerHeight / 480);
+        document.querySelector("canvas").style.height = "max(100vh,480px)";
     }
-    
-    // Utiliser CSS pour centrer le canvas dans la fenêtre
-    canvasElement.style.display = "block";
-    canvasElement.style.margin = "0 auto";
-    canvasElement.style.maxWidth = "100%";
-    canvasElement.style.maxHeight = "100vh";
-    canvasElement.style.objectFit = "contain";
-    
-    console.log("New dimensions: " + width + "x" + height + " with zoom: " + zoom);
-    
     if (json.hasOwnProperty("buildversion")) {
         appVersion = parseInt(json.buildversion);
         if (latestVersion > parseInt(json.buildversion)) {
@@ -157,40 +170,13 @@ function postWorkerMessages(json) {
 
     const forceBroadway = findGetParameter("broadway") === "1";
 
-    // Définir les dimensions du canvas AVANT de le transférer au worker
-    // C'est crucial car après transferControlToOffscreen(), on ne peut plus le modifier
+
     canvasElement.width = width;
     canvasElement.height = height;
 
     offscreen = canvasElement.transferControlToOffscreen();
 
-    demuxDecodeWorker.postMessage({
-        canvas: offscreen, 
-        port: port, 
-        action: 'INIT',
-        width: width,
-        height: height,
-        zoom: zoom,
-        appVersion: appVersion, 
-        broadway: forceBroadway
-    }, [offscreen]);
-    
-    // If resolution has changed, send a message to ensure proper resizing
-    if (json.hasOwnProperty("resolutionChanged") && json.resolutionChanged === true) {
-        // Impossible de redimensionner le canvas après transferControlToOffscreen
-    // On doit uniquement envoyer les dimensions au worker
-        
-        // Send resize information to the worker
-        demuxDecodeWorker.postMessage({
-            action: "RESIZE", 
-            width: width, 
-            height: height,
-            zoom: zoom
-        });
-        
-        // Clear buffers and request a new keyframe
-        demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
-    }
+    demuxDecodeWorker.postMessage({canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway}, [offscreen]);
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
