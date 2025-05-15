@@ -108,6 +108,7 @@ function switchToBroadway() {
 
 function initCanvas(canvas, forceBroadway) {
 
+    // Stocker les dimensions initiales du canvas
     height = canvas.height;
     width = canvas.width;
 
@@ -522,6 +523,23 @@ self.addEventListener('message', async (message) => {
         if (gl) {
             gl.viewport(0, 0, width, height);
         }
+    } else if (message.data.action === 'CANVAS_RESIZE') {
+        // Gestion du redimensionnement du canvas (offscreen)
+        console.log("Resizing canvas to " + message.data.width + "x" + message.data.height);
+        
+        // Accéder au canvas et le redimensionner
+        const canvas = gl.canvas;
+        canvas.width = message.data.width;
+        canvas.height = message.data.height;
+        
+        // Ajuster le viewport WebGL pour correspondre aux nouvelles dimensions
+        gl.viewport(0, 0, message.data.width, message.data.height);
+        
+        // Mettre à jour les variables globales
+        width = message.data.width;
+        height = message.data.height;
+        
+        self.postMessage({info: "Canvas resized to " + width + "x" + height});
     } else if (message.data.action === 'CLEAR_BUFFERS') {
         // Vider les tampons de frames en attente
         console.log("Clearing pending frames buffer, had " + pendingFrames.length + " frames");
