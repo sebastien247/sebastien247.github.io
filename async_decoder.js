@@ -115,9 +115,17 @@ function switchToBroadway() {
 }
 
 function initCanvas(canvas, forceBroadway) {
-
-    height = canvas.height;
-    width = canvas.width;
+    // Récupérer les dimensions du canvas et vérifier si elles sont passées dans le message
+    if (message && message.data && message.data.width && message.data.height) {
+        console.log("Using width/height from init message: " + message.data.width + "x" + message.data.height);
+        width = message.data.width;
+        height = message.data.height;
+    } else {
+        width = canvas.width;
+        height = canvas.height;
+    }
+    
+    console.log("Initializing canvas with dimensions: " + width + "x" + height);
 
     gl = canvas.getContext('webgl2');
 
@@ -459,7 +467,13 @@ self.addEventListener('message', async (message) => {
     if (message.data.action === 'INIT') {
         port = message.data.port;
         appVersion=parseInt(message.data.appVersion);
-
+        
+        // Récupérer les dimensions spécifiées dans le message INIT si disponibles
+        if (message.data.width && message.data.height) {
+            width = message.data.width;
+            height = message.data.height;
+            console.log("Setting initial dimensions from INIT message: " + width + "x" + height);
+        }
 
         let useBroadway = message.data.broadway;
 
