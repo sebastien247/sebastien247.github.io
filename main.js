@@ -131,10 +131,7 @@ function postWorkerMessages(json) {
         zoom = 1;
     }
     
-    // Ajuster la taille du canvas pour correspondre exactement à la résolution de la vidéo
-    canvasElement.width = width;
-    canvasElement.height = height;
-    
+   
     // Utiliser CSS pour centrer le canvas dans la fenêtre
     canvasElement.style.display = "block";
     canvasElement.style.margin = "0 auto";
