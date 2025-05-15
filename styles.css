@@ -2,6 +2,7 @@
     font-family: 'Montserrat', sans-serif;
     margin: 0;
     padding: 0;
+    box-sizing: border-box;
 }
 
 html, body {
@@ -12,8 +13,7 @@ html, body {
     display: flex;
     justify-content: center;
     align-items: center;
-    text-align: center;
-    background: #494b4e;
+    background: #000;
     color: white;
     overscroll-behavior-x: none;
 }
@@ -21,11 +21,188 @@ html, body {
 canvas, video {
     width: auto;
     height: max(1080px, 100vh);
-
+    position: absolute;
+    z-index: 1;
 }
 
-span {
+.tesla-container {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.8);
+}
+
+.tesla-header {
+    text-align: center;
+    padding: 20px 0;
+}
+
+.tesla-header h1 {
     font-size: 3em;
+    font-weight: 600;
+    color: #e82127; /* Tesla Red */
+    margin-bottom: 5px;
+}
+
+.tesla-header h2 {
+    font-size: 1.5em;
+    font-weight: 400;
+    color: #ccc;
+}
+
+.tesla-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 30px;
+    padding: 20px;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.connection-status {
+    display: flex;
+    align-items: center;
+    background: rgba(26, 27, 31, 0.8);
+    border-radius: 12px;
+    padding: 20px;
+    width: 100%;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+}
+
+.status-icon {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #7DF9FF; /* Tesla Blue */
+    margin-right: 15px;
+    box-shadow: 0 0 10px #7DF9FF;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(125, 249, 255, 0.7);
+    }
+    70% {
+        transform: scale(1);
+        box-shadow: 0 0 0 10px rgba(125, 249, 255, 0);
+    }
+    100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(125, 249, 255, 0);
+    }
+}
+
+.status-message {
+    flex: 1;
+}
+
+.status-message p {
+    font-size: 1.2em;
+    margin-bottom: 5px;
+}
+
+.status-message .note {
+    font-size: 0.9em;
+    color: #aaa;
+}
+
+.notification-card {
+    display: flex;
+    align-items: flex-start;
+    background: rgba(26, 27, 31, 0.8);
+    border-radius: 12px;
+    padding: 20px;
+    width: 100%;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+    border-left: 4px solid #f9a825; /* Warning yellow */
+}
+
+.notification-icon {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 40px;
+    height: 40px;
+    margin-right: 15px;
+    color: #f9a825;
+}
+
+.notification-icon svg {
+    width: 30px;
+    height: 30px;
+}
+
+.notification-content h3 {
+    font-size: 1.3em;
+    margin-bottom: 10px;
+    color: #f9a825;
+}
+
+.notification-content p {
+    font-size: 1em;
+    line-height: 1.5;
+}
+
+.download-section {
+    background: rgba(26, 27, 31, 0.8);
+    border-radius: 12px;
+    padding: 20px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+}
+
+.download-section h3 {
+    font-size: 1.5em;
+    margin-bottom: 20px;
+    color: #7DF9FF;
+}
+
+.download-options {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 30px;
+}
+
+.qr-code {
+    background: white;
+    padding: 10px;
+    border-radius: 8px;
+}
+
+.qr-code img {
+    width: 150px;
+    height: 150px;
+}
+
+.play-store-button {
+    display: inline-block;
+    transition: transform 0.2s ease;
+}
+
+.play-store-button:hover {
+    transform: scale(1.05);
+}
+
+.play-store-button img {
+    height: 60px;
+}
+
+.tesla-footer {
+    padding: 20px 0;
+    display: flex;
+    justify-content: space-between;
 }
 
 #log {
@@ -40,6 +217,35 @@ span {
     position: absolute;
     bottom: 0;
     right: 10px;
-    color: red;
     font-size: 1.4em;
+    color: #e82127; /* Tesla Red */
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .tesla-content {
+        padding: 10px;
+    }
+    
+    .download-options {
+        flex-direction: column;
+    }
+    
+    .tesla-header h1 {
+        font-size: 2.5em;
+    }
+    
+    .tesla-header h2 {
+        font-size: 1.2em;
+    }
+}
+
+@media (max-height: 700px) {
+    .tesla-content {
+        gap: 15px;
+    }
+    
+    .connection-status, .notification-card, .download-section {
+        padding: 15px;
+    }
 }
