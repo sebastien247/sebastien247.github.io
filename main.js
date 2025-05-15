@@ -7,7 +7,7 @@ const demuxDecodeWorker = new Worker("./async_decoder.js"),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     urlToFetch = `https://taada.top:8081/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
 
-let zoom = Math.max(1, window.innerHeight / 1080),
+let zoom = 1, // Valeur par défaut, sera calculé dynamiquement
     appVersion = 0,
     offscreen = null,
     forcedRefreshCounter = 0,
@@ -22,7 +22,12 @@ let zoom = Math.max(1, window.innerHeight / 1080),
 
     timeoutId;
 
+// Initialisation des styles du canvas
 canvasElement.style.display = "none";
+canvasElement.style.margin = "0 auto";
+canvasElement.style.maxWidth = "100%";
+canvasElement.style.maxHeight = "100vh";
+canvasElement.style.objectFit = "contain";
 
 
 
@@ -110,22 +115,32 @@ function postWorkerMessages(json) {
         width = json.width;
         height = json.height;
         console.log("Resolution adjusted dynamically to " + width + "x" + height);
-        zoom = Math.max(1, window.innerHeight / height);
+        // Calcul optimal du zoom pour éviter déformation
+        zoom = 1; // Utiliser un zoom de 1 pour conserver les dimensions exactes
     } else if (json.resolution === 2) {
         width = 1920;
         height = 1080;
-        zoom = Math.max(1, window.innerHeight / 1080);
+        zoom = 1;
     } else if (json.resolution === 1) {
         width = 1280;
         height = 720;
-        zoom = Math.max(1, window.innerHeight / 720);
-        document.querySelector("canvas").style.height = "max(100vh,720px)";
+        zoom = 1;
     } else {
         width = 800;
         height = 480;
-        zoom = Math.max(1, window.innerHeight / 480);
-        document.querySelector("canvas").style.height = "max(100vh,480px)";
+        zoom = 1;
     }
+    
+    // Ajuster la taille du canvas pour correspondre exactement à la résolution de la vidéo
+    canvasElement.width = width;
+    canvasElement.height = height;
+    
+    // Utiliser CSS pour centrer le canvas dans la fenêtre
+    canvasElement.style.display = "block";
+    canvasElement.style.margin = "0 auto";
+    canvasElement.style.maxWidth = "100%";
+    canvasElement.style.maxHeight = "100vh";
+    canvasElement.style.objectFit = "contain";
     
     console.log("New dimensions: " + width + "x" + height + " with zoom: " + zoom);
     
@@ -165,6 +180,10 @@ function postWorkerMessages(json) {
     
     // If resolution has changed, send a message to ensure proper resizing
     if (json.hasOwnProperty("resolutionChanged") && json.resolutionChanged === true) {
+        // Redimensionner physiquement le canvas pour correspondre aux nouvelles dimensions
+        canvasElement.width = width;
+        canvasElement.height = height;
+        
         // Send resize information to the worker
         demuxDecodeWorker.postMessage({
             action: "RESIZE", 
