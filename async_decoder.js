@@ -62,11 +62,12 @@ function drawImageToCanvas(image) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    //gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    
+    // Utiliser la surcharge de texImage2D qui prend l'image directement
+    // sans spécifier explicitement les dimensions pour éviter les distorsions
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
 
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
-
-    if (isPowerOf2(width) && isPowerOf2(height)) {
+    if (image.width && isPowerOf2(image.width) && image.height && isPowerOf2(image.height)) {
         gl.generateMipmap(gl.TEXTURE_2D);
     }
 
@@ -97,7 +98,22 @@ function switchToBroadway() {
     console.log("Switching to broadway decoder");
     decoder = null;
 
-    broadwayDecoder = new Decoder({rgb: true});
+    // Create Broadway decoder with specific dimensions
+    broadwayDecoder = new Decoder({
+        rgb: true,
+        size: {
+            width: width,
+            height: height
+        }
+    });
+    
+    console.log(`Broadway decoder initialized with dimensions: ${width}x${height}`);
+    
+    // Update WebGL viewport to match canvas dimensions precisely
+    if (gl) {
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+    }
+    
     broadwayDecoder.onPictureDecoded = function (buffer){
         pendingFrames.push(buffer)
         if(underflow) {
@@ -107,9 +123,11 @@ function switchToBroadway() {
 }
 
 function initCanvas(canvas, forceBroadway) {
-
+    // Récupérer les dimensions du canvas transféré
     height = canvas.height;
     width = canvas.width;
+    
+    console.log(`Canvas dimensions when initialized: ${width}x${height}`);
 
     gl = canvas.getContext('webgl2');
 
@@ -150,7 +168,8 @@ function initCanvas(canvas, forceBroadway) {
     gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0]), gl.STATIC_DRAW);
 
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    // Utiliser gl.canvas.width/height pour s'assurer que le viewport correspond exactement à la taille du canvas
+    gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
     gl.useProgram(program);
     gl.enableVertexAttribArray(positionLocation);
@@ -477,6 +496,11 @@ self.addEventListener('message', async (message) => {
         width = message.data.width;
         height = message.data.height;
         
+        // Ajuster le viewport WebGL pour qu'il corresponde exactement aux nouvelles dimensions
+        if (gl) {
+            gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        }
+        
         // Mettre à jour la configuration du décodeur si nous utilisons WebCodec
         if(decoder !== null && decoder.state !== 'closed') {
             try {
@@ -512,30 +536,36 @@ self.addEventListener('message', async (message) => {
                 switchToBroadway();
             }
         } else if (broadwayDecoder !== null) {
-            // Pour Broadway, nous n'avons pas besoin de reconfiguration explicite
-            // Le décodeur s'ajustera automatiquement à la nouvelle résolution
-            console.log("Broadway decoder will automatically adjust to new resolution on next keyframe");
-            self.postMessage({warning: "En attente d'une nouvelle image clé..."});
-        }
-        
-        // Ajuster le viewport WebGL
-        if (gl) {
-            gl.viewport(0, 0, width, height);
+            // Pour Broadway, on doit recréer le décodeur pour éviter les artefacts
+            console.log("Recreating Broadway decoder for new resolution: " + width + "x" + height);
+            
+            // Sauvegarde de la callback existante
+            const oldCallback = broadwayDecoder.onPictureDecoded;
+            
+            // Créer un nouveau décodeur avec les dimensions correctes
+            broadwayDecoder = new Decoder({
+                rgb: true,
+                size: {
+                    width: width,
+                    height: height
+                }
+            });
+            
+            // Restaurer la callback
+            broadwayDecoder.onPictureDecoded = oldCallback;
+            
+            self.postMessage({warning: "Décodeur réinitialisé, en attente d'une nouvelle image clé..."});
         }
     } else if (message.data.action === 'CLEAR_BUFFERS') {
-        // Vider les tampons de frames en attente
-        console.log("Clearing pending frames buffer, had " + pendingFrames.length + " frames");
+        // Vider TOUS les tampons de frames en attente sans exception
+        // pour éviter d'utiliser des frames incompatibles avec la nouvelle résolution
+        console.log("Clearing pending frames buffer completely, had " + pendingFrames.length + " frames");
         
-        // Nettoyer en conservant éventuellement la dernière frame pour éviter l'écran noir
-        if (pendingFrames.length > 0) {
-            const lastFrame = pendingFrames[pendingFrames.length - 1];
-            pendingFrames = [];
-            if (lastFrame) {
-                pendingFrames.push(lastFrame);
-            }
-        } else {
-            pendingFrames = [];
-        }
+        // Vider complètement la file d'attente
+        pendingFrames = [];
+        
+        // Forcer l'underflow pour attendre la prochaine keyframe
+        underflow = true;
         
         // Réinitialiser l'état du décodeur si nécessaire
         underflow = pendingFrames.length === 0;

@@ -116,31 +116,27 @@ function postWorkerMessages(json) {
         height = json.height;
         console.log("Resolution adjusted dynamically to " + width + "x" + height);
         // Calcul optimal du zoom pour éviter déformation
-        zoom = 1; // Utiliser un zoom de 1 pour conserver les dimensions exactes
+        zoom = Math.min(window.innerWidth / width, window.innerHeight / height);
     } else if (json.resolution === 2) {
         width = 1920;
         height = 1080;
-        zoom = 1;
+        zoom = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
     } else if (json.resolution === 1) {
         width = 1280;
         height = 720;
-        zoom = 1;
+        zoom = Math.min(window.innerWidth / 1280, window.innerHeight / 720);
     } else {
         width = 800;
         height = 480;
-        zoom = 1;
+        zoom = Math.min(window.innerWidth / 800, window.innerHeight / 480);
     }
-    
-    // Ajuster la taille du canvas pour correspondre exactement à la résolution de la vidéo
-    /*canvasElement.width = width;
-    canvasElement.height = height;
     
     // Utiliser CSS pour centrer le canvas dans la fenêtre
     canvasElement.style.display = "block";
     canvasElement.style.margin = "0 auto";
     canvasElement.style.maxWidth = "100%";
     canvasElement.style.maxHeight = "100vh";
-    canvasElement.style.objectFit = "contain";*/
+    canvasElement.style.objectFit = "contain";
     
     console.log("New dimensions: " + width + "x" + height + " with zoom: " + zoom);
     
@@ -161,13 +157,14 @@ function postWorkerMessages(json) {
 
     const forceBroadway = findGetParameter("broadway") === "1";
 
-
+    // Définir les dimensions du canvas AVANT de le transférer au worker
+    // C'est crucial car après transferControlToOffscreen(), on ne peut plus le modifier
     canvasElement.width = width;
     canvasElement.height = height;
 
     offscreen = canvasElement.transferControlToOffscreen();
 
-    /*demuxDecodeWorker.postMessage({
+    demuxDecodeWorker.postMessage({
         canvas: offscreen, 
         port: port, 
         action: 'INIT',
@@ -180,9 +177,8 @@ function postWorkerMessages(json) {
     
     // If resolution has changed, send a message to ensure proper resizing
     if (json.hasOwnProperty("resolutionChanged") && json.resolutionChanged === true) {
-        // Redimensionner physiquement le canvas pour correspondre aux nouvelles dimensions
-        canvasElement.width = width;
-        canvasElement.height = height;
+        // Impossible de redimensionner le canvas après transferControlToOffscreen
+    // On doit uniquement envoyer les dimensions au worker
         
         // Send resize information to the worker
         demuxDecodeWorker.postMessage({
@@ -194,7 +190,7 @@ function postWorkerMessages(json) {
         
         // Clear buffers and request a new keyframe
         demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
-    }*/
+    }
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
