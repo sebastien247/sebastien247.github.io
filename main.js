@@ -129,20 +129,17 @@ function postWorkerMessages(json) {
     if (json.hasOwnProperty("resolutionChanged")) {
         console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
         
-        // Ajuster le canvas sans recharger la page
+        // Mémoriser les nouvelles dimensions
         width = json.width;
         height = json.height;
         
-        // Mettre à jour les dimensions du canvas
-        console.log("Canvas size updating to " + width + "x" + height);
-        canvasElement.width = width;
-        canvasElement.height = height;
-        
-        // Recalculer le zoom en fonction des dimensions réelles
+        // Mettre à jour uniquement le zoom et le scaling CSS, pas les dimensions du canvas
         zoom = Math.max(1, window.innerHeight / height);
-        canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
         
-        // Informer le worker de la nouvelle résolution APRÈS avoir mis à jour le canvas
+        // Ne pas modifier directement canvasElement.width/height car le canvas a été transféré
+        // Demander au worker de faire les changements à la place
+        
+        // Informer le worker de la nouvelle résolution
         demuxDecodeWorker.postMessage({
             action: "RESIZE", 
             width: width, 
@@ -173,19 +170,6 @@ function postWorkerMessages(json) {
         height = json.height;
         
         console.log("Received dimensions from server: " + width + "x" + height);
-        
-        // Initialiser ou mettre à jour le canvas
-        if (!canvasElement) {
-            canvasElement = initCanvas();
-        } else {
-            // Mettre à jour les dimensions
-            canvasElement.width = width;
-            canvasElement.height = height;
-            
-            // Recalculer le zoom
-            zoom = Math.max(1, window.innerHeight / height);
-            canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
-        }
     }
     if (json.resolution === 2) {
         width = 1920;
@@ -228,14 +212,27 @@ function postWorkerMessages(json) {
     }
 
     // Si le worker n'est pas encore initialisé, le faire maintenant
-    if (!demuxDecodeWorker || !offscreen) {
+    if (!demuxDecodeWorker) {
         console.log("Initializing worker with canvas dimensions: " + width + "x" + height);
         
-        // S'assurer que le canvas est initialisé
+        // S'assurer que le canvas est initialisé avec les bonnes dimensions AVANT le transfert
         if (!canvasElement) {
-            canvasElement = initCanvas();
+            canvasElement = document.querySelector('canvas');
         }
         
+        // Définir les dimensions du canvas AVANT le transfert
+        canvasElement.width = width;
+        canvasElement.height = height;
+        
+        // Définir le style pour le zoom
+        zoom = Math.max(1, window.innerHeight / height);
+        canvasElement.style.position = "fixed";
+        canvasElement.style.top = "0";
+        canvasElement.style.left = "50%";
+        canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
+        canvasElement.style.transformOrigin = "top center";
+        
+        // Transférer le contrôle du canvas après avoir défini ses dimensions
         offscreen = canvasElement.transferControlToOffscreen();
         
         demuxDecodeWorker = new Worker('async_decoder.js');
@@ -465,14 +462,17 @@ function startAudio(){
     });
 }
 
-// Ajouter cette fonction d'écouteur pour le redimensionnement
+// Modifier la fonction handleResize pour ne pas toucher aux dimensions du canvas
 function handleResize() {
-    if (canvasElement && height) {
+    if (height) {
         // Recalculer le zoom basé sur la hauteur de la fenêtre
         zoom = Math.max(1, window.innerHeight / height);
         
-        // Mettre à jour le style de transformation
-        canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
+        // Mettre à jour uniquement le style de transformation
+        // Si canvasElement est encore accessible (avant transfert)
+        if (canvasElement) {
+            canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
+        }
         
         console.log("Window resized, new zoom: " + zoom);
     }
