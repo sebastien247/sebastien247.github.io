@@ -340,18 +340,8 @@ function heartbeat() {
 
 
 function handleMessage(event) {
-    const dat = new Uint8Array(event.data);
-    
-    // Vérifier si c'est une NAL brute (marquée par 0xFF en premier octet)
-    if (dat.length > 0 && dat[0] === 0xFF) {
-        // Extraire les données NAL en ignorant le premier octet qui est notre flag
-        const nalData = new Uint8Array(dat.buffer, dat.byteOffset + 1, dat.byteLength - 1);
-        handleVideoMessage(nalData);
-        return;
-    }
-    
-    // Traitement normal pour les données non marquées
-    handleVideoMessage(dat);
+    const dat = new Uint8Array(event.data)
+    handleVideoMessage(dat)
 }
 
 function handleVideoMessage(dat){
