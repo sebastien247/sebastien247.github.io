@@ -131,7 +131,6 @@ function postWorkerMessages(json) {
         zoom = 1;
     }
     
-   
     // Utiliser CSS pour centrer le canvas dans la fenêtre
     canvasElement.style.display = "block";
     canvasElement.style.margin = "0 auto";
@@ -158,7 +157,8 @@ function postWorkerMessages(json) {
 
     const forceBroadway = findGetParameter("broadway") === "1";
 
-
+    // Définir les dimensions du canvas AVANT de le transférer au worker
+    // C'est crucial car après transferControlToOffscreen(), on ne peut plus le modifier
     canvasElement.width = width;
     canvasElement.height = height;
 
@@ -177,9 +177,8 @@ function postWorkerMessages(json) {
     
     // If resolution has changed, send a message to ensure proper resizing
     if (json.hasOwnProperty("resolutionChanged") && json.resolutionChanged === true) {
-        // Redimensionner physiquement le canvas pour correspondre aux nouvelles dimensions
-        canvasElement.width = width;
-        canvasElement.height = height;
+        // Impossible de redimensionner le canvas après transferControlToOffscreen
+    // On doit uniquement envoyer les dimensions au worker
         
         // Send resize information to the worker
         demuxDecodeWorker.postMessage({
