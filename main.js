@@ -24,8 +24,36 @@ let zoom = Math.max(1, window.innerHeight / 1080),
 
 canvasElement.style.display = "none";
 
-
-
+function initCanvas() {
+    canvasElement = document.querySelector('canvas');
+    
+    // S'assurer que le canvas est visible
+    canvasElement.style.display = "block";
+    
+    // Définir les dimensions initiales du canvas en fonction des paramètres reçus
+    if (width && height) {
+        console.log("Initializing canvas with dimensions: " + width + "x" + height);
+        canvasElement.width = width;
+        canvasElement.height = height;
+    } else {
+        console.log("Waiting for dimensions before initializing canvas fully");
+        // Dimensions par défaut en attendant les vraies dimensions
+        canvasElement.width = 1280;
+        canvasElement.height = 720;
+    }
+    
+    // Calculer le zoom initial
+    zoom = Math.max(1, window.innerHeight / (height || 720));
+    
+    // Ajuster le style du canvas pour un bon positionnement
+    canvasElement.style.position = "fixed";
+    canvasElement.style.top = "0";
+    canvasElement.style.left = "50%";
+    canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
+    canvasElement.style.transformOrigin = "top center";
+    
+    return canvasElement;
+}
 
 function handlepossition(possition){
     demuxDecodeWorker.postMessage({
@@ -105,14 +133,16 @@ function postWorkerMessages(json) {
         width = json.width;
         height = json.height;
         
+        // Mettre à jour les dimensions du canvas
+        console.log("Canvas size updating to " + width + "x" + height);
         canvasElement.width = width;
         canvasElement.height = height;
         
-        // Recalculer le zoom
+        // Recalculer le zoom en fonction des dimensions réelles
         zoom = Math.max(1, window.innerHeight / height);
-        canvasElement.style.transform = "scale(" + zoom + ")";
+        canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
         
-        // Informer le worker de la nouvelle résolution
+        // Informer le worker de la nouvelle résolution APRÈS avoir mis à jour le canvas
         demuxDecodeWorker.postMessage({
             action: "RESIZE", 
             width: width, 
@@ -138,6 +168,25 @@ function postWorkerMessages(json) {
         usebt = json.usebt;
     }
     port = json.port;
+    if (json.hasOwnProperty("width") && json.hasOwnProperty("height")) {
+        width = json.width;
+        height = json.height;
+        
+        console.log("Received dimensions from server: " + width + "x" + height);
+        
+        // Initialiser ou mettre à jour le canvas
+        if (!canvasElement) {
+            canvasElement = initCanvas();
+        } else {
+            // Mettre à jour les dimensions
+            canvasElement.width = width;
+            canvasElement.height = height;
+            
+            // Recalculer le zoom
+            zoom = Math.max(1, window.innerHeight / height);
+            canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
+        }
+    }
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
@@ -170,13 +219,39 @@ function postWorkerMessages(json) {
 
     const forceBroadway = findGetParameter("broadway") === "1";
 
+    // Si le canvas est déjà défini, mettre à jour ses dimensions
+    if (canvasElement) {
+        canvasElement.width = width;
+        canvasElement.height = height;
+        canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
+        console.log("Canvas updated with resolution: " + width + "x" + height);
+    }
 
-    canvasElement.width = width;
-    canvasElement.height = height;
-
-    offscreen = canvasElement.transferControlToOffscreen();
-
-    demuxDecodeWorker.postMessage({canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway}, [offscreen]);
+    // Si le worker n'est pas encore initialisé, le faire maintenant
+    if (!demuxDecodeWorker || !offscreen) {
+        console.log("Initializing worker with canvas dimensions: " + width + "x" + height);
+        
+        // S'assurer que le canvas est initialisé
+        if (!canvasElement) {
+            canvasElement = initCanvas();
+        }
+        
+        offscreen = canvasElement.transferControlToOffscreen();
+        
+        demuxDecodeWorker = new Worker('async_decoder.js');
+        demuxDecodeWorker.addEventListener("message", handleDecoderMessage);
+        
+        // Initialiser le worker avec les dimensions correctes
+        demuxDecodeWorker.postMessage({
+            canvas: offscreen, 
+            port: port, 
+            action: 'INIT', 
+            width: width,
+            height: height,
+            appVersion: appVersion, 
+            broadway: forceBroadway
+        }, [offscreen]);
+    }
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
@@ -204,7 +279,7 @@ function postWorkerMessages(json) {
                 // Use a delayed reload to allow logging to appear
                 setTimeout(function() {
                     console.log("Reloading page due to connection error");
-            document.location.reload();
+                    document.location.reload();
                 }, 2000);
             } else {
                 // For less critical errors, just show a warning
@@ -388,6 +463,67 @@ function startAudio(){
         ttsPCMSocket.send(JSON.stringify({action:"ACK"}));
         ttsPCM.feed(data);
     });
+}
+
+// Ajouter cette fonction d'écouteur pour le redimensionnement
+function handleResize() {
+    if (canvasElement && height) {
+        // Recalculer le zoom basé sur la hauteur de la fenêtre
+        zoom = Math.max(1, window.innerHeight / height);
+        
+        // Mettre à jour le style de transformation
+        canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
+        
+        console.log("Window resized, new zoom: " + zoom);
+    }
+}
+
+// Ajouter l'écouteur de redimensionnement
+window.addEventListener('resize', handleResize);
+
+// Ajouter cette fonction pour gérer les messages du décodeur
+function handleDecoderMessage(e) {
+    if (e.data.hasOwnProperty('error')) {
+        console.error('Socket error received:', e.data.error);
+        forcedRefreshCounter++;
+        
+        // Only reload if error contains critical information
+        // Show warning instead for most errors
+        if (typeof e.data.error === 'string' && 
+            (e.data.error.includes("no pong") || 
+            e.data.error === "Reconnecting...")) {
+            
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = "Connection issue detected: " + e.data.error;
+            
+            // Use a delayed reload to allow logging to appear
+            setTimeout(function() {
+                console.log("Reloading page due to connection error");
+                document.location.reload();
+            }, 2000);
+        } else {
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = e.data.error;
+        }
+    } else if (e.data.hasOwnProperty('fps')) {
+        if (debug) {
+            logElement.innerText = "FPS: " + e.data.fps + " - Queue: " + e.data.decodeQueueSize + " - Pending: " + e.data.pendingFrames;
+        } else {
+            logElement.innerText = "";
+        }
+    } else if (e.data.hasOwnProperty('warning')) {
+        warningElement.style.display = "block";
+        logElement.style.display = "none";
+        warningElement.innerText = e.data.warning;
+        
+        // Hide warning after 5 seconds
+        setTimeout(function() {
+            warningElement.style.display = "none";
+            logElement.style.display = "block";
+        }, 5000);
+    }
 }
 
 
