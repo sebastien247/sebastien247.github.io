@@ -57,23 +57,47 @@ function releaseTexture(gl, texture) {
 }
 
 function drawImageToCanvas(image) {
+    // Log des informations sur l'image à rendre
+    let imgInfo = "";
+    if (image.width && image.height) {
+        imgInfo = `${image.width}x${image.height}`;
+    } else if (image.displayWidth && image.displayHeight) {
+        imgInfo = `${image.displayWidth}x${image.displayHeight}`;
+    } else {
+        imgInfo = "dimensions inconnues";
+    }
+    console.log(`drawImageToCanvas: traitement d'une image de ${imgInfo}`);
+    
     const texture = getTexture(gl);
     gl.bindTexture(gl.TEXTURE_2D, texture);
+    
+    // Configuration des filtres et du mode de wrapping pour une meilleure qualité
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); // Ajouter filtre d'agrandissement
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     
-    // Utiliser la surcharge de texImage2D qui prend l'image directement
-    // sans spécifier explicitement les dimensions pour éviter les distorsions
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-
-    if (image.width && isPowerOf2(image.width) && image.height && isPowerOf2(image.height)) {
-        gl.generateMipmap(gl.TEXTURE_2D);
+    try {
+        // Utiliser la surcharge de texImage2D qui prend l'image directement
+        // sans spécifier explicitement les dimensions pour éviter les distorsions
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        console.log(`Texture chargée avec succès`);
+        
+        // Vérifier si des mipmaps sont nécessaires
+        let useMipmap = false;
+        if (image.width && isPowerOf2(image.width) && image.height && isPowerOf2(image.height)) {
+            useMipmap = true;
+            gl.generateMipmap(gl.TEXTURE_2D);
+            console.log(`Mipmaps générés`);
+        }
+        
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        console.log(`Rendu effectué (avec mipmaps: ${useMipmap})`);
+    } catch (e) {
+        console.error(`Erreur lors du rendu de l'image:`, e);
     }
-
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-
+    
     gl.bindTexture(gl.TEXTURE_2D, null);
     releaseTexture(gl, texture);
 
@@ -99,8 +123,10 @@ function switchToBroadway() {
     decoder = null;
 
     // Create Broadway decoder with specific dimensions
+    // Ajout de reuseMemory: false pour éviter les problèmes de mémoire vidéo
     broadwayDecoder = new Decoder({
         rgb: true,
+        reuseMemory: false, // Important: empêche la réutilisation de buffers qui peuvent causer des artefacts
         size: {
             width: width,
             height: height
@@ -230,7 +256,20 @@ async function renderFrame() {
 
 function separateNalUnits(event){
     let i = -1;
-    return event
+    
+    // Log pour le débogage du NAL splitting
+    console.log(`Attempting to separate NAL units from buffer of length ${event.length}`);
+    
+    // Recherche de tous les marqueurs de début pour vérification
+    let startMarkersPositions = [];
+    for (let j = 0; j < event.length - 3; j++) {
+        if (event[j] === 0 && event[j+1] === 0 && event[j+2] === 0 && event[j+3] === 1) {
+            startMarkersPositions.push(j);
+        }
+    }
+    console.log(`Found ${startMarkersPositions.length} NAL start markers at positions: ${startMarkersPositions.join(', ')}`);
+    
+    const result = event
         .reduce((output, value, index, self) => {
             if (value === 0 && self[index + 1] === 0 && self[index + 2] === 0 && self[index + 3] === 1) {
                 i++;
@@ -242,11 +281,35 @@ function separateNalUnits(event){
             return output;
         }, [])
         .map(dat => Uint8Array.from(dat));
+    
+    // Log les types des NAL units séparées
+    result.forEach((unit, index) => {
+        if(unit.length > 4) {
+            const nalType = unit[4] & 0x1f;
+            console.log(`NAL unit ${index}: type=${nalType}, length=${unit.length}`);
+        } else {
+            console.log(`NAL unit ${index}: INVALID - length=${unit.length} (too short)`);
+        }
+    });
+    
+    return result;
 }
 
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
+    
+    // Log détaillé pour le débogage
+    console.log(`videoMagic processing NAL type ${unittype}, length: ${dat.length} bytes`);
+    
+    // Vérifier l'intégrité des données NAL
+    if (dat.length < 6) {
+        console.error(`NAL unit too short (${dat.length} bytes), might cause corruption`);
+        return; // Ignorer les NAL trop courtes qui peuvent causer des artefacts
+    }
+    
     if (unittype === 1) {
+        console.log(`Processing P-frame (type 1), using ${decoder !== null ? 'WebCodec' : 'Broadway'} decoder`);
+        
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
                 type: 'delta',
@@ -256,9 +319,10 @@ function videoMagic(dat){
             });
             if (decoder.state !== 'closed') {
                 try {
+                    console.log(`WebCodec decoding P-frame, size: ${dat.length} bytes`);
                     decoder.decode(chunk);
                 } catch (e) {
-                    console.error("Video decoder error", e);
+                    console.error("Video decoder error with P-frame", e);
                     switchToBroadway();
                 }
             } else {
@@ -267,13 +331,22 @@ function videoMagic(dat){
         }
 
         if(broadwayDecoder !== null) {
-            broadwayDecoder.decode(dat)
+            console.log(`Broadway decoding P-frame, size: ${dat.length} bytes`);
+            try {
+                broadwayDecoder.decode(dat);
+            } catch (e) {
+                console.error("Broadway decoder error with P-frame", e);
+            }
         }
         return;
     }
 
     if (unittype === 5) {
+        console.log(`Processing I-frame (type 5), has SPS: ${sps ? 'yes' : 'no'}, SPS length: ${sps ? sps.length : 0}`);
+        
         let data = appendByteArray(sps, dat);
+        console.log(`Combined I-frame length: ${data.length} bytes`);
+        
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
                 type: 'key',
@@ -283,9 +356,10 @@ function videoMagic(dat){
             });
             if (decoder.state !== 'closed') {
                 try {
+                    console.log(`WebCodec decoding I-frame, size: ${data.length} bytes`);
                     decoder.decode(chunk);
                 } catch (e) {
-                    console.error("Video decoder error", e);
+                    console.error("Video decoder error with I-frame", e);
                     switchToBroadway();
                 }
             } else {
@@ -294,15 +368,37 @@ function videoMagic(dat){
         }
 
         if(broadwayDecoder !== null) {
-            broadwayDecoder.decode(data)
+            console.log(`Broadway decoding I-frame, size: ${data.length} bytes`);
+            try {
+                broadwayDecoder.decode(data);
+            } catch (e) {
+                console.error("Broadway decoder error with I-frame", e);
+            }
         }
     }
 }
 
 function headerMagic(dat) {
     let unittype = (dat[4] & 0x1f);
+    
+    // Log pour le débogage des NAL d'en-tête
+    console.log(`headerMagic processing NAL type ${unittype}, length: ${dat.length} bytes`);
+    
+    // Afficher plus de détails si c'est un SPS
+    if(unittype === 7) {
+        let hexDump = Array.from(dat.slice(0, Math.min(20, dat.length))).map(b => b.toString(16).padStart(2, '0')).join(' ');
+        console.log(`SPS NAL content (first 20 bytes): ${hexDump}`);
+    }
 
     if (unittype === 7) {
+        console.log(`Processing SPS (type 7) - Setting video configuration`);
+        
+        // Vérifier que le SPS est valide (au moins 8 octets)
+        if (dat.length < 8) {
+            console.error(`SPS trop court (${dat.length} octets), ignoré pour éviter corruption`);
+            return;
+        }
+        
         let config = {
             codec: "avc1.",
             codedHeight: height,
@@ -315,21 +411,34 @@ function headerMagic(dat) {
             }
             config.codec += h;
         }
+        console.log(`Video configuration: ${JSON.stringify(config)}`);
+        
         sps = dat;
         if(decoder !== null) {
             try {
+                console.log(`Configuring WebCodec with new parameters`);
                 decoder.configure(config);
             } catch (exc) {
+                console.error(`WebCodec configuration error:`, exc);
                 switchToBroadway();
             }
         }
 
         return;
     }
-    else if (unittype === 8)
-        sps=appendByteArray(sps,dat)
-    else
+    else if (unittype === 8) {
+        console.log(`Processing PPS (type 8) - Appending to SPS`);
+        if (!sps) {
+            console.error("Received PPS but no SPS available - this may cause decoding issues");
+            sps = new Uint8Array(0); // créer un SPS vide pour éviter les erreurs
+        }
+        sps = appendByteArray(sps, dat);
+        console.log(`SPS + PPS combined length: ${sps.length} bytes`);
+    }
+    else {
+        console.log(`Forwarding NAL type ${unittype} to videoMagic`);
         videoMagic(dat);
+    }
 }
 
 // ========== Socket and Message Handling ==========
@@ -364,8 +473,14 @@ function handleMessage(event) {
 }
 
 function handleVideoMessage(dat){
-
+    // Ajout de logs pour le débogage des NAL units
     let unittype = (dat[4] & 0x1f);
+    console.log(`NAL unit received - type: ${unittype}, length: ${dat.length} bytes`);
+    
+    // Pour les 10 premiers octets, afficher leur valeur hexadécimale
+    let hexDump = Array.from(dat.slice(0, 20)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    console.log(`First 20 bytes: ${hexDump}`);
+    
     if (unittype === 31)
     {
         if (pongtimer !== null)
@@ -374,10 +489,16 @@ function handleVideoMessage(dat){
         pongtimer=setTimeout(noPong,3000);
         return;
     }
-    if (unittype === 1 || unittype === 5)
-        videoMagic(dat)
-    else
-        separateNalUnits(dat).forEach(headerMagic)
+    if (unittype === 1 || unittype === 5) {
+        console.log(`Processing direct NAL unit: ${unittype === 1 ? 'P-frame' : 'I-frame'}`);
+        videoMagic(dat);
+    }
+    else {
+        console.log(`Processing composite NAL container with first unit type: ${unittype}`);
+        let units = separateNalUnits(dat);
+        console.log(`Separated into ${units.length} NAL units`);
+        units.forEach(headerMagic);
+    }
 }
 
 function startSocket() {
@@ -520,9 +641,12 @@ self.addEventListener('message', async (message) => {
                         }
                         config.codec += h;
                     }
+                    console.log(`Using codec profile from SPS: ${config.codec}`);
                 } else {
-                    // Codec par défaut si on n'a pas encore reçu de SPS
-                    config.codec += "42002a";
+                    // On ne reconfigurera pas le décodeur sans SPS valide
+                    // car utiliser une valeur par défaut peut causer des artefacts
+                    console.error("Attempt to reconfigure decoder without valid SPS - aborting");
+                    return; // Sortir sans reconfigurer plutôt qu'utiliser un profil par défaut incorrect
                 }
                 
                 console.log("Reconfiguring decoder with:", config);
