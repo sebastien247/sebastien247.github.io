@@ -78,14 +78,23 @@ function drawImageToCanvas(image) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     
     try {
-        // Utiliser la surcharge de texImage2D qui prend l'image directement
-        // sans spécifier explicitement les dimensions pour éviter les distorsions
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        // Vérifier le type d'image pour utiliser la bonne surcharge de texImage2D
+        // Broadway retourne un Uint8Array et non un HTMLImageElement/VideoFrame
+        if (image instanceof Uint8Array) {
+            console.log(`Image est un Uint8Array (Broadway), longueur: ${image.length}`);
+            // Utiliser l'API bas niveau pour les données brutes de Broadway
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        } else {
+            // Pour WebCodecs VideoFrame, utiliser l'API de plus haut niveau
+            console.log(`Image est un objet WebCodecs`);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        }
+        
         console.log(`Texture chargée avec succès`);
         
         // Vérifier si des mipmaps sont nécessaires
         let useMipmap = false;
-        if (image.width && isPowerOf2(image.width) && image.height && isPowerOf2(image.height)) {
+        if (isPowerOf2(width) && isPowerOf2(height)) {
             useMipmap = true;
             gl.generateMipmap(gl.TEXTURE_2D);
             console.log(`Mipmaps générés`);
