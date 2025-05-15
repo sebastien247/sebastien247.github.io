@@ -131,12 +131,16 @@ function postWorkerMessages(json) {
         zoom = 1;
     }
     
+    // Ajuster la taille du canvas pour correspondre exactement à la résolution de la vidéo
+    /*canvasElement.width = width;
+    canvasElement.height = height;
+    
     // Utiliser CSS pour centrer le canvas dans la fenêtre
     canvasElement.style.display = "block";
     canvasElement.style.margin = "0 auto";
     canvasElement.style.maxWidth = "100%";
     canvasElement.style.maxHeight = "100vh";
-    canvasElement.style.objectFit = "contain";
+    canvasElement.style.objectFit = "contain";*/
     
     console.log("New dimensions: " + width + "x" + height + " with zoom: " + zoom);
     
@@ -157,14 +161,13 @@ function postWorkerMessages(json) {
 
     const forceBroadway = findGetParameter("broadway") === "1";
 
-    // Définir les dimensions du canvas AVANT de le transférer au worker
-    // C'est crucial car après transferControlToOffscreen(), on ne peut plus le modifier
+
     canvasElement.width = width;
     canvasElement.height = height;
 
     offscreen = canvasElement.transferControlToOffscreen();
 
-    demuxDecodeWorker.postMessage({
+    /*demuxDecodeWorker.postMessage({
         canvas: offscreen, 
         port: port, 
         action: 'INIT',
@@ -177,8 +180,9 @@ function postWorkerMessages(json) {
     
     // If resolution has changed, send a message to ensure proper resizing
     if (json.hasOwnProperty("resolutionChanged") && json.resolutionChanged === true) {
-        // Impossible de redimensionner le canvas après transferControlToOffscreen
-    // On doit uniquement envoyer les dimensions au worker
+        // Redimensionner physiquement le canvas pour correspondre aux nouvelles dimensions
+        canvasElement.width = width;
+        canvasElement.height = height;
         
         // Send resize information to the worker
         demuxDecodeWorker.postMessage({
@@ -190,7 +194,7 @@ function postWorkerMessages(json) {
         
         // Clear buffers and request a new keyframe
         demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
-    }
+    }*/
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
