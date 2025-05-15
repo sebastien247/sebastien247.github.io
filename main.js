@@ -24,36 +24,8 @@ let zoom = Math.max(1, window.innerHeight / 1080),
 
 canvasElement.style.display = "none";
 
-function initCanvas() {
-    canvasElement = document.querySelector('canvas');
-    
-    // S'assurer que le canvas est visible
-    canvasElement.style.display = "block";
-    
-    // Définir les dimensions initiales du canvas en fonction des paramètres reçus
-    if (width && height) {
-        console.log("Initializing canvas with dimensions: " + width + "x" + height);
-        canvasElement.width = width;
-        canvasElement.height = height;
-    } else {
-        console.log("Waiting for dimensions before initializing canvas fully");
-        // Dimensions par défaut en attendant les vraies dimensions
-        canvasElement.width = 1280;
-        canvasElement.height = 720;
-    }
-    
-    // Calculer le zoom initial
-    zoom = Math.max(1, window.innerHeight / (height || 720));
-    
-    // Ajuster le style du canvas pour un bon positionnement
-    canvasElement.style.position = "fixed";
-    canvasElement.style.top = "0";
-    canvasElement.style.left = "50%";
-    canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
-    canvasElement.style.transformOrigin = "top center";
-    
-    return canvasElement;
-}
+
+
 
 function handlepossition(possition){
     demuxDecodeWorker.postMessage({
@@ -168,10 +140,8 @@ function postWorkerMessages(json) {
     if (json.hasOwnProperty("width") && json.hasOwnProperty("height")) {
         width = json.width;
         height = json.height;
-        
         console.log("Received dimensions from server: " + width + "x" + height);
-    }
-    if (json.resolution === 2) {
+    } else if (json.resolution === 2) {
         width = 1920;
         height = 1080;
         zoom = Math.max(1, window.innerHeight / 1080);
@@ -203,16 +173,8 @@ function postWorkerMessages(json) {
 
     const forceBroadway = findGetParameter("broadway") === "1";
 
-    // Si le canvas est déjà défini, mettre à jour ses dimensions
-    if (canvasElement) {
-        canvasElement.width = width;
-        canvasElement.height = height;
-        canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
-        console.log("Canvas updated with resolution: " + width + "x" + height);
-    }
-
-    // Si le worker n'est pas encore initialisé, le faire maintenant
-    if (!demuxDecodeWorker) {
+    // Si le canvas n'est pas encore transféré au worker
+    if (!offscreen) {
         console.log("Initializing worker with canvas dimensions: " + width + "x" + height);
         
         // S'assurer que le canvas est initialisé avec les bonnes dimensions AVANT le transfert
@@ -223,6 +185,7 @@ function postWorkerMessages(json) {
         // Définir les dimensions du canvas AVANT le transfert
         canvasElement.width = width;
         canvasElement.height = height;
+        console.log("Canvas initialized with dimensions: " + width + "x" + height);
         
         // Définir le style pour le zoom
         zoom = Math.max(1, window.innerHeight / height);
@@ -231,12 +194,17 @@ function postWorkerMessages(json) {
         canvasElement.style.left = "50%";
         canvasElement.style.transform = "translateX(-50%) scale(" + zoom + ")";
         canvasElement.style.transformOrigin = "top center";
+        canvasElement.style.display = "block"; // S'assurer que le canvas est visible
         
         // Transférer le contrôle du canvas après avoir défini ses dimensions
         offscreen = canvasElement.transferControlToOffscreen();
         
-        demuxDecodeWorker = new Worker('async_decoder.js');
-        demuxDecodeWorker.addEventListener("message", handleDecoderMessage);
+        // Initialiser le worker et ajouter le gestionnaire d'événements
+        // Ceci est l'initialisation INITIALE du worker uniquement
+        if (!demuxDecodeWorker._initiated) {
+            demuxDecodeWorker.addEventListener("message", handleDecoderMessage);
+            demuxDecodeWorker._initiated = true;
+        }
         
         // Initialiser le worker avec les dimensions correctes
         demuxDecodeWorker.postMessage({
@@ -256,56 +224,6 @@ function postWorkerMessages(json) {
         document.getElementById("muteicon").style.display="block";
 
     }
-
-    demuxDecodeWorker.addEventListener("message", function (e) {
-
-        if (e.data.hasOwnProperty('error')) {
-            console.error('Socket error received:', e.data.error);
-            forcedRefreshCounter++;
-            
-            // Only reload if error contains critical information
-            // Show warning instead for most errors
-            if (typeof e.data.error === 'string' && 
-                (e.data.error.includes("no pong") || 
-                e.data.error === "Reconnecting...")) {
-                
-                warningElement.style.display = "block";
-                logElement.style.display = "none";
-                warningElement.innerText = "Connection issue detected: " + e.data.error;
-                
-                // Use a delayed reload to allow logging to appear
-                setTimeout(function() {
-                    console.log("Reloading page due to connection error");
-                    document.location.reload();
-                }, 2000);
-            } else {
-                // For less critical errors, just show a warning
-                warningElement.style.display = "block";
-                logElement.style.display = "none";
-                warningElement.innerText = "Error detected: " + e.data.error;
-                setTimeout(function() {
-                    warningElement.style.display = "none";
-                    logElement.style.display = "block";
-                }, 5000);
-            }
-            return;
-        }
-
-        if (e.data.hasOwnProperty('warning')) {
-            warningElement.style.display="block";
-            logElement.style.display="none";
-            warningElement.innerText=e.data.warning;
-            setTimeout(function (){
-                warningElement.style.display="none";
-                logElement.style.display="block";
-            },2000);
-        }
-
-        if (debug) {
-            logElement.innerText = `${height}p - FPS ${e.data.fps}, decoder que: ${e.data.decodeQueueSize}, pendingFrame: ${e.data.pendingFrames}, forced refresh counter: ${forcedRefreshCounter}`;
-        }
-
-    });
 
     if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
         demuxDecodeWorker.postMessage({action: "NIGHT", value: true});
@@ -478,9 +396,6 @@ function handleResize() {
     }
 }
 
-// Ajouter l'écouteur de redimensionnement
-window.addEventListener('resize', handleResize);
-
 // Ajouter cette fonction pour gérer les messages du décodeur
 function handleDecoderMessage(e) {
     if (e.data.hasOwnProperty('error')) {
@@ -525,6 +440,9 @@ function handleDecoderMessage(e) {
         }, 5000);
     }
 }
+
+// Ajouter l'écouteur de redimensionnement
+window.addEventListener('resize', handleResize);
 
 
 
