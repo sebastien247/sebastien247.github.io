@@ -105,22 +105,23 @@ function postWorkerMessages(json) {
         width = json.width;
         height = json.height;
         
-        canvasElement.width = width;
-        canvasElement.height = height;
+        // Seul le worker peut mettre à jour le canvas après transferControlToOffscreen
+        // Envoyer les deux messages séparément pour plus de clarté
         
-        // Recalculer le zoom
-        zoom = Math.max(1, window.innerHeight / height);
-        canvasElement.style.transform = "scale(" + zoom + ")";
-        
-        // Informer le worker de la nouvelle résolution
+        // 1. Informer le worker de la nouvelle résolution du décodeur
         demuxDecodeWorker.postMessage({
             action: "RESIZE", 
             width: width, 
             height: height
         });
         
-        // Nettoyer les buffers existants et demander un nouveau keyframe
-        demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
+        // 2. Demander une nouvelle keyframe pour obtenir la bonne résolution
+        demuxDecodeWorker.postMessage({
+            action: "CLEAR_BUFFERS"
+        });
+        
+        // Mettre à jour le zoom pour l'interface utilisateur
+        zoom = Math.max(1, window.innerHeight / height);
         
         // Afficher un message temporaire
         warningElement.style.display = "block";
@@ -173,10 +174,18 @@ function postWorkerMessages(json) {
 
     canvasElement.width = width;
     canvasElement.height = height;
+    
+    // Appliquer la transformation d'échelle au conteneur
+    canvasElement.style.transform = "scale(" + zoom + ")";
 
+    // Transfert du contrôle au worker
     offscreen = canvasElement.transferControlToOffscreen();
-
-    demuxDecodeWorker.postMessage({canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway}, [offscreen]);
+    
+    // Initialiser le worker avec le canvas offscreen
+    demuxDecodeWorker.postMessage(
+        {canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height}, 
+        [offscreen]
+    );
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
