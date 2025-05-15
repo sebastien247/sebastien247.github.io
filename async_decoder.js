@@ -62,8 +62,9 @@ function drawImageToCanvas(image) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    //gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-
+    
+    // Utiliser les dimensions actuelles du décodeur pour le rendu
+    console.log("Drawing image to canvas at " + width + "x" + height);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
 
     if (isPowerOf2(width) && isPowerOf2(height)) {
@@ -107,11 +108,21 @@ function switchToBroadway() {
 }
 
 function initCanvas(canvas, forceBroadway) {
-
+    // Récupérer les dimensions actuelles du canvas
     height = canvas.height;
     width = canvas.width;
+    
+    console.log("Initializing canvas with dimensions: " + width + "x" + height);
 
     gl = canvas.getContext('webgl2');
+    if (!gl) {
+        console.error("WebGL2 context not available, falling back to WebGL");
+        gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (!gl) {
+            self.postMessage({error: "WebGL not supported by your browser!"});
+            return;
+        }
+    }
 
     const vertexSource = `
         attribute vec2 a_position;
@@ -518,9 +529,20 @@ self.addEventListener('message', async (message) => {
             self.postMessage({warning: "En attente d'une nouvelle image clé..."});
         }
         
-        // Ajuster le viewport WebGL
+        // Ajuster le contexte WebGL
         if (gl) {
-            gl.viewport(0, 0, width, height);
+            try {
+                // Il n'est pas possible de redimensionner directement le canvas après transferControlToOffscreen
+                // Mais nous pouvons mettre à jour le viewport WebGL
+                console.log("Updating WebGL viewport to match new dimensions: " + width + "x" + height);
+                gl.viewport(0, 0, width, height);
+                
+                // Notifier que la résolution a changé mais que nous attendons une nouvelle keyframe
+                self.postMessage({warning: "Viewport WebGL redimensionné, en attente d'une nouvelle image clé..."});
+            } catch (e) {
+                console.error("Error updating WebGL viewport:", e);
+                self.postMessage({error: "Erreur lors de la mise à jour du viewport WebGL: " + e.message});
+            }
         }
     } else if (message.data.action === 'CLEAR_BUFFERS') {
         // Vider les tampons de frames en attente
