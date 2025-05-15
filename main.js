@@ -97,8 +97,7 @@ function postWorkerMessages(json) {
         location.reload();
         return;
     }
-
-    // Récupérer les autres paramètres
+    
     if (json.hasOwnProperty("debug")) {
         debug = json.debug;
     }
@@ -106,12 +105,13 @@ function postWorkerMessages(json) {
         usebt = json.usebt;
     }
     port = json.port;
-        // Définir la largeur et hauteur dès le début
-    /*if (json.hasOwnProperty("width") && json.hasOwnProperty("height")) {
+    
+    if (json.hasOwnProperty("width") && json.hasOwnProperty("height")) {
         width = json.width;
         height = json.height;
+        console.log("Resolution adjusted dynamically to " + width + "x" + height);
         zoom = Math.max(1, window.innerHeight / height);
-    } else */if (json.resolution === 2) {
+    } else if (json.resolution === 2) {
         width = 1920;
         height = 1080;
         zoom = Math.max(1, window.innerHeight / 1080);
@@ -126,6 +126,9 @@ function postWorkerMessages(json) {
         zoom = Math.max(1, window.innerHeight / 480);
         document.querySelector("canvas").style.height = "max(100vh,480px)";
     }
+    
+    console.log("New dimensions: " + width + "x" + height + " with zoom: " + zoom);
+    
     if (json.hasOwnProperty("buildversion")) {
         appVersion = parseInt(json.buildversion);
         if (latestVersion > parseInt(json.buildversion)) {
@@ -143,27 +146,26 @@ function postWorkerMessages(json) {
 
     const forceBroadway = findGetParameter("broadway") === "1";
 
-    // IMPORTANT: Définir les dimensions du canvas AVANT de transférer le contrôle
+
     canvasElement.width = width;
     canvasElement.height = height;
 
-    // Transférer le canvas avec les dimensions déjà définies
     offscreen = canvasElement.transferControlToOffscreen();
+
     demuxDecodeWorker.postMessage({
         canvas: offscreen, 
         port: port, 
-        action: 'INIT', 
-        //width: width,
-        //height: height,
-        //zoom: zoom,
+        action: 'INIT',
+        width: width,
+        height: height,
+        zoom: zoom,
         appVersion: appVersion, 
         broadway: forceBroadway
     }, [offscreen]);
-
-    // Si un changement de résolution a été effectué, envoyer un message supplémentaire
-    // au worker pour s'assurer que le redimensionnement est bien appliqué
-    /*if (json.hasOwnProperty("resolutionChanged")) {
-        // Propager les informations de résolution et de zoom au worker
+    
+    // If resolution has changed, send a message to ensure proper resizing
+    if (json.hasOwnProperty("resolutionChanged") && json.resolutionChanged === true) {
+        // Send resize information to the worker
         demuxDecodeWorker.postMessage({
             action: "RESIZE", 
             width: width, 
@@ -171,14 +173,15 @@ function postWorkerMessages(json) {
             zoom: zoom
         });
         
-        // Nettoyer les buffers existants et demander un nouveau keyframe
+        // Clear buffers and request a new keyframe
         demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
-    }*/
+    }
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
         usebt = json.usebt;
         document.getElementById("muteicon").style.display="block";
+
     }
 
     demuxDecodeWorker.addEventListener("message", function (e) {
