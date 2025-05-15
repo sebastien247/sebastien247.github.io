@@ -62,9 +62,8 @@ function drawImageToCanvas(image) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    
-    // Utiliser les dimensions actuelles du décodeur pour le rendu
-    console.log("Drawing image to canvas at " + width + "x" + height);
+    //gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
 
     if (isPowerOf2(width) && isPowerOf2(height)) {
@@ -97,8 +96,16 @@ function createShader(gl, type, source) {
 function switchToBroadway() {
     console.log("Switching to broadway decoder");
     decoder = null;
-
-    broadwayDecoder = new Decoder({rgb: true});
+    
+    // Recréer le décodeur Broadway avec les dimensions actuelles
+    if (broadwayDecoder !== null) {
+        // Nettoyer le décodeur existant
+        broadwayDecoder = null;
+    }
+    
+    // Créer un nouveau décodeur avec les dimensions actuelles
+    console.log("Creating new Broadway decoder with dimensions: " + width + "x" + height);
+    broadwayDecoder = new Decoder({rgb: true, size: {width: width, height: height}});
     broadwayDecoder.onPictureDecoded = function (buffer){
         pendingFrames.push(buffer)
         if(underflow) {
@@ -108,21 +115,11 @@ function switchToBroadway() {
 }
 
 function initCanvas(canvas, forceBroadway) {
-    // Récupérer les dimensions actuelles du canvas
+
     height = canvas.height;
     width = canvas.width;
-    
-    console.log("Initializing canvas with dimensions: " + width + "x" + height);
 
     gl = canvas.getContext('webgl2');
-    if (!gl) {
-        console.error("WebGL2 context not available, falling back to WebGL");
-        gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-        if (!gl) {
-            self.postMessage({error: "WebGL not supported by your browser!"});
-            return;
-        }
-    }
 
     const vertexSource = `
         attribute vec2 a_position;
@@ -523,25 +520,36 @@ self.addEventListener('message', async (message) => {
                 switchToBroadway();
             }
         } else if (broadwayDecoder !== null) {
-            // Pour Broadway, nous n'avons pas besoin de reconfiguration explicite
-            // Le décodeur s'ajustera automatiquement à la nouvelle résolution
-            console.log("Broadway decoder will automatically adjust to new resolution on next keyframe");
-            self.postMessage({warning: "En attente d'une nouvelle image clé..."});
+            // Pour Broadway, nous avons besoin de recréer le décodeur avec les nouvelles dimensions
+            console.log("Recreating Broadway decoder with new dimensions: " + width + "x" + height);
+            // Sauvegarder temporairement le callback
+            const oldCallback = broadwayDecoder.onPictureDecoded;
+            
+            // Recréer le décodeur avec les nouvelles dimensions
+            broadwayDecoder = new Decoder({rgb: true, size: {width: width, height: height}});
+            broadwayDecoder.onPictureDecoded = oldCallback;
+            
+            self.postMessage({warning: "Décodeur Broadway recréé, en attente d'une nouvelle image clé..."});
         }
         
         // Ajuster le contexte WebGL
         if (gl) {
             try {
                 // Il n'est pas possible de redimensionner directement le canvas après transferControlToOffscreen
-                // Mais nous pouvons mettre à jour le viewport WebGL
-                console.log("Updating WebGL viewport to match new dimensions: " + width + "x" + height);
+                // Mais nous pouvons mettre à jour le viewport WebGL et recréer les ressources GL
+                console.log("Full WebGL context reinit for new dimensions: " + width + "x" + height);
+                
+                // Mettre à jour le viewport
                 gl.viewport(0, 0, width, height);
                 
-                // Notifier que la résolution a changé mais que nous attendons une nouvelle keyframe
-                self.postMessage({warning: "Viewport WebGL redimensionné, en attente d'une nouvelle image clé..."});
+                // Réinitialiser le contexte pour être sûr que tout est à la bonne taille
+                gl.clearColor(0.0, 0.0, 0.0, 0.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+                
+                self.postMessage({warning: "Contexte WebGL réinitialisé pour les nouvelles dimensions"});
             } catch (e) {
-                console.error("Error updating WebGL viewport:", e);
-                self.postMessage({error: "Erreur lors de la mise à jour du viewport WebGL: " + e.message});
+                console.error("Error updating WebGL context:", e);
+                self.postMessage({error: "Erreur WebGL: " + e.message});
             }
         }
     } else if (message.data.action === 'CLEAR_BUFFERS') {
