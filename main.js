@@ -1,4 +1,4 @@
-const demuxDecodeWorker = new Worker("./async_decoder_nal.js"),
+const demuxDecodeWorker = new Worker("./async_decoder.js"),
     latestVersion = 2,
     logElement = document.getElementById('log'),
     warningElement = document.getElementById('warning'),
