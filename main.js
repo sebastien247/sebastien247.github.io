@@ -97,39 +97,8 @@ function postWorkerMessages(json) {
         location.reload();
         return;
     }
-    if (json.hasOwnProperty("resolutionChanged")) {
-        console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
-        
-        // Ajuster le canvas sans recharger la page
-        width = json.width;
-        height = json.height;
-        
-        canvasElement.width = width;
-        canvasElement.height = height;
-        
-        // Recalculer le zoom
-        zoom = Math.max(1, window.innerHeight / height);
-        
-        // Informer le worker de la nouvelle résolution
-        demuxDecodeWorker.postMessage({
-            action: "RESIZE", 
-            width: width, 
-            height: height
-        });
-        
-        // Nettoyer les buffers existants et demander un nouveau keyframe
-        demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
-        
-        warningElement.style.display = "block";
-        logElement.style.display = "none";
-        warningElement.innerText = "Résolution ajustée à " + width + "x" + height;
-        setTimeout(function() {
-            warningElement.style.display = "none";
-            logElement.style.display = "block";
-        }, 3000);
-        
-        // Continuer le traitement normal
-    }
+
+    // Récupérer les autres paramètres
     if (json.hasOwnProperty("debug")) {
         debug = json.debug;
     }
@@ -137,7 +106,12 @@ function postWorkerMessages(json) {
         usebt = json.usebt;
     }
     port = json.port;
-    if (json.resolution === 2) {
+        // Définir la largeur et hauteur dès le début
+    /*if (json.hasOwnProperty("width") && json.hasOwnProperty("height")) {
+        width = json.width;
+        height = json.height;
+        zoom = Math.max(1, window.innerHeight / height);
+    } else */if (json.resolution === 2) {
         width = 1920;
         height = 1080;
         zoom = Math.max(1, window.innerHeight / 1080);
@@ -169,19 +143,42 @@ function postWorkerMessages(json) {
 
     const forceBroadway = findGetParameter("broadway") === "1";
 
-
+    // IMPORTANT: Définir les dimensions du canvas AVANT de transférer le contrôle
     canvasElement.width = width;
     canvasElement.height = height;
 
+    // Transférer le canvas avec les dimensions déjà définies
     offscreen = canvasElement.transferControlToOffscreen();
+    demuxDecodeWorker.postMessage({
+        canvas: offscreen, 
+        port: port, 
+        action: 'INIT', 
+        //width: width,
+        //height: height,
+        //zoom: zoom,
+        appVersion: appVersion, 
+        broadway: forceBroadway
+    }, [offscreen]);
 
-    demuxDecodeWorker.postMessage({canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway}, [offscreen]);
+    // Si un changement de résolution a été effectué, envoyer un message supplémentaire
+    // au worker pour s'assurer que le redimensionnement est bien appliqué
+    /*if (json.hasOwnProperty("resolutionChanged")) {
+        // Propager les informations de résolution et de zoom au worker
+        demuxDecodeWorker.postMessage({
+            action: "RESIZE", 
+            width: width, 
+            height: height,
+            zoom: zoom
+        });
+        
+        // Nettoyer les buffers existants et demander un nouveau keyframe
+        demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
+    }*/
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
         usebt = json.usebt;
         document.getElementById("muteicon").style.display="block";
-
     }
 
     demuxDecodeWorker.addEventListener("message", function (e) {
