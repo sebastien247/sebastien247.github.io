@@ -378,6 +378,8 @@ function startSocket() {
         socket.binaryType = "arraybuffer";
         socket.sendObject({action: "START"});
         socket.sendObject({action: "NIGHT", value: night});
+        // Demander un keyframe à l'ouverture de la socket pour assurer la reprise du flux
+        socket.sendObject({action: "REQUEST_KEYFRAME"});
         if (heart === 0) {
             heart = setInterval(heartbeat, 200);
             setInterval(updateFrameCounter, 1000)
