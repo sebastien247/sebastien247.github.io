@@ -176,11 +176,6 @@ function postWorkerMessages(json) {
     offscreen = canvasElement.transferControlToOffscreen();
 
     demuxDecodeWorker.postMessage({canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway}, [offscreen]);
-    
-    // Si l'utilisateur revient sur la page, s'assurer de demander un keyframe après un court délai
-    setTimeout(() => {
-        demuxDecodeWorker.postMessage({action: "REQUEST_KEYFRAME"});
-    }, 1500);
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {

@@ -378,8 +378,17 @@ function startSocket() {
         socket.binaryType = "arraybuffer";
         socket.sendObject({action: "START"});
         socket.sendObject({action: "NIGHT", value: night});
-        // Demander un keyframe à l'ouverture de la socket pour assurer la reprise du flux
-        socket.sendObject({action: "REQUEST_KEYFRAME"});
+        
+        // Au lieu de demander un keyframe immédiatement, attendons un peu
+        // pour voir si des données arrivent naturellement
+        setTimeout(() => {
+            // Ne demander un keyframe que si aucune frame n'a été reçue
+            if (pendingFrames.length === 0 && underflow) {
+                console.log("No frames received after socket open, requesting keyframe");
+                socket.sendObject({action: "REQUEST_KEYFRAME"});
+            }
+        }, 1000);
+        
         if (heart === 0) {
             heart = setInterval(heartbeat, 200);
             setInterval(updateFrameCounter, 1000)
