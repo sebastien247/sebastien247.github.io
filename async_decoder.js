@@ -460,6 +460,79 @@ self.addEventListener('message', async (message) => {
             postInitJobs.forEach(msg => messageHandler(msg));
             postInitJobs = []
         }
+    } else if (message.data.action === 'RESIZE') {
+        // Gestion du changement de résolution
+        console.log("Resizing decoder to " + message.data.width + "x" + message.data.height);
+        width = message.data.width;
+        height = message.data.height;
+        
+        // Mettre à jour la configuration du décodeur si nous utilisons WebCodec
+        if(decoder !== null && decoder.state !== 'closed') {
+            try {
+                // Reconfigurer le décodeur avec les nouvelles dimensions
+                let config = {
+                    codec: "avc1.",
+                    codedHeight: height,
+                    codedWidth: width,
+                };
+                
+                // Ajouter le codec spécifique si nous l'avons déjà
+                if (sps && sps.length > 7) {
+                    for (let i = 5; i < 8; ++i) {
+                        var h = sps[i].toString(16);
+                        if (h.length < 2) {
+                            h = '0' + h;
+                        }
+                        config.codec += h;
+                    }
+                } else {
+                    // Codec par défaut si on n'a pas encore reçu de SPS
+                    config.codec += "42002a";
+                }
+                
+                console.log("Reconfiguring decoder with:", config);
+                decoder.configure(config);
+                
+                self.postMessage({warning: "Résolution adaptée, en attente d'une nouvelle image clé..."});
+            } catch (e) {
+                console.error("Error reconfiguring decoder:", e);
+                self.postMessage({error: "Erreur lors du changement de résolution: " + e.message});
+                // En cas d'erreur, essayer de basculer vers Broadway
+                switchToBroadway();
+            }
+        } else if (broadwayDecoder !== null) {
+            // Pour Broadway, nous n'avons pas besoin de reconfiguration explicite
+            // Le décodeur s'ajustera automatiquement à la nouvelle résolution
+            console.log("Broadway decoder will automatically adjust to new resolution on next keyframe");
+            self.postMessage({warning: "En attente d'une nouvelle image clé..."});
+        }
+        
+        // Ajuster le viewport WebGL
+        if (gl) {
+            gl.viewport(0, 0, width, height);
+        }
+    } else if (message.data.action === 'CLEAR_BUFFERS') {
+        // Vider les tampons de frames en attente
+        console.log("Clearing pending frames buffer, had " + pendingFrames.length + " frames");
+        
+        // Nettoyer en conservant éventuellement la dernière frame pour éviter l'écran noir
+        if (pendingFrames.length > 0) {
+            const lastFrame = pendingFrames[pendingFrames.length - 1];
+            pendingFrames = [];
+            if (lastFrame) {
+                pendingFrames.push(lastFrame);
+            }
+        } else {
+            pendingFrames = [];
+        }
+        
+        // Réinitialiser l'état du décodeur si nécessaire
+        underflow = pendingFrames.length === 0;
+        
+        // Demander une nouvelle frame-clé
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.sendObject({action: "REQUEST_KEYFRAME"});
+        }
     } else if(!initted) {
         postInitJobs.push(message);
     } else {

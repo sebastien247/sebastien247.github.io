@@ -97,6 +97,39 @@ function postWorkerMessages(json) {
         location.reload();
         return;
     }
+    if (json.hasOwnProperty("resolutionChanged")) {
+        console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
+        
+        // Ajuster le canvas sans recharger la page
+        width = json.width;
+        height = json.height;
+        
+        canvasElement.width = width;
+        canvasElement.height = height;
+        
+        // Recalculer le zoom
+        zoom = Math.max(1, window.innerHeight / height);
+        
+        // Informer le worker de la nouvelle résolution
+        demuxDecodeWorker.postMessage({
+            action: "RESIZE", 
+            width: width, 
+            height: height
+        });
+        
+        // Nettoyer les buffers existants et demander un nouveau keyframe
+        demuxDecodeWorker.postMessage({action: "CLEAR_BUFFERS"});
+        
+        warningElement.style.display = "block";
+        logElement.style.display = "none";
+        warningElement.innerText = "Résolution ajustée à " + width + "x" + height;
+        setTimeout(function() {
+            warningElement.style.display = "none";
+            logElement.style.display = "block";
+        }, 3000);
+        
+        // Continuer le traitement normal
+    }
     if (json.hasOwnProperty("debug")) {
         debug = json.debug;
     }
