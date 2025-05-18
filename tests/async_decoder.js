@@ -18,6 +18,12 @@ let lastFrameWidth = 0;
 let lastFrameHeight = 0;
 let frameDebugCounter = 0;
 
+// Variables pour tracer les keyframes
+let keyframeRequested = false;
+let keyframeRequestTime = 0;
+let framesAfterKeyframeRequest = 0;
+let keyframeReceived = false;
+
 const texturePool = [];
 
 // ========== Utility Functions ==========
@@ -84,9 +90,35 @@ function drawImageToCanvas(image) {
         actualHeight = image.height;
     }
     
+    // Vérifier si cette frame est la première après une demande de keyframe
+    let isFirstFrameAfterKeyframeRequest = false;
+    if (keyframeRequested && keyframeReceived && framesAfterKeyframeRequest <= 3) {
+        isFirstFrameAfterKeyframeRequest = true;
+        console.log(`🖼️ [QUALITY] Frame #${framesAfterKeyframeRequest} après keyframe: ${actualWidth}x${actualHeight}`);
+        
+        // Envoyer des infos de qualité après le redimensionnement
+        if (framesAfterKeyframeRequest === 3) {
+            let qualityStatus = "✅ [QUALITY] Transition réussie";
+            
+            // Vérifier les incohérences
+            if (actualWidth !== width || actualHeight !== height) {
+                qualityStatus = `⚠️ [QUALITY] Problème de dimensions: reçu ${actualWidth}x${actualHeight}, attendu ${width}x${height}`;
+            }
+            
+            // Transmission au thread principal
+            self.postMessage({
+                quality: qualityStatus,
+                expectedWidth: width,
+                expectedHeight: height,
+                actualWidth: actualWidth,
+                actualHeight: actualHeight
+            });
+        }
+    }
+    
     // Logger uniquement si les dimensions ont changé ou tous les 50 frames
     frameDebugCounter++;
-    if (lastFrameWidth !== actualWidth || lastFrameHeight !== actualHeight || frameDebugCounter >= 50) {
+    if (lastFrameWidth !== actualWidth || lastFrameHeight !== actualHeight || frameDebugCounter >= 50 || isFirstFrameAfterKeyframeRequest) {
         console.log(`📊 [FRAME] Dimensions: ${actualWidth}x${actualHeight}, attendu: ${width}x${height}`);
         lastFrameWidth = actualWidth;
         lastFrameHeight = actualHeight;
@@ -261,9 +293,45 @@ function separateNalUnits(event){
         .map(dat => Uint8Array.from(dat));
 }
 
+// Ajouter cette fonction après heartbeat() ou avant startSocket()
+function requestKeyframe(reason) {
+    console.log(`⏱️ [KEYFRAME] Demande de keyframe (raison: ${reason})`);
+    
+    // Réinitialiser les compteurs de suivi
+    keyframeRequested = true;
+    keyframeRequestTime = Date.now();
+    framesAfterKeyframeRequest = 0;
+    keyframeReceived = false;
+    
+    // Envoyer la demande
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.sendObject({action: "REQUEST_KEYFRAME"});
+    } else {
+        console.error("⏱️ [KEYFRAME] Impossible d'envoyer la demande: socket non disponible");
+    }
+}
+
+// Ensuite, modifier la fonction videoMagic pour tracer la réception des keyframes
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
+    
+    // Incrémenter le compteur de frames si une demande de keyframe est en cours
+    if (keyframeRequested) {
+        framesAfterKeyframeRequest++;
+    }
+    
     if (unittype === 1) {
+        // Frame P ou B (non-keyframe)
+        if (keyframeRequested && !keyframeReceived && framesAfterKeyframeRequest > 5) {
+            console.log(`⏱️ [KEYFRAME] Attente de keyframe en cours - ${framesAfterKeyframeRequest} frames reçues sans keyframe (${Date.now() - keyframeRequestTime}ms)`);
+            
+            // Si trop de frames sont reçues sans keyframe, re-demander
+            if (framesAfterKeyframeRequest % 30 === 0) {
+                console.log(`⏱️ [KEYFRAME] Re-demande de keyframe après ${framesAfterKeyframeRequest} frames`);
+                requestKeyframe("retry-after-timeout");
+            }
+        }
+        
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
                 type: 'delta',
@@ -290,6 +358,17 @@ function videoMagic(dat){
     }
 
     if (unittype === 5) {
+        // Keyframe (I-frame) détectée!
+        console.log(`🔑 [KEYFRAME] Keyframe reçue! ${keyframeRequested ? `(${framesAfterKeyframeRequest} frames après demande, délai: ${Date.now() - keyframeRequestTime}ms)` : "(non demandée)"}`);
+        
+        // Marquer comme reçue et réinitialiser le suivi
+        if (keyframeRequested) {
+            keyframeReceived = true;
+            
+            // Si le redimensionnement est récent, afficher les dimensions actuelles
+            console.log(`🔑 [KEYFRAME] Dimensions actuelles après redimensionnement: ${width}x${height}`);
+        }
+        
         let data = appendByteArray(sps, dat);
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
@@ -435,8 +514,8 @@ function startSocket() {
         setTimeout(() => {
             // Ne demander un keyframe que si aucune frame n'a été reçue
             if (pendingFrames.length === 0 && underflow) {
-                console.log("No frames received after socket open, requesting keyframe");
-                socket.sendObject({action: "REQUEST_KEYFRAME"});
+                console.log("⏱️ [KEYFRAME] Aucune frame reçue après ouverture socket, demande de keyframe");
+                requestKeyframe("initial");
             }
         }, 1000);
         
@@ -607,10 +686,10 @@ self.addEventListener('message', async (message) => {
         // Réinitialiser l'état du décodeur si nécessaire
         underflow = pendingFrames.length === 0;
         
-        // Demander une nouvelle frame-clé
+        // Demander une nouvelle frame-clé après nettoyage du buffer
         if (socket && socket.readyState === WebSocket.OPEN) {
             console.log("[WORKER] Requesting keyframe after buffer clear");
-            socket.sendObject({action: "REQUEST_KEYFRAME"});
+            requestKeyframe("after-resize-buffer-clear");
         }
     } else if(!initted) {
         postInitJobs.push(message);
