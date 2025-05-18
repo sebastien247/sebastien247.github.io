@@ -19,52 +19,8 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     socket,
     port,
     drageventCounter=0,
-    timeoutId;
 
-// Écouteur pour les messages provenant du worker de décodage
-demuxDecodeWorker.onmessage = function(e) {
-    // Traiter les avertissements
-    if (e.data.warning) {
-        console.warn("⚠️ Message du worker: " + e.data.warning);
-        
-        // Afficher brièvement l'avertissement à l'utilisateur
-        warningElement.style.display = "block";
-        logElement.style.display = "none";
-        warningElement.innerText = e.data.warning;
-        
-        // Cacher après quelques secondes
-        setTimeout(function() {
-            warningElement.style.display = "none";
-            logElement.style.display = "block";
-        }, 3000);
-    }
-    
-    // Traiter les informations de qualité d'image
-    if (e.data.quality) {
-        console.log(e.data.quality);
-        
-        // Consigner des informations plus détaillées
-        if (e.data.expectedWidth && e.data.actualWidth) {
-            console.log(`📏 Dimensions attendues: ${e.data.expectedWidth}x${e.data.expectedHeight}`);
-            console.log(`📏 Dimensions réelles: ${e.data.actualWidth}x${e.data.actualHeight}`);
-            
-            // Si les dimensions ne correspondent pas, afficher un avertissement
-            if (e.data.actualWidth !== e.data.expectedWidth || e.data.actualHeight !== e.data.expectedHeight) {
-                console.warn("⚠️ Incohérence de dimensions après redimensionnement");
-                
-                // Réinitialiser complètement l'affichage
-                warningElement.style.display = "block";
-                logElement.style.display = "none";
-                warningElement.innerText = "Problème de dimensionnement détecté. Redimensionnez manuellement pour corriger.";
-            }
-        }
-    }
-    
-    // Traiter les erreurs
-    if (e.data.error) {
-        console.error("❌ Erreur du worker: ", e.data.error);
-    }
-};
+    timeoutId;
 
 canvasElement.style.display = "none";
 
@@ -163,7 +119,7 @@ function postWorkerMessages(json) {
         // 2. Demander une nouvelle keyframe pour obtenir la bonne résolution
         console.log("📤 Requesting keyframe after resize");
         demuxDecodeWorker.postMessage({
-            action: "CLEAR_BUFFERS"
+            action: "REQUEST_KEYFRAME"
         });
         
         // Mettre à jour le zoom pour l'interface utilisateur
@@ -179,6 +135,16 @@ function postWorkerMessages(json) {
             logElement.style.display = "block";
         }, 3000);
     }
+    
+    // Logguer toutes les dimensions et valeurs reçues du serveur
+    console.log("📱 DIMENSIONS SERVEUR REÇUES:");
+    console.log(`   ▸ Taille vidéo: ${json.width}x${json.height}`);
+    console.log(`   ▸ Résolution: ${json.resolution}`);
+    console.log(`   ▸ Port: ${json.port}`);
+    console.log(`   ▸ Debug: ${json.debug}`);
+    console.log(`   ▸ UseBT: ${json.usebt}`);
+    console.log(`   ▸ Version: ${json.buildversion}`);
+    
     if (json.hasOwnProperty("debug")) {
         debug = json.debug;
     }
