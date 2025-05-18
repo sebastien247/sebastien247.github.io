@@ -13,16 +13,12 @@ let pendingFrames = [],
     broadwayDecoder = null,
     lastheart = 0, pongtimer, frameRate;
 
-// Variables pour le suivi des dimensions des frames reçues
+// Variables pour le suivi des dimensions
 let lastFrameWidth = 0;
 let lastFrameHeight = 0;
-let frameDebugCounter = 0;
-
-// Variables pour tracer les keyframes
-let keyframeRequested = false;
-let keyframeRequestTime = 0;
-let framesAfterKeyframeRequest = 0;
-let keyframeReceived = false;
+let keyframesReceived = 0;
+let keyframesRequested = 0;
+let lastFrameTimestamp = 0;
 
 const texturePool = [];
 
@@ -68,69 +64,29 @@ function releaseTexture(gl, texture) {
 }
 
 function drawImageToCanvas(image) {
+    // Vérifier si les dimensions de l'image ont changé
+    const imageWidth = image.codedWidth || width;
+    const imageHeight = image.codedHeight || height;
+    
+    // Logguer uniquement si les dimensions changent
+    if (imageWidth !== lastFrameWidth || imageHeight !== lastFrameHeight) {
+        console.log(`📊 FRAME DIMENSIONS CHANGED: ${imageWidth}x${imageHeight} (canvas: ${width}x${height})`);
+        lastFrameWidth = imageWidth;
+        lastFrameHeight = imageHeight;
+        
+        // Signaler un problème si les dimensions ne correspondent pas
+        if (imageWidth !== width || imageHeight !== height) {
+            console.warn(`⚠️ DIMENSION MISMATCH: Frame(${imageWidth}x${imageHeight}) ≠ Canvas(${width}x${height})`);
+            self.postMessage({warning: `Dimensions incohérentes: Frame(${imageWidth}x${imageHeight}) ≠ Canvas(${width}x${height})`});
+        }
+    }
+    
     const texture = getTexture(gl);
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     //gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-
-    // Récupérer les dimensions réelles de l'image lorsque c'est disponible
-    let actualWidth = width;
-    let actualHeight = height;
-    
-    // Si l'image est un VideoFrame (WebCodec)
-    if (image.codedWidth && image.codedHeight) {
-        actualWidth = image.codedWidth;
-        actualHeight = image.codedHeight;
-    } 
-    // Si c'est un Canvas (Broadway)
-    else if (image.width && image.height) {
-        actualWidth = image.width;
-        actualHeight = image.height;
-    }
-    
-    // Vérifier si cette frame est la première après une demande de keyframe
-    let isFirstFrameAfterKeyframeRequest = false;
-    if (keyframeRequested && keyframeReceived && framesAfterKeyframeRequest <= 3) {
-        isFirstFrameAfterKeyframeRequest = true;
-        console.log(`🖼️ [QUALITY] Frame #${framesAfterKeyframeRequest} après keyframe: ${actualWidth}x${actualHeight}`);
-        
-        // Envoyer des infos de qualité après le redimensionnement
-        if (framesAfterKeyframeRequest === 3) {
-            let qualityStatus = "✅ [QUALITY] Transition réussie";
-            
-            // Vérifier les incohérences
-            if (actualWidth !== width || actualHeight !== height) {
-                qualityStatus = `⚠️ [QUALITY] Problème de dimensions: reçu ${actualWidth}x${actualHeight}, attendu ${width}x${height}`;
-            }
-            
-            // Transmission au thread principal
-            self.postMessage({
-                quality: qualityStatus,
-                expectedWidth: width,
-                expectedHeight: height,
-                actualWidth: actualWidth,
-                actualHeight: actualHeight
-            });
-        }
-    }
-    
-    // Logger uniquement si les dimensions ont changé ou tous les 50 frames
-    frameDebugCounter++;
-    if (lastFrameWidth !== actualWidth || lastFrameHeight !== actualHeight || frameDebugCounter >= 50 || isFirstFrameAfterKeyframeRequest) {
-        console.log(`📊 [FRAME] Dimensions: ${actualWidth}x${actualHeight}, attendu: ${width}x${height}`);
-        lastFrameWidth = actualWidth;
-        lastFrameHeight = actualHeight;
-        frameDebugCounter = 0;
-        
-        // Informer le thread principal du changement de dimensions
-        if (lastFrameWidth !== width || lastFrameHeight !== height) {
-            self.postMessage({
-                warning: `Dimensions de frame incohérentes: reçu ${actualWidth}x${actualHeight}, attendu ${width}x${height}`
-            });
-        }
-    }
 
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
 
@@ -293,49 +249,14 @@ function separateNalUnits(event){
         .map(dat => Uint8Array.from(dat));
 }
 
-// Ajouter cette fonction après heartbeat() ou avant startSocket()
-function requestKeyframe(reason) {
-    console.log(`⏱️ [KEYFRAME] Demande de keyframe (raison: ${reason})`);
-    
-    // Réinitialiser les compteurs de suivi
-    keyframeRequested = true;
-    keyframeRequestTime = Date.now();
-    framesAfterKeyframeRequest = 0;
-    keyframeReceived = false;
-    
-    // Envoyer la demande
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.sendObject({action: "REQUEST_KEYFRAME"});
-    } else {
-        console.error("⏱️ [KEYFRAME] Impossible d'envoyer la demande: socket non disponible");
-    }
-}
-
-// Ensuite, modifier la fonction videoMagic pour tracer la réception des keyframes
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
     
-    // Incrémenter le compteur de frames si une demande de keyframe est en cours
-    if (keyframeRequested) {
-        framesAfterKeyframeRequest++;
-    }
-    
-    if (unittype === 1) {
-        // Frame P ou B (non-keyframe)
-        if (keyframeRequested && !keyframeReceived && framesAfterKeyframeRequest > 5) {
-            console.log(`⏱️ [KEYFRAME] Attente de keyframe en cours - ${framesAfterKeyframeRequest} frames reçues sans keyframe (${Date.now() - keyframeRequestTime}ms)`);
-            
-            // Si trop de frames sont reçues sans keyframe, re-demander
-            if (framesAfterKeyframeRequest % 30 === 0) {
-                console.log(`⏱️ [KEYFRAME] Re-demande de keyframe après ${framesAfterKeyframeRequest} frames`);
-                requestKeyframe("retry-after-timeout");
-            }
-        }
-        
+    if (unittype === 1) { // P-Frame (non-keyframe)
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
                 type: 'delta',
-                timestamp: 0,
+                timestamp: Date.now(),
                 duration: 0,
                 data: dat
             });
@@ -357,23 +278,23 @@ function videoMagic(dat){
         return;
     }
 
-    if (unittype === 5) {
-        // Keyframe (I-frame) détectée!
-        console.log(`🔑 [KEYFRAME] Keyframe reçue! ${keyframeRequested ? `(${framesAfterKeyframeRequest} frames après demande, délai: ${Date.now() - keyframeRequestTime}ms)` : "(non demandée)"}`);
+    if (unittype === 5) { // I-Frame (keyframe)
+        // Incrémenter le compteur de keyframes
+        keyframesReceived++;
         
-        // Marquer comme reçue et réinitialiser le suivi
-        if (keyframeRequested) {
-            keyframeReceived = true;
-            
-            // Si le redimensionnement est récent, afficher les dimensions actuelles
-            console.log(`🔑 [KEYFRAME] Dimensions actuelles après redimensionnement: ${width}x${height}`);
-        }
+        // Calculer le temps depuis la dernière keyframe
+        const now = Date.now();
+        const elapsed = now - lastFrameTimestamp;
+        lastFrameTimestamp = now;
+        
+        console.log(`🔑 KEYFRAME RECEIVED #${keyframesReceived} (${elapsed}ms since last)`);
+        self.postMessage({info: `Keyframe reçue #${keyframesReceived}`});
         
         let data = appendByteArray(sps, dat);
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
                 type: 'key',
-                timestamp: 0,
+                timestamp: now,
                 duration: 0,
                 data: data
             });
@@ -398,14 +319,18 @@ function videoMagic(dat){
 function headerMagic(dat) {
     let unittype = (dat[4] & 0x1f);
 
-    if (unittype === 7) {
-        // SPS - Sequence Parameter Set - contient les informations sur la résolution vidéo
-        console.log(`🔍 [SPS] Réception d'un SPS - longueur: ${dat.length} bytes`);
-        
-        // Extraire le profil, level et autres infos du SPS
-        let profileIdc = dat[5];
-        let levelIdc = dat[7];
-        console.log(`🔍 [SPS] Profile: ${profileIdc}, Level: ${levelIdc}, Dimensions configurées: ${width}x${height}`);
+    if (unittype === 7) { // SPS - Sequence Parameter Set (contient des infos de résolution)
+        // Extraire les informations de résolution du SPS si possible
+        try {
+            // Note: l'analyse complète du SPS nécessiterait un parser complexe
+            // Cette approche est une simplification pour le débogage
+            
+            // Log des données SPS importantes pour debug
+            const spsHeader = dat.slice(0, Math.min(20, dat.length));
+            console.log(`📋 SPS HEADER: ${Array.from(spsHeader).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+        } catch (e) {
+            console.error('Erreur lors de l\'analyse du SPS', e);
+        }
         
         let config = {
             codec: "avc1.",
@@ -420,25 +345,22 @@ function headerMagic(dat) {
             config.codec += h;
         }
         
-        console.log(`🔍 [SPS] Codec configuré: ${config.codec}`);
+        console.log(`🔧 CONFIGURING DECODER: ${config.codedWidth}x${config.codedHeight}, codec=${config.codec}`);
         
         sps = dat;
         if(decoder !== null) {
             try {
                 decoder.configure(config);
-                console.log(`🔍 [SPS] Décodeur reconfiguré avec succès: ${width}x${height}`);
             } catch (exc) {
-                console.error(`❌ [SPS] Erreur de configuration du décodeur:`, exc);
+                console.error('Erreur lors de la configuration du décodeur', exc);
                 switchToBroadway();
             }
         }
 
         return;
     }
-    else if (unittype === 8) {
-        console.log(`🔍 [PPS] Réception d'un PPS - longueur: ${dat.length} bytes`);
+    else if (unittype === 8)
         sps=appendByteArray(sps,dat)
-    }
     else
         videoMagic(dat);
 }
@@ -514,8 +436,8 @@ function startSocket() {
         setTimeout(() => {
             // Ne demander un keyframe que si aucune frame n'a été reçue
             if (pendingFrames.length === 0 && underflow) {
-                console.log("⏱️ [KEYFRAME] Aucune frame reçue après ouverture socket, demande de keyframe");
-                requestKeyframe("initial");
+                console.log("No frames received after socket open, requesting keyframe");
+                socket.sendObject({action: "REQUEST_KEYFRAME"});
             }
         }, 1000);
         
@@ -571,19 +493,11 @@ let postInitJobs = [];
 function messageHandler(message) {
     if (message.data.action === 'NIGHT') {
         night = message.data.value;
-    }
-    else if (message.data.action === 'RESIZE') {
-        // Traçage détaillé des événements de redimensionnement
-        console.log(`🔄 [RESIZE] Redimensionnement demandé: ${message.data.width}x${message.data.height}, dimensions actuelles: ${width}x${height}`);
-        
-        // Enregistrer les anciennes dimensions pour référence
-        let oldWidth = width;
-        let oldHeight = height;
-        
-        // Informer l'utilisateur du redimensionnement en cours
-        self.postMessage({
-            warning: `Redimensionnement en cours: ${oldWidth}x${oldHeight} → ${message.data.width}x${message.data.height}`
-        });
+    } else if (message.data.action === 'REQUEST_KEYFRAME') {
+        // Incrémenter le compteur de requêtes de keyframe
+        keyframesRequested++;
+        console.log(`🔑 KEYFRAME REQUEST #${keyframesRequested} sent to server`);
+        self.postMessage({info: `Demande de keyframe #${keyframesRequested} envoyée`});
     }
     
     if (socket.readyState === WebSocket.OPEN) {
@@ -686,10 +600,10 @@ self.addEventListener('message', async (message) => {
         // Réinitialiser l'état du décodeur si nécessaire
         underflow = pendingFrames.length === 0;
         
-        // Demander une nouvelle frame-clé après nettoyage du buffer
+        // Demander une nouvelle frame-clé
         if (socket && socket.readyState === WebSocket.OPEN) {
             console.log("[WORKER] Requesting keyframe after buffer clear");
-            requestKeyframe("after-resize-buffer-clear");
+            socket.sendObject({action: "REQUEST_KEYFRAME"});
         }
     } else if(!initted) {
         postInitJobs.push(message);
