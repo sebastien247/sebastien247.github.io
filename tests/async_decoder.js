@@ -13,6 +13,11 @@ let pendingFrames = [],
     broadwayDecoder = null,
     lastheart = 0, pongtimer, frameRate;
 
+// Variables pour le suivi des dimensions des frames reçues
+let lastFrameWidth = 0;
+let lastFrameHeight = 0;
+let frameDebugCounter = 0;
+
 const texturePool = [];
 
 // ========== Utility Functions ==========
@@ -63,6 +68,37 @@ function drawImageToCanvas(image) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     //gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+
+    // Récupérer les dimensions réelles de l'image lorsque c'est disponible
+    let actualWidth = width;
+    let actualHeight = height;
+    
+    // Si l'image est un VideoFrame (WebCodec)
+    if (image.codedWidth && image.codedHeight) {
+        actualWidth = image.codedWidth;
+        actualHeight = image.codedHeight;
+    } 
+    // Si c'est un Canvas (Broadway)
+    else if (image.width && image.height) {
+        actualWidth = image.width;
+        actualHeight = image.height;
+    }
+    
+    // Logger uniquement si les dimensions ont changé ou tous les 50 frames
+    frameDebugCounter++;
+    if (lastFrameWidth !== actualWidth || lastFrameHeight !== actualHeight || frameDebugCounter >= 50) {
+        console.log(`📊 [FRAME] Dimensions: ${actualWidth}x${actualHeight}, attendu: ${width}x${height}`);
+        lastFrameWidth = actualWidth;
+        lastFrameHeight = actualHeight;
+        frameDebugCounter = 0;
+        
+        // Informer le thread principal du changement de dimensions
+        if (lastFrameWidth !== width || lastFrameHeight !== height) {
+            self.postMessage({
+                warning: `Dimensions de frame incohérentes: reçu ${actualWidth}x${actualHeight}, attendu ${width}x${height}`
+            });
+        }
+    }
 
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
 
@@ -284,6 +320,14 @@ function headerMagic(dat) {
     let unittype = (dat[4] & 0x1f);
 
     if (unittype === 7) {
+        // SPS - Sequence Parameter Set - contient les informations sur la résolution vidéo
+        console.log(`🔍 [SPS] Réception d'un SPS - longueur: ${dat.length} bytes`);
+        
+        // Extraire le profil, level et autres infos du SPS
+        let profileIdc = dat[5];
+        let levelIdc = dat[7];
+        console.log(`🔍 [SPS] Profile: ${profileIdc}, Level: ${levelIdc}, Dimensions configurées: ${width}x${height}`);
+        
         let config = {
             codec: "avc1.",
             codedHeight: height,
@@ -296,19 +340,26 @@ function headerMagic(dat) {
             }
             config.codec += h;
         }
+        
+        console.log(`🔍 [SPS] Codec configuré: ${config.codec}`);
+        
         sps = dat;
         if(decoder !== null) {
             try {
                 decoder.configure(config);
+                console.log(`🔍 [SPS] Décodeur reconfiguré avec succès: ${width}x${height}`);
             } catch (exc) {
+                console.error(`❌ [SPS] Erreur de configuration du décodeur:`, exc);
                 switchToBroadway();
             }
         }
 
         return;
     }
-    else if (unittype === 8)
+    else if (unittype === 8) {
+        console.log(`🔍 [PPS] Réception d'un PPS - longueur: ${dat.length} bytes`);
         sps=appendByteArray(sps,dat)
+    }
     else
         videoMagic(dat);
 }
@@ -442,6 +493,20 @@ function messageHandler(message) {
     if (message.data.action === 'NIGHT') {
         night = message.data.value;
     }
+    else if (message.data.action === 'RESIZE') {
+        // Traçage détaillé des événements de redimensionnement
+        console.log(`🔄 [RESIZE] Redimensionnement demandé: ${message.data.width}x${message.data.height}, dimensions actuelles: ${width}x${height}`);
+        
+        // Enregistrer les anciennes dimensions pour référence
+        let oldWidth = width;
+        let oldHeight = height;
+        
+        // Informer l'utilisateur du redimensionnement en cours
+        self.postMessage({
+            warning: `Redimensionnement en cours: ${oldWidth}x${oldHeight} → ${message.data.width}x${message.data.height}`
+        });
+    }
+    
     if (socket.readyState === WebSocket.OPEN) {
         socket.sendObject(message.data);
     }
