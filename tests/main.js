@@ -56,12 +56,12 @@ function checkPhone() {
         .then(response => response.text())
         .then(data => {
             clearTimeout(wait);
-            /*if (document.hidden) {
+            if (document.hidden) {
                 setTimeout(() => {
                     checkPhone();
                 }, 2000);
                 return
-            }*/
+            }
             if (isJson(data)) {
                 const json = JSON.parse(data);
                 postWorkerMessages(json)
