@@ -4,6 +4,7 @@ const demuxDecodeWorker = new Worker("./async_decoder.js"),
     warningElement = document.getElementById('warning'),
     canvasElement = document.querySelector('canvas'),
     bodyElement = document.querySelector('body'),
+    waitingMessageElement = document.getElementById('waiting-message'),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     urlToFetch = `https://taada.top:8081/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
 
@@ -21,7 +22,7 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     socket,
     port,
     drageventCounter=0,
-
+    videoFrameReceived = false,
     timeoutId;
 
 canvasElement.style.display = "none";
@@ -276,6 +277,11 @@ function postWorkerMessages(json) {
 
     }
 
+    // Show the waiting message after socket port is retrieved
+    canvasElement.style.display = "block";
+    document.getElementById("info").style.display = "none";
+    waitingMessageElement.style.display = "flex";
+
     demuxDecodeWorker.addEventListener("message", function (e) {
 
         if (e.data.hasOwnProperty('error')) {
@@ -295,7 +301,7 @@ function postWorkerMessages(json) {
                 // Use a delayed reload to allow logging to appear
                 setTimeout(function() {
                     console.log("Reloading page due to connection error");
-            document.location.reload();
+                    document.location.reload();
                 }, 2000);
             } else {
                 // For less critical errors, just show a warning
@@ -320,6 +326,12 @@ function postWorkerMessages(json) {
             },2000);
         }
 
+        // Hide the waiting message when first video frame is received
+        if (e.data.hasOwnProperty('videoFrameReceived') && !videoFrameReceived) {
+            videoFrameReceived = true;
+            waitingMessageElement.style.display = "none";
+        }
+
         if (debug) {
             logElement.innerText = `${height}p - FPS ${e.data.fps}, decoder que: ${e.data.decodeQueueSize}, pendingFrame: ${e.data.pendingFrames}, forced refresh counter: ${forcedRefreshCounter}`;
         }
@@ -336,8 +348,6 @@ function postWorkerMessages(json) {
         demuxDecodeWorker.postMessage({action: "NIGHT", value: event.matches});
     });
 
-    canvasElement.style.display = "block";
-    document.getElementById("info").style.display = "none";
     //setInterval(function(){navigator.geolocation.getCurrentPosition(handlepossition);},500);
 }
 

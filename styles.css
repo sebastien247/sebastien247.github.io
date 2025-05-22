@@ -22,6 +22,43 @@ canvas, video {
     margin: 0 auto;
 }
 
+/* Waiting message styling */
+.waiting-message {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.8);
+    z-index: 1;
+    color: white;
+}
+
+.waiting-message p {
+    font-size: 1.8em;
+    margin-bottom: 20px;
+    color: #E82127;
+    text-shadow: 0 0 10px rgba(232, 33, 39, 0.3);
+}
+
+.loading-indicator {
+    width: 50px;
+    height: 50px;
+    border: 5px solid rgba(255, 255, 255, 0.2);
+    border-top: 5px solid #E82127;
+    border-radius: 50%;
+    animation: spin 1.5s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
 .tesla-container {
     position: relative;
     z-index: 2;
