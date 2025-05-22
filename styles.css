@@ -21,11 +21,6 @@ html, body {
 canvas, video {
     width: auto;
     height: max(1080px, 100vh);
-    position: absolute;
-    z-index: 1;
-
-    top:0; /* HACK */
-    left:0; /* HACK */
 }
 
 .tesla-container {
