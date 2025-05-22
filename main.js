@@ -142,18 +142,25 @@ function postWorkerMessages(json) {
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
-        zoom = Math.max(1, window.innerHeight / 1080);
+        zoom = window.innerWidth < window.innerHeight 
+            ? Math.min(1, window.innerWidth / width)
+            : Math.min(1, window.innerHeight / height);
     } else if (json.resolution === 1) {
         width = 1280;
         height = 720;
-        zoom = Math.max(1, window.innerHeight / 720);
-        document.querySelector("canvas").style.height = "max(100vh,720px)";
+        zoom = window.innerWidth < window.innerHeight 
+            ? Math.min(1, window.innerWidth / width)
+            : Math.min(1, window.innerHeight / height);
+        //document.querySelector("canvas").style.height = "max(100vh,720px)";
     } else {
         width = 800;
         height = 480;
-        zoom = Math.max(1, window.innerHeight / 480);
-        document.querySelector("canvas").style.height = "max(100vh,480px)";
+        zoom = window.innerWidth < window.innerHeight 
+            ? Math.min(1, window.innerWidth / width)
+            : Math.min(1, window.innerHeight / height);
+        //document.querySelector("canvas").style.height = "max(100vh,480px)";
     }
+
     if (json.hasOwnProperty("buildversion")) {
         appVersion = parseInt(json.buildversion);
         if (latestVersion > parseInt(json.buildversion)) {
