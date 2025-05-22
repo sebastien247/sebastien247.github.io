@@ -108,7 +108,6 @@ function switchToBroadway() {
 
 function initCanvas(canvas, forceBroadway) {
 
-    // Stocker les dimensions initiales du canvas
     height = canvas.height;
     width = canvas.width;
 
@@ -356,8 +355,11 @@ function handleVideoMessage(dat){
         pongtimer=setTimeout(noPong,3000);
         return;
     }
-    if (unittype === 1 || unittype === 5)
-        videoMagic(dat)
+    if (unittype === 1 || unittype === 5) {
+        videoMagic(dat);
+        // Notify the main thread that a video frame was received (not just a pong packet)
+        self.postMessage({videoFrameReceived: true});
+    }
     else
         separateNalUnits(dat).forEach(headerMagic)
 }
