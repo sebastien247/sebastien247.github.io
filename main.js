@@ -97,7 +97,41 @@ function postWorkerMessages(json) {
         location.reload();
         return;
     }
-
+    
+    if (json.hasOwnProperty("resolutionChanged")) {
+        console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
+        
+        // Ajuster le canvas sans recharger la page
+        width = json.width;
+        height = json.height;
+        
+        // Seul le worker peut mettre à jour le canvas après transferControlToOffscreen
+        // Envoyer les deux messages séparément pour plus de clarté
+        
+        // 1. Informer le worker de la nouvelle résolution du décodeur
+        demuxDecodeWorker.postMessage({
+            action: "RESIZE", 
+            width: width, 
+            height: height
+        });
+        
+        // 2. Demander une nouvelle keyframe pour obtenir la bonne résolution
+        demuxDecodeWorker.postMessage({
+            action: "CLEAR_BUFFERS"
+        });
+        
+        // Mettre à jour le zoom pour l'interface utilisateur
+        zoom = Math.max(1, window.innerHeight / height);
+        
+        // Afficher un message temporaire
+        warningElement.style.display = "block";
+        logElement.style.display = "none";
+        warningElement.innerText = "Résolution ajustée à " + width + "x" + height;
+        setTimeout(function() {
+            warningElement.style.display = "none";
+            logElement.style.display = "block";
+        }, 3000);
+    }
     if (json.hasOwnProperty("debug")) {
         debug = json.debug;
     }
@@ -105,31 +139,21 @@ function postWorkerMessages(json) {
         usebt = json.usebt;
     }
     port = json.port;
-
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
-        zoom = window.innerWidth < window.innerHeight 
-            ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);
+        zoom = Math.max(1, window.innerHeight / 1080);
     } else if (json.resolution === 1) {
         width = 1280;
         height = 720;
-        zoom = window.innerWidth < window.innerHeight 
-            ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);
-        //document.querySelector("canvas").style.height = "max(100vh,720px)";
+        zoom = Math.max(1, window.innerHeight / 720);
+        document.querySelector("canvas").style.height = "max(100vh,720px)";
     } else {
         width = 800;
         height = 480;
-        zoom = window.innerWidth < window.innerHeight 
-            ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);
-        //document.querySelector("canvas").style.height = "max(100vh,480px)";
+        zoom = Math.max(1, window.innerHeight / 480);
+        document.querySelector("canvas").style.height = "max(100vh,480px)";
     }
-
-    canvasElement.style.transform = "scale(" + zoom + ")";
-
     if (json.hasOwnProperty("buildversion")) {
         appVersion = parseInt(json.buildversion);
         if (latestVersion > parseInt(json.buildversion)) {
@@ -150,10 +174,18 @@ function postWorkerMessages(json) {
 
     canvasElement.width = width;
     canvasElement.height = height;
+    
+    // Appliquer la transformation d'échelle au conteneur
+    canvasElement.style.transform = "scale(" + zoom + ")";
 
+    // Transfert du contrôle au worker
     offscreen = canvasElement.transferControlToOffscreen();
-
-    demuxDecodeWorker.postMessage({canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway}, [offscreen]);
+    
+    // Initialiser le worker avec le canvas offscreen
+    demuxDecodeWorker.postMessage(
+        {canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height}, 
+        [offscreen]
+    );
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
