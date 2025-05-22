@@ -358,6 +358,7 @@ function handleVideoMessage(dat){
     if (unittype === 1 || unittype === 5) {
         videoMagic(dat);
         // Notify the main thread that a video frame was received (not just a pong packet)
+        console.log("Sending videoFrameReceived message to main thread", unittype);
         self.postMessage({videoFrameReceived: true});
     }
     else

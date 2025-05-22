@@ -280,7 +280,21 @@ function postWorkerMessages(json) {
     // Show the waiting message after socket port is retrieved
     canvasElement.style.display = "block";
     document.getElementById("info").style.display = "none";
-    waitingMessageElement.style.display = "flex";
+    
+    // Vérifier que waitingMessageElement existe
+    if (waitingMessageElement) {
+        console.log("Showing waiting message");
+        waitingMessageElement.style.display = "flex";
+    } else {
+        console.error("waitingMessageElement is null, trying to get it again");
+        waitingMessageElement = document.getElementById('waiting-message');
+        if (waitingMessageElement) {
+            console.log("Got waitingMessageElement, showing it");
+            waitingMessageElement.style.display = "flex";
+        } else {
+            console.error("waitingMessageElement still not found");
+        }
+    }
 
     demuxDecodeWorker.addEventListener("message", function (e) {
 
@@ -327,9 +341,15 @@ function postWorkerMessages(json) {
         }
 
         // Hide the waiting message when first video frame is received
-        if (e.data.hasOwnProperty('videoFrameReceived') && !videoFrameReceived) {
+        if (e.data.hasOwnProperty('videoFrameReceived')) {
+            console.log("Video frame received message received!", e.data);
             videoFrameReceived = true;
-            waitingMessageElement.style.display = "none";
+            if (waitingMessageElement) {
+                waitingMessageElement.style.display = "none";
+                console.log("Hiding waiting message");
+            } else {
+                console.error("waitingMessageElement not found");
+            }
         }
 
         if (debug) {
