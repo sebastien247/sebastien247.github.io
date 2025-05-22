@@ -24,8 +24,31 @@ let zoom = Math.max(1, window.innerHeight / 1080),
 
 canvasElement.style.display = "none";
 
-
-
+/**
+ * Converts screen coordinates to canvas coordinates, accounting for canvas position and scaling,
+ * then adjusts them for the current resolution (width/height)
+ * @param {number} screenX - The X coordinate on the screen
+ * @param {number} screenY - The Y coordinate on the screen
+ * @returns {{x: number, y: number}} The converted coordinates relative to the canvas and adjusted for resolution
+ */
+function convertToCanvasCoordinates(screenX, screenY) {
+    // Get the canvas's bounding rectangle, which includes any CSS transformations
+    const canvasRect = canvasElement.getBoundingClientRect();
+    
+    // Calculate the position relative to the canvas's top-left corner
+    const canvasRelativeX = screenX - canvasRect.left;
+    const canvasRelativeY = screenY - canvasRect.top;
+    
+    // Calculate relative position (0-1) within the displayed canvas
+    const relativeX = canvasRelativeX / canvasRect.width;
+    const relativeY = canvasRelativeY / canvasRect.height;
+    
+    // Apply the relative position to the target resolution (width/height)
+    const x = Math.floor(relativeX * width);
+    const y = Math.floor(relativeY * height);
+    
+    return { x, y };
+}
 
 function handlepossition(possition){
     demuxDecodeWorker.postMessage({
@@ -121,7 +144,7 @@ function postWorkerMessages(json) {
         });
         
         // Mettre à jour le zoom pour l'interface utilisateur
-        zoom = Math.max(1, window.innerHeight / height);
+        //zoom = Math.max(1, window.innerHeight / height);
         
         // Afficher un message temporaire
         warningElement.style.display = "block";
@@ -142,22 +165,22 @@ function postWorkerMessages(json) {
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
-        zoom = window.innerWidth < window.innerHeight 
+        /*zoom = window.innerWidth < window.innerHeight 
             ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);
+            : Math.min(1, window.innerHeight / height);*/
     } else if (json.resolution === 1) {
         width = 1280;
         height = 720;
-        zoom = window.innerWidth < window.innerHeight 
+        /*zoom = window.innerWidth < window.innerHeight 
             ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);
+            : Math.min(1, window.innerHeight / height);*/
         document.querySelector("canvas").style.height = "max(100vh,720px)";
     } else {
         width = 800;
         height = 480;
-        zoom = window.innerWidth < window.innerHeight 
+        /*zoom = window.innerWidth < window.innerHeight 
             ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);
+            : Math.min(1, window.innerHeight / height);*/
         document.querySelector("canvas").style.height = "max(100vh,480px)";
     }
 
@@ -326,10 +349,11 @@ bodyElement.addEventListener('touchstart', (event) => {
     event.preventDefault();
     
     // Envoi immédiat sans requestAnimationFrame car ces événements sont critiques
+    const coords = convertToCanvasCoordinates(event.touches[0].clientX, event.touches[0].clientY);
     demuxDecodeWorker.postMessage({
         action: "DOWN",
-        X: Math.floor(event.touches[0].clientX / zoom),
-        Y: Math.floor(event.touches[0].clientY / zoom),
+        X: coords.x,
+        Y: coords.y,
         timestamp: performance.now()
     });
 }, { passive: false }); // Important pour permettre preventDefault
@@ -338,20 +362,24 @@ bodyElement.addEventListener('touchend', (event) => {
     // Utiliser preventDefault pour éviter les délais de clic du navigateur
     event.preventDefault();
     
+    const coords = convertToCanvasCoordinates(event.changedTouches[0].clientX, event.changedTouches[0].clientY);
     demuxDecodeWorker.postMessage({
         action: "UP",
-        X: Math.floor(event.changedTouches[0].clientX / zoom),
-        Y: Math.floor(event.changedTouches[0].clientY / zoom),
+        X: coords.x,
+        Y: coords.y,
         timestamp: performance.now()
     });
 }, { passive: false }); // Important pour permettre preventDefault
 
 bodyElement.addEventListener('touchcancel', (event) => {
-    demuxDecodeWorker.postMessage({
-        action: "UP",
-        X: Math.floor(event.touches[0].clientX / zoom),
-        Y: Math.floor(event.touches[0].clientY / zoom)
-    });
+    if (event.touches.length > 0) {
+        const coords = convertToCanvasCoordinates(event.touches[0].clientX, event.touches[0].clientY);
+        demuxDecodeWorker.postMessage({
+            action: "UP",
+            X: coords.x,
+            Y: coords.y
+        });
+    }
 });
 
 bodyElement.addEventListener('touchmove', (event) => {
@@ -360,10 +388,11 @@ bodyElement.addEventListener('touchmove', (event) => {
     if (now - lastTouchMoveTime >= TOUCH_THROTTLE_MS) {
         lastTouchMoveTime = now;
         
+        const coords = convertToCanvasCoordinates(event.touches[0].clientX, event.touches[0].clientY);
         demuxDecodeWorker.postMessage({
             action: "DRAG",
-            X: Math.floor(event.touches[0].clientX / zoom),
-            Y: Math.floor(event.touches[0].clientY / zoom),
+            X: coords.x,
+            Y: coords.y,
         });
     }
 });
