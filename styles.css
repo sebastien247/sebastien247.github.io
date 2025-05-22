@@ -19,8 +19,6 @@ html, body {
 }
 
 canvas, video {
-    width: auto;
-    height: max(1080px, 100vh);
     margin: 0 auto;
 }
 
