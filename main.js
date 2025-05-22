@@ -151,14 +151,14 @@ function postWorkerMessages(json) {
         zoom = window.innerWidth < window.innerHeight 
             ? Math.min(1, window.innerWidth / width)
             : Math.min(1, window.innerHeight / height);
-        //document.querySelector("canvas").style.height = "max(100vh,720px)";
+        document.querySelector("canvas").style.height = "max(100vh,720px)";
     } else {
         width = 800;
         height = 480;
         zoom = window.innerWidth < window.innerHeight 
             ? Math.min(1, window.innerWidth / width)
             : Math.min(1, window.innerHeight / height);
-        //document.querySelector("canvas").style.height = "max(100vh,480px)";
+        document.querySelector("canvas").style.height = "max(100vh,480px)";
     }
 
     if (json.hasOwnProperty("buildversion")) {
@@ -183,7 +183,7 @@ function postWorkerMessages(json) {
     canvasElement.height = height;
     
     // Appliquer la transformation d'échelle au conteneur
-    canvasElement.style.transform = "scale(" + zoom + ")";
+    //canvasElement.style.transform = "scale(" + zoom + ")";
 
     // Transfert du contrôle au worker
     offscreen = canvasElement.transferControlToOffscreen();
