@@ -27,11 +27,11 @@ let zoom = Math.max(1, window.innerHeight / 1080),
 canvasElement.style.display = "none";
 
 /**
- * Converts screen coordinates to canvas coordinates, accounting for canvas position and scaling,
- * then adjusts them for the current resolution (width/height) en tenant compte des marges
+ * Converts screen coordinates to canvas coordinates, accounting for canvas position, scaling,
+ * and image margins within the canvas
  * @param {number} screenX - The X coordinate on the screen
  * @param {number} screenY - The Y coordinate on the screen
- * @returns {{x: number, y: number}} The converted coordinates relative to the canvas and adjusted for resolution
+ * @returns {{x: number, y: number}} The converted coordinates relative to the canvas
  */
 function convertToCanvasCoordinates(screenX, screenY) {
     // Get the canvas's bounding rectangle, which includes any CSS transformations
@@ -41,25 +41,22 @@ function convertToCanvasCoordinates(screenX, screenY) {
     const canvasRelativeX = screenX - canvasRect.left;
     const canvasRelativeY = screenY - canvasRect.top;
     
-    // Calculate relative position (0-1) within the displayed canvas
-    const relativeX = canvasRelativeX / canvasRect.width;
-    const relativeY = canvasRelativeY / canvasRect.height;
-    
     // Taille réelle de l'image (sans les marges)
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
     
-    // Calculate the margins as relative values (0-1)
-    const relativeWidthMargin = (widthMargin || 0) / width / 2; // Divisé par 2 car marge de chaque côté
-    const relativeHeightMargin = (heightMargin || 0) / height / 2; // Divisé par 2 car marge de chaque côté
+    // Calcul des marges horizontales et verticales en pixels dans le canvas interne
+    const hMarginPixels = widthMargin || 0;
+    const vMarginPixels = heightMargin || 0;
     
-    // Adjust the relative position to account for margins
-    const adjustedRelativeX = relativeWidthMargin + relativeX * (1 - 2 * relativeWidthMargin);
-    const adjustedRelativeY = relativeHeightMargin + relativeY * (1 - 2 * relativeHeightMargin);
+    // Calculer les positions relatives (pourcentage) par rapport à la taille affichée du canvas
+    const percentX = canvasRelativeX / canvasRect.width;
+    const percentY = canvasRelativeY / canvasRect.height;
     
-    // Apply the adjusted relative position to the target resolution
-    const x = Math.floor(adjustedRelativeX * width);
-    const y = Math.floor(adjustedRelativeY * height);
+    // Appliquer les pourcentages aux dimensions réelles et ajouter l'offset des marges
+    // La marge est divisée par 2 car elle est répartie des deux côtés
+    const x = Math.floor((hMarginPixels / 2) + (percentX * imageWidth));
+    const y = Math.floor((vMarginPixels / 2) + (percentY * imageHeight));
     
     return { x, y };
 }
@@ -130,38 +127,38 @@ function findGetParameter(parameterName) {
 
 /**
  * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
- * tout en préservant le ratio de l'image et en tenant compte des marges
  */
 function updateCanvasSize() {
     // Taille réelle de l'image (sans les marges)
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
-    
-    // Ratio de l'image
     const imageRatio = imageWidth / imageHeight;
     
-    // Dimensions de la fenêtre
     const windowWidth = window.innerWidth;
     const windowHeight = window.innerHeight;
     const windowRatio = windowWidth / windowHeight;
     
-    // Déterminer si on doit adapter en fonction de la largeur ou de la hauteur
-    if (imageRatio > windowRatio) {
-        // L'image est plus large proportionnellement que la fenêtre
-        // → On ajuste sur la largeur
-        canvasElement.style.width = '100vw';
-        canvasElement.style.height = 'auto';
-        // Calculer la hauteur résultante
-        const heightValue = windowWidth / imageRatio;
-        canvasElement.style.height = `${heightValue}px`;
+    let displayWidth, displayHeight;
+
+    if (windowRatio >= 1 && imageRatio >= 1) {
+        // Fenêtre et image en paysage
+        displayWidth = imageWidth * (windowHeight / imageHeight);
+    } else if (windowRatio >= 1 && imageRatio < 1) {
+        // Fenêtre en paysage, image en portrait
+        displayHeight = imageHeight * (windowWidth / imageWidth);
+    } else if (windowRatio < 1 && imageRatio >= 1) {
+        // Fenêtre en portrait, image en paysage
+        displayHeight = imageHeight * (windowWidth / imageWidth);
     } else {
-        // L'image est plus haute proportionnellement que la fenêtre
-        // → On ajuste sur la hauteur
-        canvasElement.style.height = '100vh';
-        canvasElement.style.width = 'auto';
-        // Calculer la largeur résultante
-        const widthValue = windowHeight * imageRatio;
-        canvasElement.style.width = `${widthValue}px`;
+        // Fenêtre et image en portrait
+        displayWidth = imageWidth * (windowHeight / imageHeight);
+    }
+    
+    if (displayWidth !== undefined) {
+        canvasElement.style.width = `${displayWidth}px`;
+    }
+    if (displayHeight !== undefined) {
+        canvasElement.style.height = `${displayHeight}px`;
     }
 }
 
