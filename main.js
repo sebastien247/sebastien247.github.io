@@ -15,6 +15,8 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     usebt = true,
     width,
     height,
+    widthMargin,
+    heightMargin,
     controller,
     socket,
     port,
@@ -26,7 +28,7 @@ canvasElement.style.display = "none";
 
 /**
  * Converts screen coordinates to canvas coordinates, accounting for canvas position and scaling,
- * then adjusts them for the current resolution (width/height)
+ * then adjusts them for the current resolution (width/height) en tenant compte des marges
  * @param {number} screenX - The X coordinate on the screen
  * @param {number} screenY - The Y coordinate on the screen
  * @returns {{x: number, y: number}} The converted coordinates relative to the canvas and adjusted for resolution
@@ -43,9 +45,21 @@ function convertToCanvasCoordinates(screenX, screenY) {
     const relativeX = canvasRelativeX / canvasRect.width;
     const relativeY = canvasRelativeY / canvasRect.height;
     
-    // Apply the relative position to the target resolution (width/height)
-    const x = Math.floor(relativeX * width);
-    const y = Math.floor(relativeY * height);
+    // Taille réelle de l'image (sans les marges)
+    const imageWidth = width - (widthMargin || 0);
+    const imageHeight = height - (heightMargin || 0);
+    
+    // Calculate the margins as relative values (0-1)
+    const relativeWidthMargin = (widthMargin || 0) / width / 2; // Divisé par 2 car marge de chaque côté
+    const relativeHeightMargin = (heightMargin || 0) / height / 2; // Divisé par 2 car marge de chaque côté
+    
+    // Adjust the relative position to account for margins
+    const adjustedRelativeX = relativeWidthMargin + relativeX * (1 - 2 * relativeWidthMargin);
+    const adjustedRelativeY = relativeHeightMargin + relativeY * (1 - 2 * relativeHeightMargin);
+    
+    // Apply the adjusted relative position to the target resolution
+    const x = Math.floor(adjustedRelativeX * width);
+    const y = Math.floor(adjustedRelativeY * height);
     
     return { x, y };
 }
@@ -114,19 +128,53 @@ function findGetParameter(parameterName) {
     return result;
 }
 
-function postWorkerMessages(json) {
-    if (json.hasOwnProperty("wrongresolution")) {
-        alert("Browser resolution doesn't match app resolution. Updating values and restarting app.");
-        location.reload();
-        return;
-    }
+/**
+ * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
+ * tout en préservant le ratio de l'image et en tenant compte des marges
+ */
+function updateCanvasSize() {
+    // Taille réelle de l'image (sans les marges)
+    const imageWidth = width - (widthMargin || 0);
+    const imageHeight = height - (heightMargin || 0);
     
+    // Ratio de l'image
+    const imageRatio = imageWidth / imageHeight;
+    
+    // Dimensions de la fenêtre
+    const windowWidth = window.innerWidth;
+    const windowHeight = window.innerHeight;
+    const windowRatio = windowWidth / windowHeight;
+    
+    // Déterminer si on doit adapter en fonction de la largeur ou de la hauteur
+    if (imageRatio > windowRatio) {
+        // L'image est plus large proportionnellement que la fenêtre
+        // → On ajuste sur la largeur
+        canvasElement.style.width = '100vw';
+        canvasElement.style.height = 'auto';
+        // Calculer la hauteur résultante
+        const heightValue = windowWidth / imageRatio;
+        canvasElement.style.height = `${heightValue}px`;
+    } else {
+        // L'image est plus haute proportionnellement que la fenêtre
+        // → On ajuste sur la hauteur
+        canvasElement.style.height = '100vh';
+        canvasElement.style.width = 'auto';
+        // Calculer la largeur résultante
+        const widthValue = windowHeight * imageRatio;
+        canvasElement.style.width = `${widthValue}px`;
+    }
+}
+
+function postWorkerMessages(json) {  
     if (json.hasOwnProperty("resolutionChanged")) {
         console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
         
         // Ajuster le canvas sans recharger la page
         width = json.width;
         height = json.height;
+
+        widthMargin = json.widthMargin;
+        heightMargin = json.heightMargin;
         
         // Seul le worker peut mettre à jour le canvas après transferControlToOffscreen
         // Envoyer les deux messages séparément pour plus de clarté
@@ -143,8 +191,8 @@ function postWorkerMessages(json) {
             action: "CLEAR_BUFFERS"
         });
         
-        // Mettre à jour le zoom pour l'interface utilisateur
-        //zoom = Math.max(1, window.innerHeight / height);
+        // Mettre à jour la taille du canvas
+        updateCanvasSize();
         
         // Afficher un message temporaire
         warningElement.style.display = "block";
@@ -165,23 +213,30 @@ function postWorkerMessages(json) {
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
-        /*zoom = window.innerWidth < window.innerHeight 
-            ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);*/
+        
+        // Valeurs par défaut pour les marges si non spécifiées
+        widthMargin = json.widthMargin || 0;
+        heightMargin = json.heightMargin || 0;
+        
+        updateCanvasSize();
     } else if (json.resolution === 1) {
         width = 1280;
         height = 720;
-        /*zoom = window.innerWidth < window.innerHeight 
-            ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);*/
-        document.querySelector("canvas").style.height = "max(100vh,720px)";
+        
+        // Valeurs par défaut pour les marges si non spécifiées
+        widthMargin = json.widthMargin || 0;
+        heightMargin = json.heightMargin || 0;
+        
+        updateCanvasSize();
     } else {
         width = 800;
         height = 480;
-        /*zoom = window.innerWidth < window.innerHeight 
-            ? Math.min(1, window.innerWidth / width)
-            : Math.min(1, window.innerHeight / height);*/
-        document.querySelector("canvas").style.height = "max(100vh,480px)";
+        
+        // Valeurs par défaut pour les marges si non spécifiées
+        widthMargin = json.widthMargin || 0;
+        heightMargin = json.heightMargin || 0;
+        
+        updateCanvasSize();
     }
 
     if (json.hasOwnProperty("buildversion")) {
@@ -397,11 +452,14 @@ bodyElement.addEventListener('touchmove', (event) => {
     }
 });
 
-
+// Ajouter un écouteur d'événement pour le redimensionnement de la fenêtre
+window.addEventListener('resize', () => {
+    if (width && height) {
+        updateCanvasSize();
+    }
+});
 
 checkPhone();
-
-
 
 let audiostart=false;
 let mediaPCM;
