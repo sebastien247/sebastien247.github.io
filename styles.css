@@ -10,7 +10,7 @@ html, body {
     height: 100%;
     overflow: hidden;
     position: absolute;
-    display: flex;
+    /*display: flex;*/
     justify-content: center;
     /*align-items: center;*/
     background: #000;
