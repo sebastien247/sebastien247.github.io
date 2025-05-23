@@ -130,36 +130,24 @@ function findGetParameter(parameterName) {
  * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
  */
 function updateCanvasSize() {
-    // Taille réelle de l'image (sans les marges)
+    // Taille réelle de l'image dans le canvas (sans les marges)
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
-    const imageRatio = imageWidth / imageHeight;
     
-    const windowWidth = window.innerWidth;
-    const windowHeight = window.innerHeight;
-    const windowRatio = windowWidth / windowHeight;
+    // Calculer les facteurs de zoom nécessaires pour chaque dimension
+    const zoomFactorWidth = window.innerWidth / imageWidth;
+    const zoomFactorHeight = window.innerHeight / imageHeight;
     
-    let displayWidth, displayHeight;
-
-    if (windowRatio >= 1 && imageRatio >= 1) {
-        // Fenêtre et image en paysage
-        displayWidth = imageWidth * (windowHeight / imageHeight);
-    } else if (windowRatio >= 1 && imageRatio < 1) {
-        // Fenêtre en paysage, image en portrait
-        displayHeight = imageHeight * (windowWidth / imageWidth);
-    } else if (windowRatio < 1 && imageRatio >= 1) {
-        // Fenêtre en portrait, image en paysage
-        displayHeight = imageHeight * (windowWidth / imageWidth);
+    // Choisir le facteur de zoom le plus petit pour que l'image soit entièrement visible
+    // (comportement "contain" - l'image remplit au maximum une dimension sans déborder)
+    if (zoomFactorWidth <= zoomFactorHeight) {
+        // On zoom en largeur : l'image remplira horizontalement, des bandes noires possibles verticalement
+        canvasElement.style.width = `${width * zoomFactorWidth}px`;
+        canvasElement.style.height = '';
     } else {
-        // Fenêtre et image en portrait
-        displayWidth = imageWidth * (windowHeight / imageHeight);
-    }
-    
-    if (displayWidth !== undefined) {
-        canvasElement.style.width = `${displayWidth}px`;
-    }
-    if (displayHeight !== undefined) {
-        canvasElement.style.height = `${displayHeight}px`;
+        // On zoom en hauteur : l'image remplira verticalement, des bandes noires possibles horizontalement
+        canvasElement.style.height = `${height * zoomFactorHeight}px`;
+        canvasElement.style.width = '';
     }
 }
 
@@ -188,10 +176,7 @@ function postWorkerMessages(json) {
         demuxDecodeWorker.postMessage({
             action: "CLEAR_BUFFERS"
         });
-        
-        // Mettre à jour la taille du canvas
-        updateCanvasSize();
-        
+                
         // Afficher un message temporaire
         warningElement.style.display = "block";
         logElement.style.display = "none";
