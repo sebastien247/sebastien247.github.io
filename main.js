@@ -42,22 +42,35 @@ function convertToCanvasCoordinates(screenX, screenY) {
     const canvasRelativeX = screenX - canvasRect.left;
     const canvasRelativeY = screenY - canvasRect.top;
     
-    // Taille réelle de l'image (sans les marges)
+    // Taille réelle de l'image (sans les marges internes du canvas)
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
     
-    // Calcul des marges horizontales et verticales en pixels dans le canvas interne
-    const hMarginPixels = widthMargin || 0;
-    const vMarginPixels = heightMargin || 0;
+    // Calculer les facteurs de zoom appliqués (même logique que updateCanvasSize)
+    const zoomFactorWidth = window.innerWidth / imageWidth;
+    const zoomFactorHeight = window.innerHeight / imageHeight;
+    const actualZoomFactor = Math.min(zoomFactorWidth, zoomFactorHeight);
     
-    // Calculer les positions relatives (pourcentage) par rapport à la taille affichée du canvas
-    const percentX = canvasRelativeX / canvasRect.width;
-    const percentY = canvasRelativeY / canvasRect.height;
+    // Taille réelle de l'image affichée après zoom
+    const displayedImageWidth = imageWidth * actualZoomFactor;
+    const displayedImageHeight = imageHeight * actualZoomFactor;
     
-    // Appliquer les pourcentages aux dimensions réelles et ajouter l'offset des marges
-    // La marge est divisée par 2 car elle est répartie des deux côtés
-    const x = Math.floor((hMarginPixels / 2) + (percentX * imageWidth));
-    const y = Math.floor((vMarginPixels / 2) + (percentY * imageHeight));
+    // Calculer les marges d'affichage (bandes noires) autour de l'image
+    const displayMarginX = (canvasRect.width - displayedImageWidth) / 2;
+    const displayMarginY = (canvasRect.height - displayedImageHeight) / 2;
+    
+    // Position relative à l'image affichée (en excluant les marges d'affichage)
+    const imageRelativeX = canvasRelativeX - displayMarginX;
+    const imageRelativeY = canvasRelativeY - displayMarginY;
+    
+    // Calculer les pourcentages par rapport à la taille de l'image affichée
+    const percentX = imageRelativeX / displayedImageWidth;
+    const percentY = imageRelativeY / displayedImageHeight;
+    
+    // Appliquer les pourcentages aux dimensions réelles du canvas et ajouter l'offset des marges internes
+    // La marge interne est divisée par 2 car elle est répartie des deux côtés
+    const x = Math.floor((widthMargin || 0) / 2 + (percentX * imageWidth));
+    const y = Math.floor((heightMargin || 0) / 2 + (percentY * imageHeight));
     
     return { x, y };
 }
