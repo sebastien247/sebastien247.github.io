@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Tesla Android Auto - Latency System Test</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            margin: 0;
+            padding: 20px;
+        }
+        .test-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid #333;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #333;
+            border-radius: 5px;
+        }
+        .test-button {
+            background: #4FC3F7;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+            font-weight: bold;
+        }
+        .test-button:hover {
+            background: #29B6F6;
+        }
+        .test-result {
+            margin: 10px 0;
+            padding: 10px;
+            background: #1a1a1a;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        .pass { color: #4CAF50; }
+        .fail { color: #F44336; }
+        .info { color: #4FC3F7; }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h1>🎯 Tesla Android Auto - Latency Measurement System Test</h1>
+        
+        <div class="test-section">
+            <h3>📋 Test Controls</h3>
+            <button class="test-button" onclick="testTimestampExtraction()">Test Timestamp Extraction</button>
+            <button class="test-button" onclick="testLatencyCalculation()">Test Latency Calculation</button>
+            <button class="test-button" onclick="simulateVideoStream()">Simulate Video Stream</button>
+            <button class="test-button" onclick="testStatistics()">Test Statistics</button>
+            <button class="test-button" onclick="clearResults()">Clear Results</button>
+        </div>
+        
+        <div class="test-section">
+            <h3>📊 Test Results</h3>
+            <div id="test-results"></div>
+        </div>
+        
+        <div class="test-section">
+            <h3>📈 Live Statistics</h3>
+            <div id="live-stats"></div>
+        </div>
+    </div>
+
+    <script>
+        // Copy the latency measurement functions from async_decoder.js
+        let latencyStats = {
+            measurements: [],
+            totalFrames: 0,
+            startTime: performance.now(),
+            lastReportTime: performance.now(),
+            minLatency: Infinity,
+            maxLatency: 0,
+            totalLatency: 0,
+            slowdownDetectionBuffer: [],
+            reportingInterval: 5000,
+            measurementWindowSize: 1000
+        };
+
+        function extractTimestampFromFrame(data) {
+            if (data.length < 8) {
+                return null;
+            }
+            
+            let timestampMicros = 0;
+            for (let i = 0; i < 8; i++) {
+                timestampMicros = (timestampMicros * 256) + data[i];
+            }
+            
+            return timestampMicros;
+        }
+
+        function measureLatency(androidTimestampMicros) {
+            const browserTimestampMicros = performance.now() * 1000;
+            const latencyMicros = browserTimestampMicros - androidTimestampMicros;
+            const latencyMs = latencyMicros / 1000;
+            
+            latencyStats.totalFrames++;
+            latencyStats.totalLatency += latencyMs;
+            latencyStats.minLatency = Math.min(latencyStats.minLatency, latencyMs);
+            latencyStats.maxLatency = Math.max(latencyStats.maxLatency, latencyMs);
+            
+            latencyStats.measurements.push({
+                timestamp: browserTimestampMicros / 1000,
+                latency: latencyMs,
+                frameNumber: latencyStats.totalFrames
+            });
+            
+            if (latencyStats.measurements.length > latencyStats.measurementWindowSize) {
+                latencyStats.measurements.shift();
+            }
+            
+            latencyStats.slowdownDetectionBuffer.push(latencyMs);
+            if (latencyStats.slowdownDetectionBuffer.length > 50) {
+                latencyStats.slowdownDetectionBuffer.shift();
+            }
+            
+            return latencyMs;
+        }
+
+        function createTestFrame(latencyMs = 0) {
+            // Create a simulated timestamped frame
+            const timestampMicros = (performance.now() - latencyMs) * 1000;
+            const frame = new Uint8Array(16); // 8 bytes timestamp + 8 bytes dummy H.264 data
+            
+            // Write timestamp (big-endian)
+            for (let i = 0; i < 8; i++) {
+                frame[7-i] = (timestampMicros >>> (i * 8)) & 0xFF;
+            }
+            
+            // Add dummy H.264 start code
+            frame[8] = 0x00;
+            frame[9] = 0x00;
+            frame[10] = 0x00;
+            frame[11] = 0x01;
+            frame[12] = 0x67; // NAL unit type 7 (SPS)
+            
+            return frame;
+        }
+
+        function logResult(message, type = 'info') {
+            const resultsDiv = document.getElementById('test-results');
+            const resultElement = document.createElement('div');
+            resultElement.className = `test-result ${type}`;
+            resultElement.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            resultsDiv.appendChild(resultElement);
+            resultsDiv.scrollTop = resultsDiv.scrollHeight;
+        }
+
+        function updateLiveStats() {
+            const statsDiv = document.getElementById('live-stats');
+            const avgLatency = latencyStats.totalFrames > 0 ? latencyStats.totalLatency / latencyStats.totalFrames : 0;
+            const runtime = (performance.now() - latencyStats.startTime) / 1000;
+            const fps = latencyStats.totalFrames / Math.max(runtime, 1);
+            
+            statsDiv.innerHTML = `
+                <div style="font-family: monospace; font-size: 14px;">
+                    <strong>📊 Current Statistics:</strong><br>
+                    Total Frames: ${latencyStats.totalFrames}<br>
+                    Average Latency: ${avgLatency.toFixed(2)}ms<br>
+                    Min/Max Latency: ${latencyStats.minLatency === Infinity ? '--' : latencyStats.minLatency.toFixed(2)}ms / ${latencyStats.maxLatency.toFixed(2)}ms<br>
+                    FPS: ${fps.toFixed(1)}<br>
+                    Runtime: ${runtime.toFixed(1)}s
+                </div>
+            `;
+        }
+
+        // Test Functions
+        function testTimestampExtraction() {
+            logResult("🧪 Testing timestamp extraction...", "info");
+            
+            // Test 1: Valid timestamp
+            const testFrame1 = createTestFrame(0);
+            const extractedTimestamp = extractTimestampFromFrame(testFrame1);
+            if (extractedTimestamp !== null && extractedTimestamp > 0) {
+                logResult("✅ PASS: Timestamp extraction from valid frame", "pass");
+            } else {
+                logResult("❌ FAIL: Could not extract timestamp from valid frame", "fail");
+            }
+            
+            // Test 2: Invalid frame (too short)
+            const testFrame2 = new Uint8Array(4);
+            const invalidTimestamp = extractTimestampFromFrame(testFrame2);
+            if (invalidTimestamp === null) {
+                logResult("✅ PASS: Correctly handled invalid frame", "pass");
+            } else {
+                logResult("❌ FAIL: Should return null for invalid frame", "fail");
+            }
+        }
+
+        function testLatencyCalculation() {
+            logResult("🧪 Testing latency calculation...", "info");
+            
+            // Reset stats for clean test
+            latencyStats = {
+                measurements: [],
+                totalFrames: 0,
+                startTime: performance.now(),
+                lastReportTime: performance.now(),
+                minLatency: Infinity,
+                maxLatency: 0,
+                totalLatency: 0,
+                slowdownDetectionBuffer: [],
+                reportingInterval: 5000,
+                measurementWindowSize: 1000
+            };
+            
+            // Test with known latency
+            const expectedLatency = 50; // 50ms
+            const testTimestamp = (performance.now() - expectedLatency) * 1000;
+            const calculatedLatency = measureLatency(testTimestamp);
+            
+            if (Math.abs(calculatedLatency - expectedLatency) < 5) { // 5ms tolerance
+                logResult(`✅ PASS: Latency calculation within tolerance (expected: ${expectedLatency}ms, got: ${calculatedLatency.toFixed(2)}ms)`, "pass");
+            } else {
+                logResult(`❌ FAIL: Latency calculation outside tolerance (expected: ${expectedLatency}ms, got: ${calculatedLatency.toFixed(2)}ms)`, "fail");
+            }
+            
+            updateLiveStats();
+        }
+
+        function simulateVideoStream() {
+            logResult("🎬 Simulating video stream (30 frames)...", "info");
+            
+            let frameCount = 0;
+            const maxFrames = 30;
+            const interval = setInterval(() => {
+                // Simulate varying latencies (20-80ms)
+                const baseLatency = 40;
+                const variation = (Math.random() - 0.5) * 40;
+                const simulatedLatency = baseLatency + variation;
+                
+                const testFrame = createTestFrame(simulatedLatency);
+                const timestamp = extractTimestampFromFrame(testFrame);
+                
+                if (timestamp !== null) {
+                    const measuredLatency = measureLatency(timestamp);
+                    
+                    if (frameCount % 10 === 0) {
+                        logResult(`📊 Frame ${frameCount + 1}: ${measuredLatency.toFixed(2)}ms latency`, "info");
+                    }
+                }
+                
+                frameCount++;
+                updateLiveStats();
+                
+                if (frameCount >= maxFrames) {
+                    clearInterval(interval);
+                    logResult("✅ Video stream simulation completed", "pass");
+                    generateTestReport();
+                }
+            }, 33); // ~30 FPS
+        }
+
+        function testStatistics() {
+            logResult("📈 Testing statistics calculations...", "info");
+            
+            if (latencyStats.measurements.length === 0) {
+                logResult("⚠️ No measurements available. Run video simulation first.", "fail");
+                return;
+            }
+            
+            const avgLatency = latencyStats.totalLatency / latencyStats.totalFrames;
+            const sortedLatencies = latencyStats.measurements.map(m => m.latency).sort((a, b) => a - b);
+            const p95 = sortedLatencies[Math.floor(sortedLatencies.length * 0.95)] || 0;
+            
+            logResult(`📊 Statistics: Avg=${avgLatency.toFixed(2)}ms, P95=${p95.toFixed(2)}ms, Frames=${latencyStats.totalFrames}`, "pass");
+            
+            // Test performance classification
+            let perfClass = "excellent";
+            if (avgLatency > 100) perfClass = "poor";
+            else if (avgLatency > 50) perfClass = "moderate";
+            else if (avgLatency > 25) perfClass = "good";
+            
+            logResult(`🎯 Performance Classification: ${perfClass.toUpperCase()}`, "pass");
+        }
+
+        function generateTestReport() {
+            if (latencyStats.totalFrames === 0) return;
+            
+            const avgLatency = latencyStats.totalLatency / latencyStats.totalFrames;
+            const runtime = (performance.now() - latencyStats.startTime) / 1000;
+            const fps = latencyStats.totalFrames / runtime;
+            
+            logResult("📋 ═══════════ TEST REPORT ═══════════", "info");
+            logResult(`📈 Runtime: ${runtime.toFixed(1)}s | Frames: ${latencyStats.totalFrames} | FPS: ${fps.toFixed(1)}`, "info");
+            logResult(`⚡ Latency: Avg=${avgLatency.toFixed(2)}ms | Min=${latencyStats.minLatency.toFixed(2)}ms | Max=${latencyStats.maxLatency.toFixed(2)}ms`, "info");
+            
+            let status = "🟢 EXCELLENT";
+            if (avgLatency > 100) status = "🔴 POOR";
+            else if (avgLatency > 50) status = "🟡 MODERATE";
+            else if (avgLatency > 25) status = "🟢 GOOD";
+            
+            logResult(`🎯 Status: ${status}`, "pass");
+        }
+
+        function clearResults() {
+            document.getElementById('test-results').innerHTML = '';
+            document.getElementById('live-stats').innerHTML = '';
+            
+            // Reset stats
+            latencyStats = {
+                measurements: [],
+                totalFrames: 0,
+                startTime: performance.now(),
+                lastReportTime: performance.now(),
+                minLatency: Infinity,
+                maxLatency: 0,
+                totalLatency: 0,
+                slowdownDetectionBuffer: [],
+                reportingInterval: 5000,
+                measurementWindowSize: 1000
+            };
+            
+            logResult("🧹 Test environment cleared", "info");
+        }
+
+        // Initialize
+        window.onload = function() {
+            logResult("🚀 Tesla Android Auto Latency Test System Initialized", "pass");
+            logResult("👆 Click the test buttons above to validate the latency measurement system", "info");
+        };
+    </script>
+</body>
+</html> 

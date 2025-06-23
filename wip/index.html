@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>TaaDa | Tesla Android Auto - Driver Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+    <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/>
+    <link rel="icon" href="favicon.ico"/>
+    <link rel="stylesheet" href="styles.css">
+    <meta name="HandheldFriendly" content="true"/>
+    <style>
+        /* Tesla-style Latency Dashboard */
+        .latency-dashboard {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            font-family: 'Montserrat', sans-serif;
+            font-size: 12px;
+            color: #fff;
+            z-index: 1000;
+            min-width: 280px;
+            display: none;
+        }
+        
+        .latency-dashboard.active {
+            display: block;
+        }
+        
+        .latency-title {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 10px;
+            color: #4FC3F7;
+            text-align: center;
+        }
+        
+        .latency-metric {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+            padding: 3px 0;
+        }
+        
+        .latency-label {
+            color: #BDBDBD;
+        }
+        
+        .latency-value {
+            font-weight: 500;
+        }
+        
+        .latency-value.excellent { color: #4CAF50; }
+        .latency-value.good { color: #8BC34A; }
+        .latency-value.moderate { color: #FFC107; }
+        .latency-value.poor { color: #F44336; }
+        
+        .latency-separator {
+            height: 1px;
+            background: #333;
+            margin: 8px 0;
+        }
+        
+        .latency-fps {
+            font-size: 16px;
+            font-weight: 700;
+            text-align: center;
+            color: #4FC3F7;
+        }
+        
+        /* Toggle button */
+        .latency-toggle {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid #333;
+            border-radius: 4px;
+            color: #fff;
+            padding: 8px 12px;
+            font-family: 'Montserrat', sans-serif;
+            font-size: 11px;
+            cursor: pointer;
+            z-index: 1001;
+        }
+        
+        .latency-toggle:hover {
+            background: rgba(0, 0, 0, 0.9);
+        }
+    </style>
+</head>
+
+<body id="body">
+    <canvas></canvas>
+    
+    <!-- Latency Measurement Dashboard -->
+    <div id="latency-dashboard" class="latency-dashboard">
+        <div class="latency-title">🎯 LATENCY MONITOR</div>
+        <div class="latency-metric">
+            <span class="latency-label">Current:</span>
+            <span id="current-latency" class="latency-value">--ms</span>
+        </div>
+        <div class="latency-metric">
+            <span class="latency-label">Average:</span>
+            <span id="avg-latency" class="latency-value">--ms</span>
+        </div>
+        <div class="latency-metric">
+            <span class="latency-label">Min/Max:</span>
+            <span id="minmax-latency" class="latency-value">--/--ms</span>
+        </div>
+        <div class="latency-separator"></div>
+        <div class="latency-metric">
+            <span class="latency-label">P95:</span>
+            <span id="p95-latency" class="latency-value">--ms</span>
+        </div>
+        <div class="latency-metric">
+            <span class="latency-label">Frames:</span>
+            <span id="frame-count" class="latency-value">0</span>
+        </div>
+        <div class="latency-separator"></div>
+        <div id="fps-display" class="latency-fps">-- FPS</div>
+    </div>
+    
+    <button id="latency-toggle" class="latency-toggle" onclick="toggleLatencyDashboard()">📊 LATENCY</button>
+    
+    <!-- New waiting message that will be shown after socket port is retrieved -->
+    <div id="waiting-message" class="waiting-message" style="display: none;">
+        <p>Please wait a moment</p>
+        <div class="loading-indicator"></div>
+    </div>
+    
+    <div class="tesla-container" id="info">
+        <div class="tesla-header">
+            <h1>TaaDa</h1>
+            <h2>Tesla Android Auto - Driver Assistant</h2>
+        </div>
+        
+        <div class="tesla-content">
+            <div class="connection-status">
+                <div class="status-icon"></div>
+                <div class="status-message">
+                    <p>Please connect to your phone's hotspot and make sure TaaDa is running on the phone...</p>
+                    <p class="note">Please make sure you have updated your TaaDa app to the latest version</p>
+                </div>
+            </div>
+            
+            <div class="notification-card" style="display: none;">
+                <div class="notification-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><path fill="none" d="M0 0h24v24H0z"/><path d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10zm0-2a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm-1-5h2v2h-2v-2zm0-8h2v6h-2V7z" fill="currentColor"/></svg>
+                </div>
+                <div class="notification-content">
+                    <h3>Important Information</h3>
+                    <p>A recent Google Play Services update has affected TaaDa functionality. Our team is actively working on a solution.</p>
+                </div>
+            </div>
+            
+            <div class="download-section">
+                <h3>Don't have the app yet?</h3>
+                <div class="download-options">
+                    <div class="qr-code">
+                        <a href="https://play.google.com/store/apps/details?id=fr.sd.taada" target="_blank" class="qr-code-button">
+                            <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=https://play.google.com/store/apps/details?id=fr.sd.taada" alt="TaaDa App QR Code">
+                        </a>
+                    </div>
+                    <div class="play-store">
+                        <a href="https://play.google.com/store/apps/details?id=fr.sd.taada" target="_blank" class="play-store-button">
+                            <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play">
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="tesla-footer">
+            <span id="log"></span>
+            <span id="warning"></span>
+        </div>
+    </div>
+    
+    <script>
+        function toggleLatencyDashboard() {
+            const dashboard = document.getElementById('latency-dashboard');
+            dashboard.classList.toggle('active');
+        }
+        
+        // Global function to update dashboard from async_decoder
+        window.updateLatencyDashboard = function(stats) {
+            if (!stats) return;
+            
+            const dashboard = document.getElementById('latency-dashboard');
+            if (!dashboard.classList.contains('active')) return;
+            
+            const avgLatency = stats.totalFrames > 0 ? stats.totalLatency / stats.totalFrames : 0;
+            const runtime = (performance.now() - stats.startTime) / 1000;
+            const fps = stats.totalFrames / Math.max(runtime, 1);
+            
+            // Get performance class
+            let perfClass = 'excellent';
+            if (avgLatency > 100) perfClass = 'poor';
+            else if (avgLatency > 50) perfClass = 'moderate';
+            else if (avgLatency > 25) perfClass = 'good';
+            
+            // Update dashboard elements
+            document.getElementById('current-latency').textContent = 
+                stats.measurements.length > 0 ? `${stats.measurements[stats.measurements.length - 1].latency.toFixed(1)}ms` : '--ms';
+            document.getElementById('avg-latency').textContent = `${avgLatency.toFixed(1)}ms`;
+            document.getElementById('avg-latency').className = `latency-value ${perfClass}`;
+            document.getElementById('minmax-latency').textContent = 
+                `${stats.minLatency === Infinity ? '--' : stats.minLatency.toFixed(1)}/${stats.maxLatency.toFixed(1)}ms`;
+            
+            // Calculate P95
+            const recentMeasurements = stats.measurements.slice(-100);
+            const sortedLatencies = recentMeasurements.map(m => m.latency).sort((a, b) => a - b);
+            const p95 = sortedLatencies[Math.floor(sortedLatencies.length * 0.95)] || 0;
+            document.getElementById('p95-latency').textContent = `${p95.toFixed(1)}ms`;
+            
+            document.getElementById('frame-count').textContent = stats.totalFrames;
+            document.getElementById('fps-display').textContent = `${fps.toFixed(1)} FPS`;
+        };
+    </script>
+</body>
+<script src="pcm-player.min.js"></script>
+<script src="main.js"></script>
+</html>
