@@ -22,6 +22,12 @@ function isPowerOf2(value) {
 }
 
 function appendByteArray(buffer1, buffer2) {
+    // Validate inputs
+    if (!buffer1 || !buffer2 || !buffer1.byteLength || !buffer2.byteLength) {
+        console.error("appendByteArray: Invalid buffers", {buffer1, buffer2});
+        return buffer1 || buffer2 || new Uint8Array(0);
+    }
+    
     const tmp = new Uint8Array((buffer1.byteLength | 0) + (buffer2.byteLength | 0));
     tmp.set(buffer1, 0);
     tmp.set(buffer2, buffer1.byteLength | 0);
@@ -354,8 +360,14 @@ let latencyStats = {
 };
 
 function extractTimestampFromFrame(data) {
-    if (data.length < 8) {
-        return null; // Not enough data for timestamp
+    if (data.length < 12) { // Need at least 8 bytes for timestamp + 4 for H.264 header
+        return null; // Not enough data for timestamp + H.264
+    }
+    
+    // Check if this looks like H.264 data (starts with 0x00 0x00 0x00 0x01)
+    if (data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x00 && data[3] === 0x01) {
+        // This looks like regular H.264 data without timestamp
+        return null;
     }
     
     // Extract 8-byte timestamp (big-endian) from the beginning
@@ -364,12 +376,23 @@ function extractTimestampFromFrame(data) {
         timestampMicros = (timestampMicros * 256) + data[i];
     }
     
+    // Sanity check: timestamp should be reasonable (not zero, not too far in future)
+    // Android timestamps are typically in microseconds since boot
+    if (timestampMicros === 0 || timestampMicros > Date.now() * 10000) { // 10x current time in microseconds
+        return null; // Invalid timestamp
+    }
+    
+    // Check if the H.264 data after timestamp looks valid
+    if (data.length < 12 || !(data[8] === 0x00 && data[9] === 0x00 && data[10] === 0x00 && data[11] === 0x01)) {
+        return null; // H.264 header not found after timestamp
+    }
+    
     return timestampMicros;
 }
 
 function measureLatency(androidTimestampMicros) {
     // Convert browser time to microseconds for comparison
-    const browserTimestampMicros = performance.now() * 1000;
+    const browserTimestampMicros = (typeof self !== 'undefined' ? self.performance.now() : performance.now()) * 1000;
     
     // Calculate latency in microseconds
     const latencyMicros = browserTimestampMicros - androidTimestampMicros;
@@ -404,13 +427,11 @@ function measureLatency(androidTimestampMicros) {
         console.log(`📊 Frame #${latencyStats.totalFrames}: ${latencyMs.toFixed(2)}ms latency`);
     }
     
-    // Update dashboard every 10 frames
-    if (latencyStats.totalFrames % 10 === 0 && window.updateLatencyDashboard) {
-        window.updateLatencyDashboard(latencyStats);
-    }
+    // Update dashboard every 10 frames (disabled in WebWorker)
+    // Dashboard update would be handled in the main thread
     
     // Periodic detailed reporting
-    const now = performance.now();
+    const now = (typeof self !== 'undefined' ? self.performance.now() : performance.now());
     if (now - latencyStats.lastReportTime >= latencyStats.reportingInterval) {
         generateLatencyReport();
         latencyStats.lastReportTime = now;
@@ -423,7 +444,8 @@ function generateLatencyReport() {
     if (latencyStats.totalFrames === 0) return;
     
     const avgLatency = latencyStats.totalLatency / latencyStats.totalFrames;
-    const runtime = (performance.now() - latencyStats.startTime) / 1000; // seconds
+    const currentTime = (typeof self !== 'undefined' ? self.performance.now() : performance.now());
+    const runtime = (currentTime - latencyStats.startTime) / 1000; // seconds
     const fps = latencyStats.totalFrames / runtime;
     
     // Analyze recent measurements for trends
@@ -464,20 +486,34 @@ function handleMessage(event) {
     const androidTimestamp = extractTimestampFromFrame(dat);
     let actualVideoData = dat;
     
-    if (androidTimestamp !== null) {
-        // We have a timestamp - measure latency
-        const latency = measureLatency(androidTimestamp);
-        
-        // Remove timestamp prefix (first 8 bytes) to get actual H.264 data
-        actualVideoData = dat.slice(8);
-        
-        // Log first frame with timestamp for verification
-        if (latencyStats.totalFrames === 1) {
-            console.log(`🎯 First timestamped frame received! Android timestamp: ${androidTimestamp}μs, Latency: ${latency.toFixed(2)}ms`);
+    if (androidTimestamp !== null && androidTimestamp > 0) {
+        // We have a valid timestamp - measure latency
+        try {
+            const latency = measureLatency(androidTimestamp);
+            
+            // Remove timestamp prefix (first 8 bytes) to get actual H.264 data
+            actualVideoData = dat.slice(8);
+            
+            // Log first frame with timestamp for verification
+            if (latencyStats.totalFrames === 1) {
+                console.log(`🎯 First timestamped frame received! Android timestamp: ${androidTimestamp}μs, Latency: ${latency.toFixed(2)}ms`);
+            }
+        } catch (error) {
+            console.error("Error measuring latency:", error);
+            // If latency measurement fails, just process as regular data
         }
     } else {
-        // No timestamp found - this might be a legacy frame or test frame
-        console.log("⚠️  No timestamp detected - using legacy mode");
+        // No timestamp found - this is regular H.264 data
+        // Only log occasionally to avoid spam
+        if (Math.random() < 0.01) { // Log 1% of legacy frames
+            console.log("⚠️  No timestamp detected - using legacy mode");
+        }
+    }
+    
+    // Validate that we have valid data to process
+    if (!actualVideoData || actualVideoData.length === 0) {
+        console.error("handleMessage: No valid video data to process");
+        return;
     }
     
     // Process the H.264 video data (with or without timestamp)
