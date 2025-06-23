@@ -340,13 +340,20 @@ function postWorkerMessages(json) {
 
         // Hide the waiting message when first video frame is received
         if (e.data.hasOwnProperty('videoFrameReceived')) {
-            console.log("Video frame received message received!", e.data);
             videoFrameReceived = true;
             if (waitingMessageElement) {
                 waitingMessageElement.style.display = "none";
-                console.log("Hiding waiting message");
-            } else {
-                console.error("waitingMessageElement not found");
+                // Only log every 100th time to reduce spam
+                if (Math.random() < 0.01) {
+                    console.log("Video frame received, hiding waiting message");
+                }
+            }
+        }
+        
+        // Update latency dashboard when stats are received from WebWorker
+        if (e.data.hasOwnProperty('latencyStats')) {
+            if (window.updateLatencyDashboard) {
+                window.updateLatencyDashboard(e.data.latencyStats);
             }
         }
 

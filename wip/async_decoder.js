@@ -356,7 +356,8 @@ let latencyStats = {
     totalLatency: 0,
     slowdownDetectionBuffer: [],
     reportingInterval: 5000, // Report every 5 seconds
-    measurementWindowSize: 1000 // Keep last 1000 measurements for analysis
+    measurementWindowSize: 1000, // Keep last 1000 measurements for analysis
+    timeOffset: null // Time offset between Android and browser clocks
 };
 
 function extractTimestampFromFrame(data) {
@@ -391,11 +392,18 @@ function extractTimestampFromFrame(data) {
 }
 
 function measureLatency(androidTimestampMicros) {
-    // Convert browser time to microseconds for comparison
+    // Get current browser time in microseconds
     const browserTimestampMicros = (typeof self !== 'undefined' ? self.performance.now() : performance.now()) * 1000;
     
-    // Calculate latency in microseconds
-    const latencyMicros = browserTimestampMicros - androidTimestampMicros;
+    // For the first frame, establish the time offset between Android and browser
+    if (!latencyStats.timeOffset) {
+        latencyStats.timeOffset = browserTimestampMicros - androidTimestampMicros;
+        console.log(`🕐 Time offset established: ${(latencyStats.timeOffset / 1000).toFixed(2)}ms`);
+    }
+    
+    // Calculate relative latency using the offset
+    const adjustedAndroidTime = androidTimestampMicros + latencyStats.timeOffset;
+    const latencyMicros = browserTimestampMicros - adjustedAndroidTime;
     const latencyMs = latencyMicros / 1000;
     
     // Update statistics
@@ -427,8 +435,19 @@ function measureLatency(androidTimestampMicros) {
         console.log(`📊 Frame #${latencyStats.totalFrames}: ${latencyMs.toFixed(2)}ms latency`);
     }
     
-    // Update dashboard every 10 frames (disabled in WebWorker)
-    // Dashboard update would be handled in the main thread
+    // Send stats to main thread for dashboard update (every 10 frames)
+    if (latencyStats.totalFrames % 10 === 0) {
+        self.postMessage({
+            latencyStats: {
+                totalFrames: latencyStats.totalFrames,
+                totalLatency: latencyStats.totalLatency,
+                minLatency: latencyStats.minLatency,
+                maxLatency: latencyStats.maxLatency,
+                measurements: latencyStats.measurements.slice(-100), // Last 100 measurements
+                startTime: latencyStats.startTime
+            }
+        });
+    }
     
     // Periodic detailed reporting
     const now = (typeof self !== 'undefined' ? self.performance.now() : performance.now());
@@ -482,6 +501,10 @@ function generateLatencyReport() {
 function handleMessage(event) {
     const dat = new Uint8Array(event.data);
     
+    // Debug: Log frame info
+    console.log(`🔍 FRAME DEBUG: Received ${dat.length} bytes, first 16 bytes:`, 
+                Array.from(dat.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+    
     // Extract timestamp and measure latency
     const androidTimestamp = extractTimestampFromFrame(dat);
     let actualVideoData = dat;
@@ -494,6 +517,8 @@ function handleMessage(event) {
             // Remove timestamp prefix (first 8 bytes) to get actual H.264 data
             actualVideoData = dat.slice(8);
             
+            console.log(`🎯 LATENCY FRAME: Android timestamp: ${androidTimestamp}μs, Latency: ${latency.toFixed(2)}ms`);
+            
             // Log first frame with timestamp for verification
             if (latencyStats.totalFrames === 1) {
                 console.log(`🎯 First timestamped frame received! Android timestamp: ${androidTimestamp}μs, Latency: ${latency.toFixed(2)}ms`);
@@ -504,10 +529,8 @@ function handleMessage(event) {
         }
     } else {
         // No timestamp found - this is regular H.264 data
-        // Only log occasionally to avoid spam
-        if (Math.random() < 0.01) { // Log 1% of legacy frames
-            console.log("⚠️  No timestamp detected - using legacy mode");
-        }
+        console.log("⚠️  No timestamp detected - frame starts with:", 
+                   Array.from(dat.slice(0, 12)).map(b => b.toString(16).padStart(2, '0')).join(' '));
     }
     
     // Validate that we have valid data to process
@@ -534,7 +557,10 @@ function handleVideoMessage(dat){
     if (unittype === 1 || unittype === 5) {
         videoMagic(dat);
         // Notify the main thread that a video frame was received (not just a pong packet)
-        console.log("Sending videoFrameReceived message to main thread", unittype);
+        // Only log every 100th frame to reduce spam
+        if (latencyStats.totalFrames % 100 === 0) {
+            console.log("Sending videoFrameReceived message to main thread", unittype);
+        }
         self.postMessage({videoFrameReceived: true});
     }
     else
