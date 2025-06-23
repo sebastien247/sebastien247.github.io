@@ -396,9 +396,11 @@ function measureLatency(androidTimestampMicros) {
     const browserTimestampMicros = (typeof self !== 'undefined' ? self.performance.now() : performance.now()) * 1000;
     
     // For the first frame, establish the time offset between Android and browser
-    if (!latencyStats.timeOffset) {
+    if (latencyStats.timeOffset === null) {
         latencyStats.timeOffset = browserTimestampMicros - androidTimestampMicros;
         console.log(`🕐 Time offset established: ${(latencyStats.timeOffset / 1000).toFixed(2)}ms`);
+        console.log(`📱 Android timestamp: ${androidTimestampMicros}μs`);
+        console.log(`💻 Browser timestamp: ${browserTimestampMicros}μs`);
     }
     
     // Calculate relative latency using the offset
@@ -519,6 +521,15 @@ function handleMessage(event) {
             
             console.log(`🎯 LATENCY FRAME: Android timestamp: ${androidTimestamp}μs, Latency: ${latency.toFixed(2)}ms`);
             
+            // Debug: Log first few frames with detailed info
+            if (latencyStats.totalFrames <= 3) {
+                console.log(`🔍 Frame #${latencyStats.totalFrames} Debug:`);
+                console.log(`   📱 Android timestamp: ${androidTimestamp}μs`);
+                console.log(`   💻 Browser timestamp: ${(typeof self !== 'undefined' ? self.performance.now() : performance.now()) * 1000}μs`);
+                console.log(`   🕐 Time offset: ${latencyStats.timeOffset}μs`);
+                console.log(`   ⏱️ Calculated latency: ${latency.toFixed(2)}ms`);
+            }
+            
             // Log first frame with timestamp for verification
             if (latencyStats.totalFrames === 1) {
                 console.log(`🎯 First timestamped frame received! Android timestamp: ${androidTimestamp}μs, Latency: ${latency.toFixed(2)}ms`);
@@ -559,7 +570,7 @@ function handleVideoMessage(dat){
         // Notify the main thread that a video frame was received (not just a pong packet)
         // Only log every 100th frame to reduce spam
         if (latencyStats.totalFrames % 100 === 0) {
-            console.log("Sending videoFrameReceived message to main thread", unittype);
+            //console.log("Sending videoFrameReceived message to main thread", unittype);
         }
         self.postMessage({videoFrameReceived: true});
     }
