@@ -180,18 +180,18 @@ async function checkPhone() {
         console.error('Server discovery failed:', error);
         
         // Afficher un message d'erreur à l'utilisateur
-        if (warningElement) {
+        /*if (warningElement) {
             warningElement.style.display = "block";
             logElement.style.display = "none";
             warningElement.innerText = "Unable to connect to server. Please check that TaaDa is running.";
-        }
+        }*/
         
         // Réessayer après un délai
         setTimeout(() => {
-            if (warningElement) {
+            /*if (warningElement) {
                 warningElement.style.display = "none";
                 logElement.style.display = "block";
-            }
+            }*/
             checkPhone();
         }, 5000);
     }
@@ -316,7 +316,7 @@ function postWorkerMessages(json) {
         }
     }
 
-    if (appVersion <= 35) {
+    if (appVersion < 35) {
         alert("You need to run TaaDa 1.3.3 or newer to use this page, please update.");
         return;
     }
