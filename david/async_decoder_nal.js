@@ -340,8 +340,18 @@ function heartbeat() {
 
 
 function handleMessage(event) {
-    const dat = new Uint8Array(event.data)
-    handleVideoMessage(dat)
+    const dat = new Uint8Array(event.data);
+    
+    // Vérifier si c'est une NAL brute (marquée par 0xFF en premier octet)
+    if (dat.length > 0 && dat[0] === 0xFF) {
+        // Extraire les données NAL en ignorant le premier octet qui est notre flag
+        const nalData = new Uint8Array(dat.buffer, dat.byteOffset + 1, dat.byteLength - 1);
+        handleVideoMessage(nalData);
+        return;
+    }
+    
+    // Traitement normal pour les données non marquées
+    handleVideoMessage(dat);
 }
 
 function handleVideoMessage(dat){
@@ -378,17 +388,6 @@ function startSocket() {
         socket.binaryType = "arraybuffer";
         socket.sendObject({action: "START"});
         socket.sendObject({action: "NIGHT", value: night});
-        
-        // Au lieu de demander un keyframe immédiatement, attendons un peu
-        // pour voir si des données arrivent naturellement
-        setTimeout(() => {
-            // Ne demander un keyframe que si aucune frame n'a été reçue
-            if (pendingFrames.length === 0 && underflow) {
-                console.log("No frames received after socket open, requesting keyframe");
-                socket.sendObject({action: "REQUEST_KEYFRAME"});
-            }
-        }, 1000);
-        
         if (heart === 0) {
             heart = setInterval(heartbeat, 200);
             setInterval(updateFrameCounter, 1000)
@@ -470,79 +469,6 @@ self.addEventListener('message', async (message) => {
         if(postInitJobs.length > 0){
             postInitJobs.forEach(msg => messageHandler(msg));
             postInitJobs = []
-        }
-    } else if (message.data.action === 'RESIZE') {
-        // Gestion du changement de résolution
-        console.log("Resizing decoder to " + message.data.width + "x" + message.data.height);
-        width = message.data.width;
-        height = message.data.height;
-        
-        // Mettre à jour la configuration du décodeur si nous utilisons WebCodec
-        if(decoder !== null && decoder.state !== 'closed') {
-            try {
-                // Reconfigurer le décodeur avec les nouvelles dimensions
-                let config = {
-                    codec: "avc1.",
-                    codedHeight: height,
-                    codedWidth: width,
-                };
-                
-                // Ajouter le codec spécifique si nous l'avons déjà
-                if (sps && sps.length > 7) {
-                    for (let i = 5; i < 8; ++i) {
-                        var h = sps[i].toString(16);
-                        if (h.length < 2) {
-                            h = '0' + h;
-                        }
-                        config.codec += h;
-                    }
-                } else {
-                    // Codec par défaut si on n'a pas encore reçu de SPS
-                    config.codec += "42002a";
-                }
-                
-                console.log("Reconfiguring decoder with:", config);
-                decoder.configure(config);
-                
-                self.postMessage({warning: "Résolution adaptée, en attente d'une nouvelle image clé..."});
-            } catch (e) {
-                console.error("Error reconfiguring decoder:", e);
-                self.postMessage({error: "Erreur lors du changement de résolution: " + e.message});
-                // En cas d'erreur, essayer de basculer vers Broadway
-                switchToBroadway();
-            }
-        } else if (broadwayDecoder !== null) {
-            // Pour Broadway, nous n'avons pas besoin de reconfiguration explicite
-            // Le décodeur s'ajustera automatiquement à la nouvelle résolution
-            console.log("Broadway decoder will automatically adjust to new resolution on next keyframe");
-            self.postMessage({warning: "En attente d'une nouvelle image clé..."});
-        }
-        
-        // Ajuster le viewport WebGL
-        if (gl) {
-            gl.viewport(0, 0, width, height);
-        }
-    } else if (message.data.action === 'CLEAR_BUFFERS') {
-        // Vider les tampons de frames en attente
-        console.log("Clearing pending frames buffer, had " + pendingFrames.length + " frames");
-        
-        // Nettoyer en conservant éventuellement la dernière frame pour éviter l'écran noir
-        if (pendingFrames.length > 0) {
-            const lastFrame = pendingFrames[pendingFrames.length - 1];
-            pendingFrames = [];
-            if (lastFrame) {
-                pendingFrames.push(lastFrame);
-            }
-        } else {
-            pendingFrames = [];
-        }
-        
-        // Réinitialiser l'état du décodeur si nécessaire
-        underflow = pendingFrames.length === 0;
-        
-        // Demander une nouvelle frame-clé
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.sendObject({action: "REQUEST_KEYFRAME"});
         }
     } else if(!initted) {
         postInitJobs.push(message);
