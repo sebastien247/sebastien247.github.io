@@ -6,8 +6,7 @@ const demuxDecodeWorker = new Worker("./async_decoder.js"),
     bodyElement = document.querySelector('body'),
     waitingMessageElement = document.getElementById('waiting-message'),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
-    DEFAULT_HTTPS_PORT = 8081,
-    MAX_PORT_RETRIES = 5;
+    urlToFetch = `https://taada.top:8081/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
 
 let zoom = Math.max(1, window.innerHeight / 1080),
     appVersion = 0,
@@ -90,111 +89,41 @@ function handlepossition(possition){
 
 function abortFetching() {
     console.log('Now aborting');
-    if (controller) {
-        controller.abort();
-    }
+    controller.abort()
 }
 
-/**
- * Essaie de se connecter à un port spécifique
- * @param {number} port - Le port à tester
- * @param {AbortController} controller - Le contrôleur d'abandon
- * @returns {Promise} Promise qui se résout avec les données ou se rejette
- */
-async function tryPort(port, controller) {
-    const urlToFetch = `https://taada.top:${port}/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
-    
-    console.log(`Trying port ${port}...`);
-    
-    return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            reject(new Error(`Timeout on port ${port}`));
-        }, 3000); // Timeout plus court par port
-        
-        fetch(urlToFetch, {method: 'get', signal: controller.signal})
-            .then(response => {
-                clearTimeout(timeout);
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status} on port ${port}`);
-                }
-                return response.text();
-            })
-            .then(data => {
-                if (isJson(data)) {
-                    console.log(`Successfully connected to port ${port}`);
-                    resolve({data, port});
-                } else {
-                    reject(new Error(`Invalid response from port ${port}`));
-                }
-            })
-            .catch(error => {
-                clearTimeout(timeout);
-                reject(error);
-            });
-    });
-}
-
-/**
- * Teste plusieurs ports successivement jusqu'à trouver un serveur
- */
-async function checkPhone() {
-    console.log('Starting server discovery...');
+function checkPhone() {
+    console.log('Now fetching');
     controller = new AbortController();
 
-    try {
-        // Essayer chaque port successivement
-        for (let i = 0; i < MAX_PORT_RETRIES; i++) {
-            const port = DEFAULT_HTTPS_PORT + i;
-            
-            try {
-                const result = await tryPort(port, controller);
-                
-                // Vérifier si la page est cachée avant de traiter
-                if (document.hidden) {
-                    setTimeout(() => {
-                        checkPhone();
-                    }, 2000);
-                    return;
-                }
-                
-                // Serveur trouvé, traiter la réponse
-                const json = JSON.parse(result.data);
-                
-                // Ajouter le port utilisé aux logs pour information
-                console.log(`Server found on port ${result.port}, processing response...`);
-                
-                postWorkerMessages(json);
-                return; // Succès, arrêter la recherche
-                
-            } catch (error) {
-                console.log(`Port ${port} failed: ${error.message}`);
-                
-                // Continuer avec le port suivant
-                if (i === MAX_PORT_RETRIES - 1) {
-                    // C'était la dernière tentative
-                    throw new Error(`No server found after testing ports ${DEFAULT_HTTPS_PORT} to ${DEFAULT_HTTPS_PORT + MAX_PORT_RETRIES - 1}`);
-                }
+    const wait = setTimeout(() => {
+        abortFetching();
+    }, 5000);
+
+    fetch(urlToFetch, {method: 'get', signal: controller.signal})
+        .then(response => response.text())
+        .then(data => {
+            clearTimeout(wait);
+            if (document.hidden) {
+                setTimeout(() => {
+                    checkPhone();
+                }, 2000);
+                return
             }
-        }
-    } catch (error) {
-        console.error('Server discovery failed:', error);
-        
-        // Afficher un message d'erreur à l'utilisateur
-        /*if (warningElement) {
-            warningElement.style.display = "block";
-            logElement.style.display = "none";
-            warningElement.innerText = "Unable to connect to server. Please check that TaaDa is running.";
-        }*/
-        
-        // Réessayer après un délai
-        setTimeout(() => {
-            /*if (warningElement) {
-                warningElement.style.display = "none";
-                logElement.style.display = "block";
-            }*/
-            checkPhone();
-        }, 5000);
-    }
+            if (isJson(data)) {
+                const json = JSON.parse(data);
+                postWorkerMessages(json)
+            } else {
+                alert("You need to run TeslAA 2.0 or newer to use this page");
+            }
+        })
+        .catch((error) => {
+            console.error(error);
+            clearTimeout(wait);
+            setTimeout(() => {
+                checkPhone()
+            }, 2000);
+        });
 }
 
 function findGetParameter(parameterName) {
@@ -317,7 +246,7 @@ function postWorkerMessages(json) {
     }
 
     if (appVersion <= 22) {
-        alert("You need to run TaaDa 1.4.0 or newer to use this page, please update.");
+        alert("You need to run TeslAA 2.3 or newer to use this page, please update.");
         return;
     }
 
@@ -565,13 +494,10 @@ let ttsPCMSocket;
 
 
 function startAudio(){
-    // Note: port est maintenant le port HTTPS découvert dynamiquement
-    // Les ports audio restent relatifs à ce port de base
     mediaPCMSocket = new WebSocket(`wss://taada.top:${port+1}`);
     mediaPCMSocket.binaryType = "arraybuffer";
     mediaPCMSocket.addEventListener('open', () => {
         mediaPCMSocket.binaryType = "arraybuffer";
-        console.log(`Media audio connected to port ${port+1}`);
     });
     mediaPCMSocket.addEventListener('message', event =>
     {
@@ -583,7 +509,6 @@ function startAudio(){
     ttsPCMSocket.binaryType = "arraybuffer";
     ttsPCMSocket.addEventListener('open', () => {
         ttsPCMSocket.binaryType = "arraybuffer";
-        console.log(`TTS audio connected to port ${port+2}`);
     });
     ttsPCMSocket.addEventListener('message', event =>
     {
@@ -592,3 +517,7 @@ function startAudio(){
         ttsPCM.feed(data);
     });
 }
+
+
+
+
