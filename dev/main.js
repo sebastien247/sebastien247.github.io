@@ -538,8 +538,9 @@ bodyElement.addEventListener('touchstart', (event) => {
         timestamp: performance.now()
     });
     
-    // Backward compatibility: envoyer aussi l'ancien format pour le premier doigt
-    if (newTouches.length > 0) {
+    // Backward compatibility: envoyer l'ancien format SEULEMENT si il n'y a qu'un seul doigt total
+    // Cela évite les conflits et les sauts lors du multitouch
+    if (allTouches.length === 1 && newTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "DOWN",
             X: newTouches[0].x,
@@ -572,8 +573,9 @@ bodyElement.addEventListener('touchend', (event) => {
         timestamp: performance.now()
     });
     
-    // Backward compatibility: envoyer aussi l'ancien format pour le premier doigt qui se termine
-    if (endedTouches.length > 0) {
+    // Backward compatibility: envoyer l'ancien format SEULEMENT si c'était le dernier doigt
+    // (allTouches.length === 0 signifie qu'aucun doigt ne reste actif)
+    if (allTouches.length === 0 && endedTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "UP",
             X: endedTouches[0].x,
@@ -623,8 +625,9 @@ bodyElement.addEventListener('touchmove', (event) => {
             timestamp: now
         });
         
-        // Backward compatibility: envoyer aussi l'ancien format pour le premier doigt
-        if (movingTouches.length > 0) {
+        // Backward compatibility: envoyer l'ancien format SEULEMENT si il n'y a qu'un seul doigt
+        // Cela évite les conflits et les sauts lors du multitouch
+        if (movingTouches.length === 1) {
             demuxDecodeWorker.postMessage({
                 action: "DRAG",
                 X: movingTouches[0].x,
