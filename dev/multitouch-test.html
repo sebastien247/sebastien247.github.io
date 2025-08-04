@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multitouch Test</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+        .test-area {
+            width: 100%;
+            height: 400px;
+            background-color: #fff;
+            border: 2px solid #333;
+            position: relative;
+            margin-bottom: 20px;
+            touch-action: none; /* Prevent default touch behaviors */
+        }
+        .touch-point {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background-color: rgba(255, 0, 0, 0.7);
+            border: 2px solid #ff0000;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 100;
+        }
+        .log {
+            background-color: #333;
+            color: #fff;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        .controls {
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin-right: 10px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Multitouch Test</h1>
+    
+    <div class="controls">
+        <button onclick="clearLog()">Clear Log</button>
+        <button onclick="toggleVerbose()">Toggle Verbose</button>
+        <span id="verbose-status">Verbose: OFF</span>
+        <br><br>
+        <button onclick="simulateBasicMultitouch()">Simulate 2-Finger Touch</button>
+        <button onclick="simulatePinchGesture()">Simulate Pinch Gesture</button>
+        <button onclick="simulate3FingerTouch()">Simulate 3-Finger Touch</button>
+        <button onclick="debugSystemState()">Debug System State</button>
+    </div>
+    
+    <div class="test-area" id="testArea">
+        <p style="margin: 10px; pointer-events: none;">Touch this area with multiple fingers to test multitouch functionality</p>
+    </div>
+    
+    <div class="log" id="log"></div>
+
+    <script>
+        let verbose = false;
+        let activeTouches = new Map();
+        
+        function log(message) {
+            const logElement = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            logElement.textContent += `[${timestamp}] ${message}\n`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        function clearLog() {
+            document.getElementById('log').textContent = '';
+        }
+        
+        function toggleVerbose() {
+            verbose = !verbose;
+            document.getElementById('verbose-status').textContent = `Verbose: ${verbose ? 'ON' : 'OFF'}`;
+        }
+        
+        function createTouchPoint(touch) {
+            const testArea = document.getElementById('testArea');
+            const touchPoint = document.createElement('div');
+            touchPoint.className = 'touch-point';
+            touchPoint.id = `touch-${touch.identifier}`;
+            touchPoint.style.left = `${touch.clientX - testArea.offsetLeft}px`;
+            touchPoint.style.top = `${touch.clientY - testArea.offsetTop}px`;
+            testArea.appendChild(touchPoint);
+        }
+        
+        function updateTouchPoint(touch) {
+            const testArea = document.getElementById('testArea');
+            const touchPoint = document.getElementById(`touch-${touch.identifier}`);
+            if (touchPoint) {
+                touchPoint.style.left = `${touch.clientX - testArea.offsetLeft}px`;
+                touchPoint.style.top = `${touch.clientY - testArea.offsetTop}px`;
+            }
+        }
+        
+        function removeTouchPoint(touchId) {
+            const touchPoint = document.getElementById(`touch-${touchId}`);
+            if (touchPoint) {
+                touchPoint.remove();
+            }
+        }
+        
+        function convertTouchListToCoords(touchList) {
+            const coords = [];
+            for (let i = 0; i < touchList.length; i++) {
+                const touch = touchList[i];
+                coords.push({
+                    id: touch.identifier,
+                    x: Math.round(touch.clientX),
+                    y: Math.round(touch.clientY)
+                });
+            }
+            return coords;
+        }
+        
+        // Simulate the multitouch event handling from main.js
+        const testArea = document.getElementById('testArea');
+        
+        testArea.addEventListener('touchstart', (event) => {
+            event.preventDefault();
+            
+            const newTouches = convertTouchListToCoords(event.changedTouches);
+            const allTouches = convertTouchListToCoords(event.touches);
+            
+            // Update visual indicators
+            for (let i = 0; i < event.changedTouches.length; i++) {
+                createTouchPoint(event.changedTouches[i]);
+                activeTouches.set(event.changedTouches[i].identifier, event.changedTouches[i]);
+            }
+            
+            log(`MULTITOUCH_DOWN: ${newTouches.length} new touches, ${allTouches.length} total`);
+            
+            if (verbose) {
+                newTouches.forEach(touch => {
+                    log(`  New touch ${touch.id}: (${touch.x}, ${touch.y})`);
+                });
+            }
+            
+            // Simulate sending to worker
+            const multitouchEvent = {
+                action: "MULTITOUCH_DOWN",
+                touches: newTouches,
+                allTouches: allTouches,
+                timestamp: performance.now()
+            };
+            
+            // Backward compatibility event
+            if (newTouches.length > 0) {
+                const singleTouchEvent = {
+                    action: "DOWN",
+                    X: newTouches[0].x,
+                    Y: newTouches[0].y,
+                    timestamp: performance.now()
+                };
+                if (verbose) {
+                    log(`  Backward compatibility: DOWN (${singleTouchEvent.X}, ${singleTouchEvent.Y})`);
+                }
+            }
+        }, { passive: false });
+        
+        testArea.addEventListener('touchmove', (event) => {
+            event.preventDefault();
+            
+            const movingTouches = convertTouchListToCoords(event.touches);
+            
+            // Update visual indicators
+            for (let i = 0; i < event.touches.length; i++) {
+                updateTouchPoint(event.touches[i]);
+                activeTouches.set(event.touches[i].identifier, event.touches[i]);
+            }
+            
+            if (verbose) {
+                log(`MULTITOUCH_MOVE: ${movingTouches.length} touches moving`);
+                movingTouches.forEach(touch => {
+                    log(`  Touch ${touch.id}: (${touch.x}, ${touch.y})`);
+                });
+            }
+            
+            // Simulate sending to worker
+            const multitouchEvent = {
+                action: "MULTITOUCH_MOVE",
+                touches: movingTouches,
+                timestamp: performance.now()
+            };
+            
+            // Backward compatibility event
+            if (movingTouches.length > 0) {
+                const singleTouchEvent = {
+                    action: "DRAG",
+                    X: movingTouches[0].x,
+                    Y: movingTouches[0].y,
+                    timestamp: performance.now()
+                };
+            }
+        }, { passive: false });
+        
+        testArea.addEventListener('touchend', (event) => {
+            event.preventDefault();
+            
+            const endedTouches = convertTouchListToCoords(event.changedTouches);
+            const allTouches = convertTouchListToCoords(event.touches);
+            
+            // Update visual indicators
+            for (let i = 0; i < event.changedTouches.length; i++) {
+                removeTouchPoint(event.changedTouches[i].identifier);
+                activeTouches.delete(event.changedTouches[i].identifier);
+            }
+            
+            log(`MULTITOUCH_UP: ${endedTouches.length} touches ended, ${allTouches.length} remaining`);
+            
+            if (verbose) {
+                endedTouches.forEach(touch => {
+                    log(`  Ended touch ${touch.id}: (${touch.x}, ${touch.y})`);
+                });
+            }
+            
+            // Simulate sending to worker
+            const multitouchEvent = {
+                action: "MULTITOUCH_UP",
+                touches: endedTouches,
+                allTouches: allTouches,
+                timestamp: performance.now()
+            };
+            
+            // Backward compatibility event
+            if (endedTouches.length > 0) {
+                const singleTouchEvent = {
+                    action: "UP",
+                    X: endedTouches[0].x,
+                    Y: endedTouches[0].y,
+                    timestamp: performance.now()
+                };
+                if (verbose) {
+                    log(`  Backward compatibility: UP (${singleTouchEvent.X}, ${singleTouchEvent.Y})`);
+                }
+            }
+        }, { passive: false });
+        
+        testArea.addEventListener('touchcancel', (event) => {
+            event.preventDefault();
+            
+            const cancelledTouches = convertTouchListToCoords(event.changedTouches);
+            const allTouches = convertTouchListToCoords(event.touches);
+            
+            // Update visual indicators
+            for (let i = 0; i < event.changedTouches.length; i++) {
+                removeTouchPoint(event.changedTouches[i].identifier);
+                activeTouches.delete(event.changedTouches[i].identifier);
+            }
+            
+            log(`MULTITOUCH_CANCEL: ${cancelledTouches.length} touches cancelled, ${allTouches.length} remaining`);
+            
+            if (verbose) {
+                cancelledTouches.forEach(touch => {
+                    log(`  Cancelled touch ${touch.id}: (${touch.x}, ${touch.y})`);
+                });
+            }
+        }, { passive: false });
+        
+        // Fonctions de simulation pour les boutons de test
+        function simulateBasicMultitouch() {
+            log('🟢 SIMULATION: Basic 2-finger multitouch');
+            
+            const touches = [
+                { id: 0, x: 100, y: 100 },
+                { id: 1, x: 200, y: 200 }
+            ];
+            
+            // Simuler visuel
+            touches.forEach(touch => {
+                const testArea = document.getElementById('testArea');
+                const touchPoint = document.createElement('div');
+                touchPoint.className = 'touch-point';
+                touchPoint.id = `sim-touch-${touch.id}`;
+                touchPoint.style.left = `${touch.x}px`;
+                touchPoint.style.top = `${touch.y}px`;
+                touchPoint.style.backgroundColor = 'rgba(0, 255, 0, 0.7)'; // Vert pour simulation
+                testArea.appendChild(touchPoint);
+            });
+            
+            log('📝 MULTITOUCH_DOWN: 2 touches simulated');
+            if (verbose) {
+                touches.forEach(touch => {
+                    log(`  Touch ${touch.id}: (${touch.x}, ${touch.y})`);
+                });
+            }
+            
+            // Simuler mouvement après 500ms
+            setTimeout(() => {
+                const movedTouches = [
+                    { id: 0, x: 150, y: 150 },
+                    { id: 1, x: 250, y: 250 }
+                ];
+                
+                movedTouches.forEach(touch => {
+                    const touchPoint = document.getElementById(`sim-touch-${touch.id}`);
+                    if (touchPoint) {
+                        touchPoint.style.left = `${touch.x}px`;
+                        touchPoint.style.top = `${touch.y}px`;
+                    }
+                });
+                
+                log('📝 MULTITOUCH_MOVE: touches moved');
+            }, 500);
+            
+            // Nettoyer après 1500ms
+            setTimeout(() => {
+                touches.forEach(touch => {
+                    const touchPoint = document.getElementById(`sim-touch-${touch.id}`);
+                    if (touchPoint) touchPoint.remove();
+                });
+                log('📝 MULTITOUCH_UP: simulation ended');
+            }, 1500);
+        }
+        
+        function simulatePinchGesture() {
+            log('🟢 SIMULATION: Pinch gesture (zoom in)');
+            
+            const centerX = 200;
+            const centerY = 200;
+            let distance = 100;
+            
+            const createPinchTouches = (dist) => [
+                { id: 0, x: centerX - dist/2, y: centerY - dist/2 },
+                { id: 1, x: centerX + dist/2, y: centerY + dist/2 }
+            ];
+            
+            const startTouches = createPinchTouches(distance);
+            
+            // Créer les indicateurs visuels
+            startTouches.forEach(touch => {
+                const testArea = document.getElementById('testArea');
+                const touchPoint = document.createElement('div');
+                touchPoint.className = 'touch-point';
+                touchPoint.id = `pinch-touch-${touch.id}`;
+                touchPoint.style.left = `${touch.x}px`;
+                touchPoint.style.top = `${touch.y}px`;
+                touchPoint.style.backgroundColor = 'rgba(0, 0, 255, 0.7)'; // Bleu pour pinch
+                testArea.appendChild(touchPoint);
+            });
+            
+            log('📝 MULTITOUCH_DOWN: Pinch gesture started');
+            
+            let step = 0;
+            const pinchInterval = setInterval(() => {
+                step++;
+                distance = Math.max(20, distance - 8); // Réduire la distance
+                
+                const pinchTouches = createPinchTouches(distance);
+                
+                pinchTouches.forEach(touch => {
+                    const touchPoint = document.getElementById(`pinch-touch-${touch.id}`);
+                    if (touchPoint) {
+                        touchPoint.style.left = `${touch.x}px`;
+                        touchPoint.style.top = `${touch.y}px`;
+                    }
+                });
+                
+                if (verbose) {
+                    log(`📝 MULTITOUCH_MOVE: Pinch step ${step}, distance: ${Math.round(distance)}`);
+                }
+                
+                if (step >= 10 || distance <= 20) {
+                    clearInterval(pinchInterval);
+                    
+                    // Nettoyer
+                    setTimeout(() => {
+                        pinchTouches.forEach(touch => {
+                            const touchPoint = document.getElementById(`pinch-touch-${touch.id}`);
+                            if (touchPoint) touchPoint.remove();
+                        });
+                        log('📝 MULTITOUCH_UP: Pinch gesture completed');
+                    }, 200);
+                }
+            }, 100);
+        }
+        
+        function simulate3FingerTouch() {
+            log('🟢 SIMULATION: 3-finger touch');
+            
+            const touches = [
+                { id: 0, x: 100, y: 150 },
+                { id: 1, x: 200, y: 150 },
+                { id: 2, x: 300, y: 150 }
+            ];
+            
+            // Créer les indicateurs visuels
+            touches.forEach(touch => {
+                const testArea = document.getElementById('testArea');
+                const touchPoint = document.createElement('div');
+                touchPoint.className = 'touch-point';
+                touchPoint.id = `triple-touch-${touch.id}`;
+                touchPoint.style.left = `${touch.x}px`;
+                touchPoint.style.top = `${touch.y}px`;
+                touchPoint.style.backgroundColor = 'rgba(255, 165, 0, 0.7)'; // Orange pour 3 doigts
+                testArea.appendChild(touchPoint);
+            });
+            
+            log('📝 MULTITOUCH_DOWN: 3 touches simulated');
+            if (verbose) {
+                touches.forEach(touch => {
+                    log(`  Touch ${touch.id}: (${touch.x}, ${touch.y})`);
+                });
+            }
+            
+            // Simuler un mouvement en vague
+            let waveStep = 0;
+            const waveInterval = setInterval(() => {
+                waveStep++;
+                const waveOffset = Math.sin(waveStep * 0.5) * 20;
+                
+                touches.forEach((touch, index) => {
+                    const touchPoint = document.getElementById(`triple-touch-${touch.id}`);
+                    if (touchPoint) {
+                        const yOffset = waveOffset * (index % 2 === 0 ? 1 : -1);
+                        touchPoint.style.top = `${touch.y + yOffset}px`;
+                    }
+                });
+                
+                if (verbose && waveStep % 5 === 0) {
+                    log(`📝 MULTITOUCH_MOVE: Wave motion step ${waveStep}`);
+                }
+                
+                if (waveStep >= 20) {
+                    clearInterval(waveInterval);
+                    
+                    // Nettoyer
+                    setTimeout(() => {
+                        touches.forEach(touch => {
+                            const touchPoint = document.getElementById(`triple-touch-${touch.id}`);
+                            if (touchPoint) touchPoint.remove();
+                        });
+                        log('📝 MULTITOUCH_UP: 3-finger touch ended');
+                    }, 200);
+                }
+            }, 100);
+        }
+        
+        function debugSystemState() {
+            log('🔍 DEBUG: System state information');
+            log(`  Active touches: ${activeTouches.size}`);
+            log(`  Test area size: ${document.getElementById('testArea').offsetWidth}x${document.getElementById('testArea').offsetHeight}`);
+            log(`  Verbose mode: ${verbose ? 'ON' : 'OFF'}`);
+            log(`  User agent: ${navigator.userAgent.substring(0, 50)}...`);
+            
+            // Tester la détection tactile
+            const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+            log(`  Touch support detected: ${isTouchDevice ? 'YES' : 'NO'}`);
+            log(`  Max touch points: ${navigator.maxTouchPoints || 'Unknown'}`);
+            
+            activeTouches.forEach((touch, id) => {
+                log(`  Active touch ${id}: (${touch.clientX}, ${touch.clientY})`);
+            });
+        }
+        
+        // Initial log message
+        log('Multitouch test initialized. Touch the test area with multiple fingers.');
+        log('Enable verbose mode to see detailed touch coordinates.');
+        log('Use the simulation buttons to test multitouch without a touch device.');
+    </script>
+</body>
+</html>
