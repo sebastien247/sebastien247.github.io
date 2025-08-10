@@ -316,8 +316,8 @@ function postWorkerMessages(json) {
         }
     }
 
-    if (appVersion <= 22) {
-        alert("You need to run TaaDa 1.4.0 or newer to use this page, please update.");
+    if (appVersion <= 37) {
+        alert("You need to run TaaDa 1.4.1 or newer to use this page, please update.");
         return;
     }
 
