@@ -470,13 +470,33 @@ function isJson(item) {
     return typeof item === "object" && item !== null;
 }
 
-// Ajout de variables pour la gestion optimisée des événements tactiles
+// Ajout de variables pour la gestion optimisée des événements tactiles multitouch
 let lastTouchMoveTime = 0;
+let activeTouches = new Map(); // Suivi des touches actives avec leurs IDs
 
 const TOUCH_THROTTLE_MS = 4;
 // 4ms (250Hz) → plus fluide mais plus gourmand en ressources
 // 8ms (120Hz) → bon équilibre entre fluidité et performance
 // 16ms (60Hz) → économie supplémentaire de ressources mais un peu moins fluide
+
+/**
+ * Convertit une TouchList en tableau de coordonnées avec leurs IDs
+ * @param {TouchList} touchList - Liste des touches
+ * @returns {Array} Tableau d'objets {id, x, y}
+ */
+function convertTouchListToCoords(touchList) {
+    const coords = [];
+    for (let i = 0; i < touchList.length; i++) {
+        const touch = touchList[i];
+        const canvasCoords = convertToCanvasCoordinates(touch.clientX, touch.clientY);
+        coords.push({
+            id: touch.identifier,
+            x: canvasCoords.x,
+            y: canvasCoords.y
+        });
+    }
+    return coords;
+}
 
 bodyElement.addEventListener('touchstart', (event) => {
     if (!audiostart && !usebt)
@@ -499,38 +519,89 @@ bodyElement.addEventListener('touchstart', (event) => {
     // Utiliser preventDefault pour éviter les délais de clic du navigateur
     event.preventDefault();
     
-    // Envoi immédiat sans requestAnimationFrame car ces événements sont critiques
-    const coords = convertToCanvasCoordinates(event.touches[0].clientX, event.touches[0].clientY);
+    // Gérer toutes les nouvelles touches
+    const newTouches = convertTouchListToCoords(event.changedTouches);
+    
+    // Mettre à jour le suivi des touches actives
+    newTouches.forEach(touch => {
+        activeTouches.set(touch.id, touch);
+    });
+    
+    // Envoyer les événements pour toutes les touches actives (multitouch)
+    const allTouches = convertTouchListToCoords(event.touches);
+    
+    // Envoyer événement multitouch
     demuxDecodeWorker.postMessage({
-        action: "DOWN",
-        X: coords.x,
-        Y: coords.y,
+        action: "MULTITOUCH_DOWN",
+        touches: newTouches, // Seulement les nouvelles touches pour cet événement
+        allTouches: allTouches, // Toutes les touches actives pour contexte
         timestamp: performance.now()
     });
+    
+    // Backward compatibility: envoyer l'ancien format SEULEMENT si il n'y a qu'un seul doigt total
+    // Cela évite les conflits et les sauts lors du multitouch
+    if (allTouches.length === 1 && newTouches.length > 0) {
+        demuxDecodeWorker.postMessage({
+            action: "DOWN",
+            X: newTouches[0].x,
+            Y: newTouches[0].y,
+            timestamp: performance.now()
+        });
+    }
 }, { passive: false }); // Important pour permettre preventDefault
 
 bodyElement.addEventListener('touchend', (event) => {
     // Utiliser preventDefault pour éviter les délais de clic du navigateur
     event.preventDefault();
     
-    const coords = convertToCanvasCoordinates(event.changedTouches[0].clientX, event.changedTouches[0].clientY);
+    // Gérer toutes les touches qui se terminent
+    const endedTouches = convertTouchListToCoords(event.changedTouches);
+    
+    // Mettre à jour le suivi des touches actives (supprimer les touches terminées)
+    endedTouches.forEach(touch => {
+        activeTouches.delete(touch.id);
+    });
+    
+    // Envoyer les événements pour toutes les touches qui se terminent
+    const allTouches = convertTouchListToCoords(event.touches);
+    
+    // Envoyer événement multitouch
     demuxDecodeWorker.postMessage({
-        action: "UP",
-        X: coords.x,
-        Y: coords.y,
+        action: "MULTITOUCH_UP",
+        touches: endedTouches, // Seulement les touches qui se terminent
+        allTouches: allTouches, // Toutes les touches encore actives
         timestamp: performance.now()
     });
+    
+    // Backward compatibility: envoyer l'ancien format SEULEMENT si c'était le dernier doigt
+    // (allTouches.length === 0 signifie qu'aucun doigt ne reste actif)
+    if (allTouches.length === 0 && endedTouches.length > 0) {
+        demuxDecodeWorker.postMessage({
+            action: "UP",
+            X: endedTouches[0].x,
+            Y: endedTouches[0].y,
+            timestamp: performance.now()
+        });
+    }
 }, { passive: false }); // Important pour permettre preventDefault
 
 bodyElement.addEventListener('touchcancel', (event) => {
-    if (event.touches.length > 0) {
-        const coords = convertToCanvasCoordinates(event.touches[0].clientX, event.touches[0].clientY);
-        demuxDecodeWorker.postMessage({
-            action: "UP",
-            X: coords.x,
-            Y: coords.y
-        });
-    }
+    // Traiter comme touchend - toutes les touches annulées
+    const cancelledTouches = convertTouchListToCoords(event.changedTouches);
+    
+    // Mettre à jour le suivi des touches actives
+    cancelledTouches.forEach(touch => {
+        activeTouches.delete(touch.id);
+    });
+    
+    const allTouches = convertTouchListToCoords(event.touches);
+    
+    demuxDecodeWorker.postMessage({
+        action: "MULTITOUCH_CANCEL",
+        touches: cancelledTouches,
+        allTouches: allTouches,
+        timestamp: performance.now()
+    });
 });
 
 bodyElement.addEventListener('touchmove', (event) => {
@@ -539,12 +610,31 @@ bodyElement.addEventListener('touchmove', (event) => {
     if (now - lastTouchMoveTime >= TOUCH_THROTTLE_MS) {
         lastTouchMoveTime = now;
         
-        const coords = convertToCanvasCoordinates(event.touches[0].clientX, event.touches[0].clientY);
-        demuxDecodeWorker.postMessage({
-            action: "DRAG",
-            X: coords.x,
-            Y: coords.y,
+        // Gérer toutes les touches qui bougent (multitouch)
+        const movingTouches = convertTouchListToCoords(event.touches);
+        
+        // Mettre à jour le suivi des touches actives
+        movingTouches.forEach(touch => {
+            activeTouches.set(touch.id, touch);
         });
+        
+        // Envoyer événement multitouch
+        demuxDecodeWorker.postMessage({
+            action: "MULTITOUCH_MOVE",
+            touches: movingTouches,
+            timestamp: now
+        });
+        
+        // Backward compatibility: envoyer l'ancien format SEULEMENT si il n'y a qu'un seul doigt
+        // Cela évite les conflits et les sauts lors du multitouch
+        if (movingTouches.length === 1) {
+            demuxDecodeWorker.postMessage({
+                action: "DRAG",
+                X: movingTouches[0].x,
+                Y: movingTouches[0].y,
+                timestamp: now
+            });
+        }
     }
 });
 
@@ -554,6 +644,104 @@ window.addEventListener('resize', () => {
         updateCanvasSize();
     }
 });
+
+/**
+ * Fonction de test pour simuler des événements multitouch
+ * Utilisable depuis la console du navigateur
+ */
+window.simulateMultitouch = function(testType = 'basic') {
+    console.log(`🟢 Simulating multitouch event: ${testType}`);
+    
+    if (testType === 'basic') {
+        // Test basique avec 2 touches
+        const touches = [
+            { id: 0, x: 100, y: 100 },
+            { id: 1, x: 200, y: 200 }
+        ];
+        
+        console.log('📝 Sending MULTITOUCH_DOWN with 2 touches');
+        demuxDecodeWorker.postMessage({
+            action: "MULTITOUCH_DOWN",
+            touches: touches,
+            allTouches: touches,
+            timestamp: performance.now()
+        });
+        
+        // Simuler un mouvement après 500ms
+        setTimeout(() => {
+            const movedTouches = [
+                { id: 0, x: 150, y: 150 },
+                { id: 1, x: 250, y: 250 }
+            ];
+            console.log('📝 Sending MULTITOUCH_MOVE');
+            demuxDecodeWorker.postMessage({
+                action: "MULTITOUCH_MOVE",
+                touches: movedTouches,
+                timestamp: performance.now()
+            });
+        }, 500);
+        
+        // Simuler la fin après 1000ms
+        setTimeout(() => {
+            console.log('📝 Sending MULTITOUCH_UP');
+            demuxDecodeWorker.postMessage({
+                action: "MULTITOUCH_UP",
+                touches: touches,
+                allTouches: [],
+                timestamp: performance.now()
+            });
+        }, 1000);
+        
+    } else if (testType === 'pinch') {
+        // Test de pincement (zoom)
+        console.log('📝 Simulating pinch gesture');
+        const startTouches = [
+            { id: 0, x: 200, y: 200 },
+            { id: 1, x: 300, y: 300 }
+        ];
+        
+        demuxDecodeWorker.postMessage({
+            action: "MULTITOUCH_DOWN",
+            touches: startTouches,
+            allTouches: startTouches,
+            timestamp: performance.now()
+        });
+        
+        // Simuler le rapprochement des doigts
+        let step = 0;
+        const pinchInterval = setInterval(() => {
+            step++;
+            const distance = 100 + (50 - step * 5); // Réduire la distance
+            const centerX = 250;
+            const centerY = 250;
+            
+            const pinchTouches = [
+                { id: 0, x: centerX - distance/2, y: centerY - distance/2 },
+                { id: 1, x: centerX + distance/2, y: centerY + distance/2 }
+            ];
+            
+            console.log(`📝 Pinch step ${step}, distance: ${distance}`);
+            demuxDecodeWorker.postMessage({
+                action: "MULTITOUCH_MOVE",
+                touches: pinchTouches,
+                timestamp: performance.now()
+            });
+            
+            if (step >= 10) {
+                clearInterval(pinchInterval);
+                demuxDecodeWorker.postMessage({
+                    action: "MULTITOUCH_UP",
+                    touches: pinchTouches,
+                    allTouches: [],
+                    timestamp: performance.now()
+                });
+                console.log('📝 Pinch gesture completed');
+            }
+        }, 100);
+    }
+    
+    return true;
+};
 
 checkPhone();
 
