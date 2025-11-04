@@ -316,8 +316,8 @@ function postWorkerMessages(json) {
         }
     }
 
-    if (appVersion <= 22) {
-        alert("You need to run TaaDa 1.4.0 or newer to use this page, please update.");
+    if (appVersion < 37) {
+        alert("You need to run TaaDa 1.4.1 or newer to use this page, please update.");
         return;
     }
 
@@ -471,10 +471,9 @@ function isJson(item) {
 }
 
 // Ajout de variables pour la gestion optimisée des événements tactiles multitouch
-let lastTouchMoveTime = 0;
 let activeTouches = new Map(); // Suivi des touches actives avec leurs IDs
-
-const TOUCH_THROTTLE_MS = 4;
+let touchMovePending = false;
+let latestTouchEvent = null;
 // 4ms (250Hz) → plus fluide mais plus gourmand en ressources
 // 8ms (120Hz) → bon équilibre entre fluidité et performance
 // 16ms (60Hz) → économie supplémentaire de ressources mais un peu moins fluide
@@ -498,48 +497,52 @@ function convertTouchListToCoords(touchList) {
     return coords;
 }
 
-bodyElement.addEventListener('touchstart', (event) => {
-    if (!audiostart && !usebt)
-    {
+/**
+ * Initialise l'audio au premier contact tactile si nécessaire
+ */
+function initializeAudioOnFirstTouch() {
+    if (!audiostart && !usebt) {
         mediaPCM = new PCMPlayer({
             encoding: '16bitInt',
             channels: 2,
             sampleRate: 48000
         });
-        ttsPCM= new PCMPlayer({
+        ttsPCM = new PCMPlayer({
             encoding: '16bitInt',
             channels: 1,
             sampleRate: 16000
         });
-        document.getElementById("muteicon").remove();
+        const muteIcon = document.getElementById("muteicon");
+        if (muteIcon) {
+            muteIcon.remove();
+        }
         startAudio();
-        audiostart=true;
+        audiostart = true;
     }
-    
-    // Utiliser preventDefault pour éviter les délais de clic du navigateur
+}
+
+/**
+ * Gère l'événement touchstart
+ * @param {TouchEvent} event - L'événement tactile
+ */
+function handleTouchStart(event) {
     event.preventDefault();
-    
-    // Gérer toutes les nouvelles touches
+    initializeAudioOnFirstTouch();
+
     const newTouches = convertTouchListToCoords(event.changedTouches);
-    
-    // Mettre à jour le suivi des touches actives
-    newTouches.forEach(touch => {
-        activeTouches.set(touch.id, touch);
-    });
-    
-    // Envoyer les événements pour toutes les touches actives (multitouch)
+    newTouches.forEach(touch => activeTouches.set(touch.id, touch));
+
     const allTouches = convertTouchListToCoords(event.touches);
-    
-    // Envoyer événement multitouch
+
+    // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_DOWN",
-        touches: newTouches, // Seulement les nouvelles touches pour cet événement
-        allTouches: allTouches, // Toutes les touches actives pour contexte
+        touches: newTouches,
+        allTouches: allTouches,
         timestamp: performance.now()
     });
-    
-    // Backward compatibility: envoyer l'ancien format SEULEMENT si il n'y a qu'un seul doigt total
-    // Cela évite les conflits et les sauts lors du multitouch
+
+    // Gérer la rétrocompatibilité pour le single-touch
     if (allTouches.length === 1 && newTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "DOWN",
@@ -548,33 +551,32 @@ bodyElement.addEventListener('touchstart', (event) => {
             timestamp: performance.now()
         });
     }
-}, { passive: false }); // Important pour permettre preventDefault
+}
 
-bodyElement.addEventListener('touchend', (event) => {
-    // Utiliser preventDefault pour éviter les délais de clic du navigateur
+bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false });
+
+/**
+ * Gère les événements touchend et touchcancel
+ * @param {TouchEvent} event - L'événement tactile
+ */
+function handleTouchEnd(event) {
     event.preventDefault();
-    
-    // Gérer toutes les touches qui se terminent
+
     const endedTouches = convertTouchListToCoords(event.changedTouches);
-    
-    // Mettre à jour le suivi des touches actives (supprimer les touches terminées)
-    endedTouches.forEach(touch => {
-        activeTouches.delete(touch.id);
-    });
-    
-    // Envoyer les événements pour toutes les touches qui se terminent
+    endedTouches.forEach(touch => activeTouches.delete(touch.id));
+
     const allTouches = convertTouchListToCoords(event.touches);
-    
-    // Envoyer événement multitouch
+    const action = event.type === 'touchend' ? 'MULTITOUCH_UP' : 'MULTITOUCH_CANCEL';
+
+    // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
-        action: "MULTITOUCH_UP",
-        touches: endedTouches, // Seulement les touches qui se terminent
-        allTouches: allTouches, // Toutes les touches encore actives
+        action: action,
+        touches: endedTouches,
+        allTouches: allTouches,
         timestamp: performance.now()
     });
-    
-    // Backward compatibility: envoyer l'ancien format SEULEMENT si c'était le dernier doigt
-    // (allTouches.length === 0 signifie qu'aucun doigt ne reste actif)
+
+    // Gérer la rétrocompatibilité pour le single-touch
     if (allTouches.length === 0 && endedTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "UP",
@@ -583,58 +585,57 @@ bodyElement.addEventListener('touchend', (event) => {
             timestamp: performance.now()
         });
     }
-}, { passive: false }); // Important pour permettre preventDefault
+}
 
-bodyElement.addEventListener('touchcancel', (event) => {
-    // Traiter comme touchend - toutes les touches annulées
-    const cancelledTouches = convertTouchListToCoords(event.changedTouches);
+bodyElement.addEventListener('touchend', handleTouchEnd, { passive: false });
+bodyElement.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+
+/**
+ * Boucle de mise à jour optimisée avec requestAnimationFrame
+ * N'envoie que le dernier événement tactile avant le prochain rendu du navigateur
+ */
+function processTouchMove() {
+    if (!latestTouchEvent) {
+        touchMovePending = false;
+        return;
+    }
+
+    const movingTouches = convertTouchListToCoords(latestTouchEvent.touches);
     
     // Mettre à jour le suivi des touches actives
-    cancelledTouches.forEach(touch => {
-        activeTouches.delete(touch.id);
+    movingTouches.forEach(touch => {
+        activeTouches.set(touch.id, touch);
     });
-    
-    const allTouches = convertTouchListToCoords(event.touches);
-    
+
+    // Envoyer l'événement multitouch optimisé
     demuxDecodeWorker.postMessage({
-        action: "MULTITOUCH_CANCEL",
-        touches: cancelledTouches,
-        allTouches: allTouches,
+        action: "MULTITOUCH_MOVE",
+        touches: movingTouches,
         timestamp: performance.now()
     });
-});
+
+    // Rétrocompatibilité : envoyer l'ancien format si une seule touche est active
+    if (movingTouches.length === 1) {
+        demuxDecodeWorker.postMessage({
+            action: "DRAG",
+            X: movingTouches[0].x,
+            Y: movingTouches[0].y,
+            timestamp: performance.now()
+        });
+    }
+
+    latestTouchEvent = null;
+    touchMovePending = false;
+}
 
 bodyElement.addEventListener('touchmove', (event) => {
-    const now = performance.now();
-    // Limiter le nombre d'événements envoyés en fonction du temps écoulé
-    if (now - lastTouchMoveTime >= TOUCH_THROTTLE_MS) {
-        lastTouchMoveTime = now;
-        
-        // Gérer toutes les touches qui bougent (multitouch)
-        const movingTouches = convertTouchListToCoords(event.touches);
-        
-        // Mettre à jour le suivi des touches actives
-        movingTouches.forEach(touch => {
-            activeTouches.set(touch.id, touch);
-        });
-        
-        // Envoyer événement multitouch
-        demuxDecodeWorker.postMessage({
-            action: "MULTITOUCH_MOVE",
-            touches: movingTouches,
-            timestamp: now
-        });
-        
-        // Backward compatibility: envoyer l'ancien format SEULEMENT si il n'y a qu'un seul doigt
-        // Cela évite les conflits et les sauts lors du multitouch
-        if (movingTouches.length === 1) {
-            demuxDecodeWorker.postMessage({
-                action: "DRAG",
-                X: movingTouches[0].x,
-                Y: movingTouches[0].y,
-                timestamp: now
-            });
-        }
+    // Stocker le dernier événement pour le traitement
+    latestTouchEvent = event;
+    
+    // Si une mise à jour n'est pas déjà en attente, en programmer une
+    if (!touchMovePending) {
+        touchMovePending = true;
+        requestAnimationFrame(processTouchMove);
     }
 });
 
@@ -742,24 +743,6 @@ window.simulateMultitouch = function(testType = 'basic') {
     
     return true;
 };
-
-/**
- * Fonction de debug pour afficher l'état des touches actives
- */
-window.debugTouches = function() {
-    console.log('🔍 Active touches:', activeTouches);
-    console.log('🔍 Canvas dimensions:', { width, height, widthMargin, heightMargin });
-    console.log('🔍 Touch throttle setting:', TOUCH_THROTTLE_MS + 'ms');
-    return {
-        activeTouches: Array.from(activeTouches.entries()),
-        canvasDimensions: { width, height, widthMargin, heightMargin },
-        throttleMs: TOUCH_THROTTLE_MS
-    };
-};
-
-console.log('🚀 Multitouch system initialized');
-console.log('📞 Use simulateMultitouch() or simulateMultitouch("pinch") to test');
-console.log('🔍 Use debugTouches() to check system state');
 
 checkPhone();
 
