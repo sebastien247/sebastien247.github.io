@@ -24,7 +24,8 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     port,
     drageventCounter=0,
     videoFrameReceived = false,
-    timeoutId;
+    timeoutId,
+    isServerShuttingDown = false; // 🚨 Flag pour éviter les actions en double lors du shutdown
 
 canvasElement.style.display = "none";
 
@@ -367,24 +368,54 @@ function postWorkerMessages(json) {
 
     demuxDecodeWorker.addEventListener("message", function (e) {
 
+        // 🚨 NOUVEAU: Gérer le shutdown du serveur EN PREMIER (priorité maximale)
+        if (e.data.hasOwnProperty('serverShutdown')) {
+            console.warn('Server shutdown detected:', e.data.reason);
+
+            // Marquer le flag pour éviter les actions en double
+            isServerShuttingDown = true;
+
+            // Cacher le message waiting
+            if (waitingMessageElement) {
+                waitingMessageElement.style.display = "none";
+            }
+
+            // Afficher un message et recharger après 3 secondes
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = "Server disconnected. Refreshing in 3 seconds...";
+
+            setTimeout(() => {
+                location.reload();
+            }, 3000);
+
+            return;
+        }
+
+        // 🚨 NOUVEAU: Ignorer tous les autres messages si le serveur est en shutdown
+        if (isServerShuttingDown) {
+            console.log('Server is shutting down, ignoring message:', e.data);
+            return;
+        }
+
         if (e.data.hasOwnProperty('error')) {
             console.error('Socket error received:', e.data.error);
             forcedRefreshCounter++;
-            
+
             // Only reload if error contains critical information
             // Show warning instead for most errors
-            if (typeof e.data.error === 'string' && 
-                (e.data.error.includes("no pong") || 
+            if (typeof e.data.error === 'string' &&
+                (e.data.error.includes("no pong") ||
                 e.data.error === "Reconnecting...")) {
-                
+
                 warningElement.style.display = "block";
                 logElement.style.display = "none";
                 warningElement.innerText = "Connection issue detected: " + e.data.error;
-                
+
                 // Use a delayed reload to allow logging to appear
                 setTimeout(function() {
                     console.log("Reloading page due to connection error");
-                    document.location.reload();
+                    location.reload(); // 🚨 Changé de document.location.reload() à location.reload()
                 }, 2000);
             } else {
                 // For less critical errors, just show a warning
@@ -412,27 +443,6 @@ function postWorkerMessages(json) {
             warningElement.style.display = "block";
             logElement.style.display = "none";
             warningElement.innerText = "Connection lost: " + e.data.reason + ". Reconnecting...";
-
-            return;
-        }
-
-        // 🚨 NOUVEAU: Gérer le shutdown du serveur
-        if (e.data.hasOwnProperty('serverShutdown')) {
-            console.warn('Server shutdown detected:', e.data.reason);
-
-            // Cacher le message waiting
-            if (waitingMessageElement) {
-                waitingMessageElement.style.display = "none";
-            }
-
-            // Afficher un message et recharger après 3 secondes
-            warningElement.style.display = "block";
-            logElement.style.display = "none";
-            warningElement.innerText = "Server disconnected. Refreshing in 3 seconds...";
-
-            setTimeout(() => {
-                location.reload();
-            }, 3000);
 
             return;
         }

@@ -11,7 +11,8 @@ let pendingFrames = [],
     frameCounter = 0,
     sps, decoder = null, socket, height, width, port, gl, heart = 0,
     broadwayDecoder = null,
-    lastheart = 0, pongtimer, frameRate;
+    lastheart = 0, pongtimer, frameRate,
+    isServerShuttingDown = false; // 🚨 Flag pour indiquer que le serveur s'arrête
 
 const texturePool = [];
 
@@ -316,10 +317,20 @@ function headerMagic(dat) {
 // ========== Socket and Message Handling ==========
 
 function noPong() {
+    // 🚨 NOUVEAU: Ne pas envoyer d'erreur si le serveur est en shutdown
+    if (isServerShuttingDown) {
+        console.log('Server is shutting down, ignoring no pong');
+        return;
+    }
     self.postMessage({error: "no pong"});
 }
 
 function heartbeat() {
+    // 🚨 NOUVEAU: Ne pas envoyer de ping si le serveur est en shutdown
+    if (isServerShuttingDown) {
+        return;
+    }
+
     if (lastheart !== 0) {
         if ((Date.now() - lastheart) > 3000) {
             if (socket.readyState === WebSocket.OPEN) {
@@ -349,6 +360,9 @@ function handleMessage(event) {
             if (message.type === 'server_shutdown') {
                 console.warn('Server is shutting down:', message.reason);
 
+                // 🚨 Marquer le flag pour éviter les erreurs en cascade
+                isServerShuttingDown = true;
+
                 // Notifier le thread principal
                 self.postMessage({
                     serverShutdown: true,
@@ -360,6 +374,12 @@ function handleMessage(event) {
                 if (heart) {
                     clearInterval(heart);
                     heart = 0;
+                }
+
+                // Arrêter le timer pongtimer
+                if (pongtimer) {
+                    clearTimeout(pongtimer);
+                    pongtimer = null;
                 }
 
                 return;
@@ -436,6 +456,12 @@ function startSocket() {
 
 function socketClose(event) {
     console.log('Error: Socket Closed ', event)
+
+    // 🚨 NOUVEAU: Ne pas reconnecter si le serveur est en shutdown
+    if (isServerShuttingDown) {
+        console.log('Server is shutting down, not reconnecting');
+        return;
+    }
 
     // 🚨 NOUVEAU: Notifier le thread principal pour cacher le message waiting
     self.postMessage({connectionLost: true, reason: event.reason || "Connection closed"});
