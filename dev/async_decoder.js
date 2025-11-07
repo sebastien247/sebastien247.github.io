@@ -340,8 +340,38 @@ function heartbeat() {
 
 
 function handleMessage(event) {
-    const dat = new Uint8Array(event.data)
-    handleVideoMessage(dat)
+    // 🚨 NOUVEAU: Vérifier si c'est un message texte (JSON) ou binaire
+    if (typeof event.data === 'string') {
+        try {
+            const message = JSON.parse(event.data);
+
+            // Détecter le shutdown du serveur
+            if (message.type === 'server_shutdown') {
+                console.warn('Server is shutting down:', message.reason);
+
+                // Notifier le thread principal
+                self.postMessage({
+                    serverShutdown: true,
+                    reason: message.reason,
+                    timestamp: message.timestamp
+                });
+
+                // Arrêter le heartbeat
+                if (heart) {
+                    clearInterval(heart);
+                    heart = 0;
+                }
+
+                return;
+            }
+        } catch (e) {
+            console.error('Error parsing message:', e);
+        }
+    } else {
+        // Message binaire (vidéo)
+        const dat = new Uint8Array(event.data)
+        handleVideoMessage(dat)
+    }
 }
 
 function handleVideoMessage(dat){
@@ -406,8 +436,15 @@ function startSocket() {
 
 function socketClose(event) {
     console.log('Error: Socket Closed ', event)
+
+    // 🚨 NOUVEAU: Notifier le thread principal pour cacher le message waiting
+    self.postMessage({connectionLost: true, reason: event.reason || "Connection closed"});
     self.postMessage({error: "Lost connection to phone, trying to reconnect"});
-    startSocket();
+
+    // Attendre un peu avant de reconnecter
+    setTimeout(() => {
+        startSocket();
+    }, 2000);
 }
 
 async function isWebCodecsWorkingWithDecode() {

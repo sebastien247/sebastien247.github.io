@@ -399,6 +399,44 @@ function postWorkerMessages(json) {
             return;
         }
 
+        // 🚨 NOUVEAU: Gérer la perte de connexion
+        if (e.data.hasOwnProperty('connectionLost')) {
+            console.error('Connection lost to server:', e.data.reason);
+
+            // Cacher le message waiting
+            if (waitingMessageElement) {
+                waitingMessageElement.style.display = "none";
+            }
+
+            // Afficher un message d'erreur
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = "Connection lost: " + e.data.reason + ". Reconnecting...";
+
+            return;
+        }
+
+        // 🚨 NOUVEAU: Gérer le shutdown du serveur
+        if (e.data.hasOwnProperty('serverShutdown')) {
+            console.warn('Server shutdown detected:', e.data.reason);
+
+            // Cacher le message waiting
+            if (waitingMessageElement) {
+                waitingMessageElement.style.display = "none";
+            }
+
+            // Afficher un message et recharger après 3 secondes
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = "Server disconnected. Refreshing in 3 seconds...";
+
+            setTimeout(() => {
+                location.reload();
+            }, 3000);
+
+            return;
+        }
+
         if (e.data.hasOwnProperty('warning')) {
             warningElement.style.display="block";
             logElement.style.display="none";
