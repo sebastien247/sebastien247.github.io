@@ -5,6 +5,8 @@ const demuxDecodeWorker = new Worker("./async_decoder.js"),
     canvasElement = document.querySelector('canvas'),
     bodyElement = document.querySelector('body'),
     waitingMessageElement = document.getElementById('waiting-message'),
+    errorOverlay = document.getElementById('error-overlay'),
+    errorMessage = document.getElementById('error-message'),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     DEFAULT_HTTPS_PORT = 8081,
     MAX_PORT_RETRIES = 5;
@@ -28,6 +30,28 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     isServerShuttingDown = false; // 🚨 Flag pour éviter les actions en double lors du shutdown
 
 canvasElement.style.display = "none";
+
+/**
+ * 🚨 NOUVEAU: Affiche un message d'erreur dans l'overlay permanent
+ * @param {string} message - Le message à afficher
+ */
+function showErrorOverlay(message) {
+    if (errorOverlay && errorMessage) {
+        errorMessage.textContent = message;
+        errorOverlay.style.display = "flex";
+    } else {
+        console.error('Error overlay elements not found');
+    }
+}
+
+/**
+ * 🚨 NOUVEAU: Cache l'overlay d'erreur
+ */
+function hideErrorOverlay() {
+    if (errorOverlay) {
+        errorOverlay.style.display = "none";
+    }
+}
 
 /**
  * Converts screen coordinates to canvas coordinates, accounting for canvas position, scaling,
@@ -380,10 +404,8 @@ function postWorkerMessages(json) {
                 waitingMessageElement.style.display = "none";
             }
 
-            // Afficher un message et recharger après 3 secondes
-            warningElement.style.display = "block";
-            logElement.style.display = "none";
-            warningElement.innerText = "Server disconnected. Refreshing in 3 seconds...";
+            // 🚨 Afficher l'overlay d'erreur permanent
+            showErrorOverlay("Server disconnected. Refreshing in 3 seconds...");
 
             setTimeout(() => {
                 location.reload();
@@ -439,10 +461,15 @@ function postWorkerMessages(json) {
                 waitingMessageElement.style.display = "none";
             }
 
-            // Afficher un message d'erreur
-            warningElement.style.display = "block";
-            logElement.style.display = "none";
-            warningElement.innerText = "Connection lost: " + e.data.reason + ". Reconnecting...";
+            // 🚨 Afficher l'overlay d'erreur permanent
+            showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
+
+            // Cacher l'overlay après 5 secondes si la reconnexion réussit
+            setTimeout(() => {
+                if (!isServerShuttingDown) {
+                    hideErrorOverlay();
+                }
+            }, 5000);
 
             return;
         }
