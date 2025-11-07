@@ -102,6 +102,101 @@ canvas, video {
     text-shadow: 0 0 10px rgba(232, 33, 39, 0.3);
 }
 
+/* Progress steps container */
+.progress-steps {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 30px;
+    margin: 30px 0;
+}
+
+/* Individual step */
+.step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    opacity: 0.4;
+    transition: all 0.4s ease;
+}
+
+.step-number {
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4em;
+    font-weight: bold;
+    border: 3px solid rgba(255, 255, 255, 0.3);
+    transition: all 0.4s ease;
+}
+
+.step-label {
+    font-size: 0.9em;
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 500;
+    transition: all 0.4s ease;
+}
+
+/* Active step */
+.step.active {
+    opacity: 1;
+}
+
+.step.active .step-number {
+    background: #E82127;
+    border-color: #E82127;
+    box-shadow: 0 0 20px rgba(232, 33, 39, 0.6);
+    transform: scale(1.15);
+}
+
+.step.active .step-label {
+    color: #E82127;
+    font-weight: 600;
+}
+
+/* Completed step */
+.step.completed {
+    opacity: 1;
+}
+
+.step.completed .step-number {
+    background: #00C2B1;
+    border-color: #00C2B1;
+    box-shadow: 0 0 15px rgba(0, 194, 177, 0.5);
+}
+
+.step.completed .step-label {
+    color: #00C2B1;
+}
+
+/* Add checkmark to completed steps */
+.step.completed .step-number::after {
+    content: "✓";
+    position: absolute;
+    font-size: 1.2em;
+    animation: checkmark 0.3s ease;
+}
+
+@keyframes checkmark {
+    0% {
+        transform: scale(0);
+        opacity: 0;
+    }
+    50% {
+        transform: scale(1.2);
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
 .loading-indicator {
     width: 50px;
     height: 50px;

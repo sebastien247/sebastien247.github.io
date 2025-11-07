@@ -17,7 +17,21 @@
 
     <!-- New waiting message that will be shown after socket port is retrieved -->
     <div id="waiting-message" class="waiting-message" style="display: none;">
-        <p>Please wait a moment</p>
+        <p id="connection-status-text">Connecting...</p>
+        <div class="progress-steps">
+            <div class="step" id="step-1">
+                <span class="step-number">1</span>
+                <span class="step-label">Server</span>
+            </div>
+            <div class="step" id="step-2">
+                <span class="step-number">2</span>
+                <span class="step-label">Socket</span>
+            </div>
+            <div class="step" id="step-3">
+                <span class="step-number">3</span>
+                <span class="step-label">Stream</span>
+            </div>
+        </div>
         <div class="loading-indicator"></div>
     </div>
 

@@ -54,6 +54,43 @@ function hideErrorOverlay() {
 }
 
 /**
+ * Updates the connection progress indicator with step-by-step status
+ * @param {number} step - Current step (1, 2, or 3)
+ * @param {string} message - Status message to display
+ */
+function updateConnectionProgress(step, message) {
+    const statusText = document.getElementById('connection-status-text');
+    const stepElements = {
+        1: document.getElementById('step-1'),
+        2: document.getElementById('step-2'),
+        3: document.getElementById('step-3')
+    };
+
+    if (statusText) {
+        statusText.textContent = message;
+    }
+
+    // Update step indicators
+    for (let i = 1; i <= 3; i++) {
+        const stepElement = stepElements[i];
+        if (!stepElement) continue;
+
+        if (i < step) {
+            // Previous steps are completed
+            stepElement.classList.remove('active');
+            stepElement.classList.add('completed');
+        } else if (i === step) {
+            // Current step is active
+            stepElement.classList.remove('completed');
+            stepElement.classList.add('active');
+        } else {
+            // Future steps are inactive
+            stepElement.classList.remove('active', 'completed');
+        }
+    }
+}
+
+/**
  * Converts screen coordinates to canvas coordinates, accounting for canvas position, scaling,
  * and image margins within the canvas
  * @param {number} screenX - The X coordinate on the screen
@@ -164,6 +201,10 @@ async function tryPort(port, controller) {
  */
 async function checkPhone() {
     console.log('Starting server discovery...');
+
+    // Step 1/3: Server Discovery
+    updateConnectionProgress(1, '1/3 - Discovering server...');
+
     controller = new AbortController();
 
     try {
@@ -184,10 +225,13 @@ async function checkPhone() {
                 
                 // Serveur trouvé, traiter la réponse
                 const json = JSON.parse(result.data);
-                
+
                 // Ajouter le port utilisé aux logs pour information
                 console.log(`Server found on port ${result.port}, processing response...`);
-                
+
+                // Update progress: Server found, moving to next step
+                updateConnectionProgress(1, '1/3 - Server found!');
+
                 postWorkerMessages(json);
                 return; // Succès, arrêter la recherche
                 
@@ -374,17 +418,20 @@ function postWorkerMessages(json) {
     // Show the waiting message after socket port is retrieved
     canvasElement.style.display = "block";
     document.getElementById("info").style.display = "none";
-    
+
     // Vérifier que waitingMessageElement existe
     if (waitingMessageElement) {
         console.log("Showing waiting message");
         waitingMessageElement.style.display = "flex";
+        // Step 2/3: Socket connection will be handled by worker
+        updateConnectionProgress(2, '2/3 - Connecting to stream...');
     } else {
         console.error("waitingMessageElement is null, trying to get it again");
         waitingMessageElement = document.getElementById('waiting-message');
         if (waitingMessageElement) {
             console.log("Got waitingMessageElement, showing it");
             waitingMessageElement.style.display = "flex";
+            updateConnectionProgress(2, '2/3 - Connecting to stream...');
         } else {
             console.error("waitingMessageElement still not found");
         }
@@ -484,16 +531,29 @@ function postWorkerMessages(json) {
             },2000);
         }
 
+        // Handle connection progress updates from worker
+        if (e.data.hasOwnProperty('connectionProgress')) {
+            const progress = e.data.connectionProgress;
+            updateConnectionProgress(progress.step, progress.message);
+        }
+
         // Hide the waiting message when first video frame is received
         if (e.data.hasOwnProperty('videoFrameReceived')) {
             console.log("Video frame received message received!", e.data);
             videoFrameReceived = true;
-            if (waitingMessageElement) {
-                waitingMessageElement.style.display = "none";
-                console.log("Hiding waiting message");
-            } else {
-                console.error("waitingMessageElement not found");
-            }
+
+            // Update to step 3/3 - Stream ready
+            updateConnectionProgress(3, '3/3 - Stream ready!');
+
+            // Hide the waiting message after a short delay to show completion
+            setTimeout(() => {
+                if (waitingMessageElement) {
+                    waitingMessageElement.style.display = "none";
+                    console.log("Hiding waiting message");
+                } else {
+                    console.error("waitingMessageElement not found");
+                }
+            }, 1000);
         }
 
         if (debug) {

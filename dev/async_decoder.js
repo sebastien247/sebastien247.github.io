@@ -12,7 +12,8 @@ let pendingFrames = [],
     sps, decoder = null, socket, height, width, port, gl, heart = 0,
     broadwayDecoder = null,
     lastheart = 0, pongtimer, frameRate,
-    isServerShuttingDown = false; // 🚨 Flag pour indiquer que le serveur s'arrête
+    isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
+    firstVideoFrameReceived = false; // Flag to track first video frame
 
 const texturePool = [];
 
@@ -407,9 +408,21 @@ function handleVideoMessage(dat){
     }
     if (unittype === 1 || unittype === 5) {
         videoMagic(dat);
-        // Notify the main thread that a video frame was received (not just a pong packet)
-        console.log("Sending videoFrameReceived message to main thread", unittype);
-        self.postMessage({videoFrameReceived: true});
+
+        // Notify the main thread on first video frame only
+        if (!firstVideoFrameReceived) {
+            firstVideoFrameReceived = true;
+            console.log("First video frame received (unittype:", unittype, "), notifying main thread");
+
+            // Send progress update and videoFrameReceived notification
+            self.postMessage({
+                connectionProgress: {
+                    step: 3,
+                    message: '3/3 - First frame received!'
+                }
+            });
+            self.postMessage({videoFrameReceived: true});
+        }
     }
     else
         separateNalUnits(dat).forEach(headerMagic)
@@ -430,9 +443,18 @@ function startSocket() {
     socket.binaryType = "arraybuffer";
     socket.addEventListener('open', () => {
         socket.binaryType = "arraybuffer";
+
+        // Notify main thread: Socket connected
+        self.postMessage({
+            connectionProgress: {
+                step: 2,
+                message: '2/3 - Socket connected, waiting for stream...'
+            }
+        });
+
         socket.sendObject({action: "START"});
         socket.sendObject({action: "NIGHT", value: night});
-        
+
         // Au lieu de demander un keyframe immédiatement, attendons un peu
         // pour voir si des données arrivent naturellement
         setTimeout(() => {
@@ -442,7 +464,7 @@ function startSocket() {
                 socket.sendObject({action: "REQUEST_KEYFRAME"});
             }
         }, 1000);
-        
+
         if (heart === 0) {
             heart = setInterval(heartbeat, 200);
             setInterval(updateFrameCounter, 1000)
