@@ -11,7 +11,9 @@ let pendingFrames = [],
     frameCounter = 0,
     sps, decoder = null, socket, height, width, port, gl, heart = 0,
     broadwayDecoder = null,
-    lastheart = 0, pongtimer, frameRate;
+    lastheart = 0, pongtimer, frameRate,
+    isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
+    firstVideoFrameReceived = false; // Flag to track first video frame
 
 const texturePool = [];
 
@@ -316,10 +318,20 @@ function headerMagic(dat) {
 // ========== Socket and Message Handling ==========
 
 function noPong() {
+    // 🚨 NOUVEAU: Ne pas envoyer d'erreur si le serveur est en shutdown
+    if (isServerShuttingDown) {
+        console.log('Server is shutting down, ignoring no pong');
+        return;
+    }
     self.postMessage({error: "no pong"});
 }
 
 function heartbeat() {
+    // 🚨 NOUVEAU: Ne pas envoyer de ping si le serveur est en shutdown
+    if (isServerShuttingDown) {
+        return;
+    }
+
     if (lastheart !== 0) {
         if ((Date.now() - lastheart) > 3000) {
             if (socket.readyState === WebSocket.OPEN) {
@@ -340,8 +352,47 @@ function heartbeat() {
 
 
 function handleMessage(event) {
-    const dat = new Uint8Array(event.data)
-    handleVideoMessage(dat)
+    // 🚨 NOUVEAU: Vérifier si c'est un message texte (JSON) ou binaire
+    if (typeof event.data === 'string') {
+        try {
+            const message = JSON.parse(event.data);
+
+            // Détecter le shutdown du serveur
+            if (message.type === 'server_shutdown') {
+                console.warn('Server is shutting down:', message.reason);
+
+                // 🚨 Marquer le flag pour éviter les erreurs en cascade
+                isServerShuttingDown = true;
+
+                // Notifier le thread principal
+                self.postMessage({
+                    serverShutdown: true,
+                    reason: message.reason,
+                    timestamp: message.timestamp
+                });
+
+                // Arrêter le heartbeat
+                if (heart) {
+                    clearInterval(heart);
+                    heart = 0;
+                }
+
+                // Arrêter le timer pongtimer
+                if (pongtimer) {
+                    clearTimeout(pongtimer);
+                    pongtimer = null;
+                }
+
+                return;
+            }
+        } catch (e) {
+            console.error('Error parsing message:', e);
+        }
+    } else {
+        // Message binaire (vidéo)
+        const dat = new Uint8Array(event.data)
+        handleVideoMessage(dat)
+    }
 }
 
 function handleVideoMessage(dat){
@@ -357,9 +408,21 @@ function handleVideoMessage(dat){
     }
     if (unittype === 1 || unittype === 5) {
         videoMagic(dat);
-        // Notify the main thread that a video frame was received (not just a pong packet)
-        console.log("Sending videoFrameReceived message to main thread", unittype);
-        self.postMessage({videoFrameReceived: true});
+
+        // Notify the main thread on first video frame only
+        if (!firstVideoFrameReceived) {
+            firstVideoFrameReceived = true;
+            console.log("First video frame received (unittype:", unittype, "), notifying main thread");
+
+            // Send progress update and videoFrameReceived notification
+            self.postMessage({
+                connectionProgress: {
+                    step: 3,
+                    message: '3/3 - First frame received!'
+                }
+            });
+            self.postMessage({videoFrameReceived: true});
+        }
     }
     else
         separateNalUnits(dat).forEach(headerMagic)
@@ -380,9 +443,18 @@ function startSocket() {
     socket.binaryType = "arraybuffer";
     socket.addEventListener('open', () => {
         socket.binaryType = "arraybuffer";
+
+        // Notify main thread: Socket connected
+        self.postMessage({
+            connectionProgress: {
+                step: 2,
+                message: '2/3 - Socket connected, waiting for stream...'
+            }
+        });
+
         socket.sendObject({action: "START"});
         socket.sendObject({action: "NIGHT", value: night});
-        
+
         // Au lieu de demander un keyframe immédiatement, attendons un peu
         // pour voir si des données arrivent naturellement
         setTimeout(() => {
@@ -392,7 +464,7 @@ function startSocket() {
                 socket.sendObject({action: "REQUEST_KEYFRAME"});
             }
         }, 1000);
-        
+
         if (heart === 0) {
             heart = setInterval(heartbeat, 200);
             setInterval(updateFrameCounter, 1000)
@@ -406,8 +478,21 @@ function startSocket() {
 
 function socketClose(event) {
     console.log('Error: Socket Closed ', event)
+
+    // 🚨 NOUVEAU: Ne pas reconnecter si le serveur est en shutdown
+    if (isServerShuttingDown) {
+        console.log('Server is shutting down, not reconnecting');
+        return;
+    }
+
+    // 🚨 NOUVEAU: Notifier le thread principal pour cacher le message waiting
+    self.postMessage({connectionLost: true, reason: event.reason || "Connection closed"});
     self.postMessage({error: "Lost connection to phone, trying to reconnect"});
-    startSocket();
+
+    // Attendre un peu avant de reconnecter
+    setTimeout(() => {
+        startSocket();
+    }, 2000);
 }
 
 async function isWebCodecsWorkingWithDecode() {

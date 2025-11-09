@@ -14,13 +14,35 @@
 
 <body id="body">
     <canvas></canvas>
-    
+
     <!-- New waiting message that will be shown after socket port is retrieved -->
     <div id="waiting-message" class="waiting-message" style="display: none;">
-        <p>Please wait a moment</p>
+        <p id="connection-status-text">Connecting...</p>
+        <div class="progress-steps">
+            <div class="step" id="step-1">
+                <span class="step-number">1</span>
+                <span class="step-label">Server</span>
+            </div>
+            <div class="step" id="step-2">
+                <span class="step-number">2</span>
+                <span class="step-label">Socket</span>
+            </div>
+            <div class="step" id="step-3">
+                <span class="step-number">3</span>
+                <span class="step-label">Stream</span>
+            </div>
+        </div>
         <div class="loading-indicator"></div>
     </div>
-    
+
+    <!-- 🚨 NOUVEAU: Overlay pour les messages d'erreur (toujours au-dessus) -->
+    <div id="error-overlay" class="error-overlay" style="display: none;">
+        <div class="error-content">
+            <div class="error-icon">⚠️</div>
+            <p id="error-message"></p>
+        </div>
+    </div>
+
     <div class="tesla-container" id="info">
         <div class="tesla-header">
             <h1>TaaDa</h1>
@@ -42,7 +64,7 @@
                 </div>
                 <div class="notification-content">
                     <h3>New Version Deployment</h3>
-                    <p>TaaDa requires an update to version 1.5.5 in order to function. The deployment is currently under review by Google Play Store and will be available very soon. In the meantime, we apologize for this temporary service interruption.</p>
+                    <p>A new version of TaaDa is currently being deployed on Google Play Store with enhanced features and security improvements.</p>
                     <p style="margin-top: 10px; font-weight: 500; color: #4caf50;">Update available soon on Google Play Store</p>
                     <p style="margin-top: 8px; font-size: 0.9em; color: #ccc;">Please update to the latest version when it becomes available for the best experience.</p>
                 </div>

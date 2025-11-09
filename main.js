@@ -5,6 +5,8 @@ const demuxDecodeWorker = new Worker("./async_decoder.js"),
     canvasElement = document.querySelector('canvas'),
     bodyElement = document.querySelector('body'),
     waitingMessageElement = document.getElementById('waiting-message'),
+    errorOverlay = document.getElementById('error-overlay'),
+    errorMessage = document.getElementById('error-message'),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     DEFAULT_HTTPS_PORT = 8081,
     MAX_PORT_RETRIES = 5;
@@ -24,9 +26,69 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     port,
     drageventCounter=0,
     videoFrameReceived = false,
-    timeoutId;
+    timeoutId,
+    isServerShuttingDown = false; // 🚨 Flag pour éviter les actions en double lors du shutdown
 
 canvasElement.style.display = "none";
+
+/**
+ * 🚨 NOUVEAU: Affiche un message d'erreur dans l'overlay permanent
+ * @param {string} message - Le message à afficher
+ */
+function showErrorOverlay(message) {
+    if (errorOverlay && errorMessage) {
+        errorMessage.textContent = message;
+        errorOverlay.style.display = "flex";
+    } else {
+        console.error('Error overlay elements not found');
+    }
+}
+
+/**
+ * 🚨 NOUVEAU: Cache l'overlay d'erreur
+ */
+function hideErrorOverlay() {
+    if (errorOverlay) {
+        errorOverlay.style.display = "none";
+    }
+}
+
+/**
+ * Updates the connection progress indicator with step-by-step status
+ * @param {number} step - Current step (1, 2, or 3)
+ * @param {string} message - Status message to display
+ */
+function updateConnectionProgress(step, message) {
+    const statusText = document.getElementById('connection-status-text');
+    const stepElements = {
+        1: document.getElementById('step-1'),
+        2: document.getElementById('step-2'),
+        3: document.getElementById('step-3')
+    };
+
+    if (statusText) {
+        statusText.textContent = message;
+    }
+
+    // Update step indicators
+    for (let i = 1; i <= 3; i++) {
+        const stepElement = stepElements[i];
+        if (!stepElement) continue;
+
+        if (i < step) {
+            // Previous steps are completed
+            stepElement.classList.remove('active');
+            stepElement.classList.add('completed');
+        } else if (i === step) {
+            // Current step is active
+            stepElement.classList.remove('completed');
+            stepElement.classList.add('active');
+        } else {
+            // Future steps are inactive
+            stepElement.classList.remove('active', 'completed');
+        }
+    }
+}
 
 /**
  * Converts screen coordinates to canvas coordinates, accounting for canvas position, scaling,
@@ -139,6 +201,10 @@ async function tryPort(port, controller) {
  */
 async function checkPhone() {
     console.log('Starting server discovery...');
+
+    // Step 1/3: Server Discovery
+    updateConnectionProgress(1, '1/3 - Discovering server...');
+
     controller = new AbortController();
 
     try {
@@ -159,10 +225,13 @@ async function checkPhone() {
                 
                 // Serveur trouvé, traiter la réponse
                 const json = JSON.parse(result.data);
-                
+
                 // Ajouter le port utilisé aux logs pour information
                 console.log(`Server found on port ${result.port}, processing response...`);
-                
+
+                // Update progress: Server found, moving to next step
+                updateConnectionProgress(1, '1/3 - Server found!');
+
                 postWorkerMessages(json);
                 return; // Succès, arrêter la recherche
                 
@@ -316,8 +385,8 @@ function postWorkerMessages(json) {
         }
     }
 
-    if (appVersion < 36) {
-        alert("You need to run TaaDa 1.4.1 or newer to use this page, please update.");
+    if (appVersion < 45) {
+        alert("You need to run TaaDa 1.5.5 or newer to use this page, please update.");
         return;
     }
 
@@ -349,17 +418,20 @@ function postWorkerMessages(json) {
     // Show the waiting message after socket port is retrieved
     canvasElement.style.display = "block";
     document.getElementById("info").style.display = "none";
-    
+
     // Vérifier que waitingMessageElement existe
     if (waitingMessageElement) {
         console.log("Showing waiting message");
         waitingMessageElement.style.display = "flex";
+        // Step 2/3: Socket connection will be handled by worker
+        updateConnectionProgress(2, '2/3 - Connecting to stream...');
     } else {
         console.error("waitingMessageElement is null, trying to get it again");
         waitingMessageElement = document.getElementById('waiting-message');
         if (waitingMessageElement) {
             console.log("Got waitingMessageElement, showing it");
             waitingMessageElement.style.display = "flex";
+            updateConnectionProgress(2, '2/3 - Connecting to stream...');
         } else {
             console.error("waitingMessageElement still not found");
         }
@@ -367,24 +439,52 @@ function postWorkerMessages(json) {
 
     demuxDecodeWorker.addEventListener("message", function (e) {
 
+        // 🚨 NOUVEAU: Gérer le shutdown du serveur EN PREMIER (priorité maximale)
+        if (e.data.hasOwnProperty('serverShutdown')) {
+            console.warn('Server shutdown detected:', e.data.reason);
+
+            // Marquer le flag pour éviter les actions en double
+            isServerShuttingDown = true;
+
+            // Cacher le message waiting
+            if (waitingMessageElement) {
+                waitingMessageElement.style.display = "none";
+            }
+
+            // 🚨 Afficher l'overlay d'erreur permanent
+            showErrorOverlay("Server disconnected. Refreshing in 3 seconds...");
+
+            setTimeout(() => {
+                location.reload();
+            }, 3000);
+
+            return;
+        }
+
+        // 🚨 NOUVEAU: Ignorer tous les autres messages si le serveur est en shutdown
+        if (isServerShuttingDown) {
+            console.log('Server is shutting down, ignoring message:', e.data);
+            return;
+        }
+
         if (e.data.hasOwnProperty('error')) {
             console.error('Socket error received:', e.data.error);
             forcedRefreshCounter++;
-            
+
             // Only reload if error contains critical information
             // Show warning instead for most errors
-            if (typeof e.data.error === 'string' && 
-                (e.data.error.includes("no pong") || 
+            if (typeof e.data.error === 'string' &&
+                (e.data.error.includes("no pong") ||
                 e.data.error === "Reconnecting...")) {
-                
+
                 warningElement.style.display = "block";
                 logElement.style.display = "none";
                 warningElement.innerText = "Connection issue detected: " + e.data.error;
-                
+
                 // Use a delayed reload to allow logging to appear
                 setTimeout(function() {
                     console.log("Reloading page due to connection error");
-                    document.location.reload();
+                    location.reload(); // 🚨 Changé de document.location.reload() à location.reload()
                 }, 2000);
             } else {
                 // For less critical errors, just show a warning
@@ -399,6 +499,28 @@ function postWorkerMessages(json) {
             return;
         }
 
+        // 🚨 NOUVEAU: Gérer la perte de connexion
+        if (e.data.hasOwnProperty('connectionLost')) {
+            console.error('Connection lost to server:', e.data.reason);
+
+            // Cacher le message waiting
+            if (waitingMessageElement) {
+                waitingMessageElement.style.display = "none";
+            }
+
+            // 🚨 Afficher l'overlay d'erreur permanent
+            showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
+
+            // Cacher l'overlay après 5 secondes si la reconnexion réussit
+            setTimeout(() => {
+                if (!isServerShuttingDown) {
+                    hideErrorOverlay();
+                }
+            }, 5000);
+
+            return;
+        }
+
         if (e.data.hasOwnProperty('warning')) {
             warningElement.style.display="block";
             logElement.style.display="none";
@@ -409,16 +531,29 @@ function postWorkerMessages(json) {
             },2000);
         }
 
+        // Handle connection progress updates from worker
+        if (e.data.hasOwnProperty('connectionProgress')) {
+            const progress = e.data.connectionProgress;
+            updateConnectionProgress(progress.step, progress.message);
+        }
+
         // Hide the waiting message when first video frame is received
         if (e.data.hasOwnProperty('videoFrameReceived')) {
             console.log("Video frame received message received!", e.data);
             videoFrameReceived = true;
-            if (waitingMessageElement) {
-                waitingMessageElement.style.display = "none";
-                console.log("Hiding waiting message");
-            } else {
-                console.error("waitingMessageElement not found");
-            }
+
+            // Update to step 3/3 - Stream ready
+            updateConnectionProgress(3, '3/3 - Stream ready!');
+
+            // Hide the waiting message after a short delay to show completion
+            setTimeout(() => {
+                if (waitingMessageElement) {
+                    waitingMessageElement.style.display = "none";
+                    console.log("Hiding waiting message");
+                } else {
+                    console.error("waitingMessageElement not found");
+                }
+            }, 1000);
         }
 
         if (debug) {
@@ -471,10 +606,9 @@ function isJson(item) {
 }
 
 // Ajout de variables pour la gestion optimisée des événements tactiles multitouch
-let lastTouchMoveTime = 0;
 let activeTouches = new Map(); // Suivi des touches actives avec leurs IDs
-
-const TOUCH_THROTTLE_MS = 4;
+let touchMovePending = false;
+let latestTouchEvent = null;
 // 4ms (250Hz) → plus fluide mais plus gourmand en ressources
 // 8ms (120Hz) → bon équilibre entre fluidité et performance
 // 16ms (60Hz) → économie supplémentaire de ressources mais un peu moins fluide
@@ -498,48 +632,52 @@ function convertTouchListToCoords(touchList) {
     return coords;
 }
 
-bodyElement.addEventListener('touchstart', (event) => {
-    if (!audiostart && !usebt)
-    {
+/**
+ * Initialise l'audio au premier contact tactile si nécessaire
+ */
+function initializeAudioOnFirstTouch() {
+    if (!audiostart && !usebt) {
         mediaPCM = new PCMPlayer({
             encoding: '16bitInt',
             channels: 2,
             sampleRate: 48000
         });
-        ttsPCM= new PCMPlayer({
+        ttsPCM = new PCMPlayer({
             encoding: '16bitInt',
             channels: 1,
             sampleRate: 16000
         });
-        document.getElementById("muteicon").remove();
+        const muteIcon = document.getElementById("muteicon");
+        if (muteIcon) {
+            muteIcon.remove();
+        }
         startAudio();
-        audiostart=true;
+        audiostart = true;
     }
-    
-    // Utiliser preventDefault pour éviter les délais de clic du navigateur
+}
+
+/**
+ * Gère l'événement touchstart
+ * @param {TouchEvent} event - L'événement tactile
+ */
+function handleTouchStart(event) {
     event.preventDefault();
-    
-    // Gérer toutes les nouvelles touches
+    initializeAudioOnFirstTouch();
+
     const newTouches = convertTouchListToCoords(event.changedTouches);
-    
-    // Mettre à jour le suivi des touches actives
-    newTouches.forEach(touch => {
-        activeTouches.set(touch.id, touch);
-    });
-    
-    // Envoyer les événements pour toutes les touches actives (multitouch)
+    newTouches.forEach(touch => activeTouches.set(touch.id, touch));
+
     const allTouches = convertTouchListToCoords(event.touches);
-    
-    // Envoyer événement multitouch
+
+    // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_DOWN",
-        touches: newTouches, // Seulement les nouvelles touches pour cet événement
-        allTouches: allTouches, // Toutes les touches actives pour contexte
+        touches: newTouches,
+        allTouches: allTouches,
         timestamp: performance.now()
     });
-    
-    // Backward compatibility: envoyer l'ancien format SEULEMENT si il n'y a qu'un seul doigt total
-    // Cela évite les conflits et les sauts lors du multitouch
+
+    // Gérer la rétrocompatibilité pour le single-touch
     if (allTouches.length === 1 && newTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "DOWN",
@@ -548,33 +686,32 @@ bodyElement.addEventListener('touchstart', (event) => {
             timestamp: performance.now()
         });
     }
-}, { passive: false }); // Important pour permettre preventDefault
+}
 
-bodyElement.addEventListener('touchend', (event) => {
-    // Utiliser preventDefault pour éviter les délais de clic du navigateur
+bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false });
+
+/**
+ * Gère les événements touchend et touchcancel
+ * @param {TouchEvent} event - L'événement tactile
+ */
+function handleTouchEnd(event) {
     event.preventDefault();
-    
-    // Gérer toutes les touches qui se terminent
+
     const endedTouches = convertTouchListToCoords(event.changedTouches);
-    
-    // Mettre à jour le suivi des touches actives (supprimer les touches terminées)
-    endedTouches.forEach(touch => {
-        activeTouches.delete(touch.id);
-    });
-    
-    // Envoyer les événements pour toutes les touches qui se terminent
+    endedTouches.forEach(touch => activeTouches.delete(touch.id));
+
     const allTouches = convertTouchListToCoords(event.touches);
-    
-    // Envoyer événement multitouch
+    const action = event.type === 'touchend' ? 'MULTITOUCH_UP' : 'MULTITOUCH_CANCEL';
+
+    // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
-        action: "MULTITOUCH_UP",
-        touches: endedTouches, // Seulement les touches qui se terminent
-        allTouches: allTouches, // Toutes les touches encore actives
+        action: action,
+        touches: endedTouches,
+        allTouches: allTouches,
         timestamp: performance.now()
     });
-    
-    // Backward compatibility: envoyer l'ancien format SEULEMENT si c'était le dernier doigt
-    // (allTouches.length === 0 signifie qu'aucun doigt ne reste actif)
+
+    // Gérer la rétrocompatibilité pour le single-touch
     if (allTouches.length === 0 && endedTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "UP",
@@ -583,58 +720,57 @@ bodyElement.addEventListener('touchend', (event) => {
             timestamp: performance.now()
         });
     }
-}, { passive: false }); // Important pour permettre preventDefault
+}
 
-bodyElement.addEventListener('touchcancel', (event) => {
-    // Traiter comme touchend - toutes les touches annulées
-    const cancelledTouches = convertTouchListToCoords(event.changedTouches);
+bodyElement.addEventListener('touchend', handleTouchEnd, { passive: false });
+bodyElement.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+
+/**
+ * Boucle de mise à jour optimisée avec requestAnimationFrame
+ * N'envoie que le dernier événement tactile avant le prochain rendu du navigateur
+ */
+function processTouchMove() {
+    if (!latestTouchEvent) {
+        touchMovePending = false;
+        return;
+    }
+
+    const movingTouches = convertTouchListToCoords(latestTouchEvent.touches);
     
     // Mettre à jour le suivi des touches actives
-    cancelledTouches.forEach(touch => {
-        activeTouches.delete(touch.id);
+    movingTouches.forEach(touch => {
+        activeTouches.set(touch.id, touch);
     });
-    
-    const allTouches = convertTouchListToCoords(event.touches);
-    
+
+    // Envoyer l'événement multitouch optimisé
     demuxDecodeWorker.postMessage({
-        action: "MULTITOUCH_CANCEL",
-        touches: cancelledTouches,
-        allTouches: allTouches,
+        action: "MULTITOUCH_MOVE",
+        touches: movingTouches,
         timestamp: performance.now()
     });
-});
+
+    // Rétrocompatibilité : envoyer l'ancien format si une seule touche est active
+    if (movingTouches.length === 1) {
+        demuxDecodeWorker.postMessage({
+            action: "DRAG",
+            X: movingTouches[0].x,
+            Y: movingTouches[0].y,
+            timestamp: performance.now()
+        });
+    }
+
+    latestTouchEvent = null;
+    touchMovePending = false;
+}
 
 bodyElement.addEventListener('touchmove', (event) => {
-    const now = performance.now();
-    // Limiter le nombre d'événements envoyés en fonction du temps écoulé
-    if (now - lastTouchMoveTime >= TOUCH_THROTTLE_MS) {
-        lastTouchMoveTime = now;
-        
-        // Gérer toutes les touches qui bougent (multitouch)
-        const movingTouches = convertTouchListToCoords(event.touches);
-        
-        // Mettre à jour le suivi des touches actives
-        movingTouches.forEach(touch => {
-            activeTouches.set(touch.id, touch);
-        });
-        
-        // Envoyer événement multitouch
-        demuxDecodeWorker.postMessage({
-            action: "MULTITOUCH_MOVE",
-            touches: movingTouches,
-            timestamp: now
-        });
-        
-        // Backward compatibility: envoyer l'ancien format SEULEMENT si il n'y a qu'un seul doigt
-        // Cela évite les conflits et les sauts lors du multitouch
-        if (movingTouches.length === 1) {
-            demuxDecodeWorker.postMessage({
-                action: "DRAG",
-                X: movingTouches[0].x,
-                Y: movingTouches[0].y,
-                timestamp: now
-            });
-        }
+    // Stocker le dernier événement pour le traitement
+    latestTouchEvent = event;
+    
+    // Si une mise à jour n'est pas déjà en attente, en programmer une
+    if (!touchMovePending) {
+        touchMovePending = true;
+        requestAnimationFrame(processTouchMove);
     }
 });
 
