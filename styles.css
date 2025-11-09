@@ -54,13 +54,13 @@ canvas, video {
 }
 
 .error-content {
-    background: rgba(232, 33, 39, 0.95);
-    border: 3px solid #E82127;
+    background: rgba(165, 42, 42, 0.95);
+    border: 3px solid #A52A2A;
     border-radius: 15px;
     padding: 40px 60px;
     max-width: 600px;
     text-align: center;
-    box-shadow: 0 0 30px rgba(232, 33, 39, 0.7), 0 0 60px rgba(232, 33, 39, 0.4);
+    box-shadow: 0 0 30px rgba(165, 42, 42, 0.7), 0 0 60px rgba(165, 42, 42, 0.4);
     animation: errorPulse 2s ease-in-out infinite;
 }
 
@@ -81,11 +81,11 @@ canvas, video {
 @keyframes errorPulse {
     0%, 100% {
         transform: scale(1);
-        box-shadow: 0 0 30px rgba(232, 33, 39, 0.7), 0 0 60px rgba(232, 33, 39, 0.4);
+        box-shadow: 0 0 30px rgba(165, 42, 42, 0.7), 0 0 60px rgba(165, 42, 42, 0.4);
     }
     50% {
         transform: scale(1.02);
-        box-shadow: 0 0 40px rgba(232, 33, 39, 0.9), 0 0 80px rgba(232, 33, 39, 0.6);
+        box-shadow: 0 0 40px rgba(165, 42, 42, 0.9), 0 0 80px rgba(165, 42, 42, 0.6);
     }
 }
 
@@ -173,28 +173,6 @@ canvas, video {
 
 .step.completed .step-label {
     color: #00C2B1;
-}
-
-/* Add checkmark to completed steps */
-.step.completed .step-number::after {
-    content: "✓";
-    position: absolute;
-    font-size: 1.2em;
-    animation: checkmark 0.3s ease;
-}
-
-@keyframes checkmark {
-    0% {
-        transform: scale(0);
-        opacity: 0;
-    }
-    50% {
-        transform: scale(1.2);
-    }
-    100% {
-        transform: scale(1);
-        opacity: 1;
-    }
 }
 
 .loading-indicator {
