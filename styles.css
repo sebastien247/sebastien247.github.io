@@ -13,7 +13,7 @@ html, body {
     /*display: flex;*/
     justify-content: center;
     /*align-items: center;*/
-    background: #111318;
+    background: #000;
     color: white;
     overscroll-behavior-x: none;
 }
@@ -58,10 +58,10 @@ canvas, video {
     max-width: 600px;
     text-align: center;
     /* Remove red background
-    background: rgba(165, 42, 42, 0.95);
-    border: 3px solid #A52A2A;
+    background: rgba(232, 33, 39, 0.95);
+    border: 3px solid #E82127;
     border-radius: 15px;
-    box-shadow: 0 0 30px rgba(165, 42, 42, 0.7), 0 0 60px rgba(165, 42, 42, 0.4);
+    box-shadow: 0 0 30px rgba(232, 33, 39, 0.7), 0 0 60px rgba(232, 33, 39, 0.4);
     animation: errorPulse 2s ease-in-out infinite;*/
 }
 
@@ -77,6 +77,14 @@ canvas, video {
     color: white;
     text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
     line-height: 1.4;
+}
+
+.error-subtitle {
+    font-size: 1.2em;
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.8);
+    margin-top: 15px;
+    text-shadow: 0 1px 5px rgba(0, 0, 0, 0.3);
 }
 
 @keyframes errorPulse {
@@ -175,6 +183,7 @@ canvas, video {
 .step.completed .step-label {
     color: #00C2B1;
 }
+
 
 .loading-indicator {
     width: 50px;
