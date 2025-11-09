@@ -175,27 +175,6 @@ canvas, video {
     color: #00C2B1;
 }
 
-/* Add checkmark to completed steps */
-.step.completed .step-number::after {
-    content: "✓";
-    position: absolute;
-    font-size: 1.2em;
-    animation: checkmark 0.3s ease;
-}
-
-@keyframes checkmark {
-    0% {
-        transform: scale(0);
-        opacity: 0;
-    }
-    50% {
-        transform: scale(1.2);
-    }
-    100% {
-        transform: scale(1);
-        opacity: 1;
-    }
-}
 
 .loading-indicator {
     width: 50px;
