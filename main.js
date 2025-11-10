@@ -379,14 +379,14 @@ function postWorkerMessages(json) {
         appVersion = parseInt(json.buildversion);
         if (latestVersion > parseInt(json.buildversion)) {
             if (parseInt(localStorage.getItem("showupdate")) !== latestVersion) {
-                alert("There is a new version in playsotre, please update your app.");
+                alert("There is a new version in playstore, please update your app.");
                 localStorage.setItem("showupdate", latestVersion);
             }
         }
     }
 
     if (appVersion < 45) {
-        alert("You need to run TaaDa 1.5.5 or newer to use this page, please update.");
+        alert("You need to run TaaDa 1.5.5 (build 45) or newer to use this page. Your current build is " + appVersion + ", please update.");
         return;
     }
 
