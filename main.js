@@ -387,7 +387,7 @@ function postWorkerMessages(json) {
 
     if (appVersion < 45) {
         alert("You need to run TaaDa 1.5.5 (build 45) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
-        return;
+        //return;
     }
 
     const forceBroadway = findGetParameter("broadway") === "1";
