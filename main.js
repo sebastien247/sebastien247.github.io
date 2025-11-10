@@ -386,7 +386,7 @@ function postWorkerMessages(json) {
     }
 
     if (appVersion < 45) {
-        alert("You need to run TaaDa 1.5.5 (build 45) or newer to use this page. Your current build is " + appVersion + ", please update.");
+        alert("You need to run TaaDa 1.5.5 (build 45) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
         return;
     }
 
@@ -879,6 +879,24 @@ window.simulateMultitouch = function(testType = 'basic') {
     return true;
 };
 
+// Function to display email address only on user click to prevent bot detection
+function setupContactLink() {
+    const link = document.getElementById('contact-link');
+    if (link) {
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            const email = 'seb.duboc.dev' + '@' + 'gmail.com';
+            this.href = 'mailto:' + email;
+            this.textContent = email;
+            this.style.textDecoration = 'underline'; // Add underline to the email
+            // Remove the click listener to allow normal link behavior
+            this.removeEventListener('click', arguments.callee);
+        });
+    }
+}
+
+// Call the function when the page loads
+document.addEventListener('DOMContentLoaded', setupContactLink);
 checkPhone();
 
 let audiostart=false;
