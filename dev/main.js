@@ -765,7 +765,6 @@ function processTouchMove() {
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_MOVE",
         touches: movingTouches,
-        allTouches: movingTouches,  // CRUCIAL pour le multitouch en binaire !
         timestamp: performance.now()
     });
 
