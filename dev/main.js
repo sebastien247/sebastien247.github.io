@@ -685,14 +685,14 @@ function handleTouchStart(event) {
     });
 
     // Gérer la rétrocompatibilité pour le single-touch
-    if (allTouches.length === 1 && newTouches.length > 0) {
+    /*if (allTouches.length === 1 && newTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "DOWN",
             X: newTouches[0].x,
             Y: newTouches[0].y,
             timestamp: performance.now()
         });
-    }
+    }*/
 }
 
 bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false });
@@ -726,14 +726,14 @@ function handleTouchEnd(event) {
     });
 
     // Gérer la rétrocompatibilité pour le single-touch
-    if (allTouches.length === 0 && endedTouches.length > 0) {
+    /*if (allTouches.length === 0 && endedTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "UP",
             X: endedTouches[0].x,
             Y: endedTouches[0].y,
             timestamp: performance.now()
         });
-    }
+    }*/
 }
 
 bodyElement.addEventListener('touchend', handleTouchEnd, { passive: false });
@@ -770,14 +770,14 @@ function processTouchMove() {
     });
 
     // Rétrocompatibilité : envoyer l'ancien format si une seule touche est active
-    if (movingTouches.length === 1) {
+    /*if (movingTouches.length === 1) {
         demuxDecodeWorker.postMessage({
             action: "DRAG",
             X: movingTouches[0].x,
             Y: movingTouches[0].y,
             timestamp: performance.now()
         });
-    }
+    }*/
 
     latestTouchEvent = null;
     touchMovePending = false;
