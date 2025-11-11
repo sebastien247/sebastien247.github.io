@@ -697,6 +697,11 @@ bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false })
 function handleTouchEnd(event) {
     event.preventDefault();
 
+    // CRITIQUE: Annuler tout MULTITOUCH_MOVE en attente pour éviter le bug "sticky touch"
+    // Si un touchmove a programmé un requestAnimationFrame qui n'a pas encore été exécuté,
+    // on doit l'empêcher de traiter les anciennes données de touch
+    latestTouchData = null;
+
     const endedTouches = convertTouchListToCoords(event.changedTouches);
     endedTouches.forEach(touch => activeTouches.delete(touch.id));
 
