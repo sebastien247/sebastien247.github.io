@@ -736,7 +736,7 @@ function processTouchMove() {
     }
 
     const movingTouches = convertTouchListToCoords(latestTouchEvent.touches);
-    
+
     // Mettre à jour le suivi des touches actives
     movingTouches.forEach(touch => {
         activeTouches.set(touch.id, touch);
@@ -746,6 +746,7 @@ function processTouchMove() {
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_MOVE",
         touches: movingTouches,
+        allTouches: movingTouches,  // CRUCIAL pour le multitouch en binaire !
         timestamp: performance.now()
     });
 
@@ -813,6 +814,7 @@ window.simulateMultitouch = function(testType = 'basic') {
             demuxDecodeWorker.postMessage({
                 action: "MULTITOUCH_MOVE",
                 touches: movedTouches,
+                allTouches: movedTouches,
                 timestamp: performance.now()
             });
         }, 500);
@@ -860,6 +862,7 @@ window.simulateMultitouch = function(testType = 'basic') {
             demuxDecodeWorker.postMessage({
                 action: "MULTITOUCH_MOVE",
                 touches: pinchTouches,
+                allTouches: pinchTouches,
                 timestamp: performance.now()
             });
             
