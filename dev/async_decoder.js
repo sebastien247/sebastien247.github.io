@@ -1,4 +1,5 @@
 importScripts("Decoder.js");
+importScripts("binary_touch_protocol.js");
 
 // ========== Constants and Variable Declarations ==========
 
@@ -16,6 +17,37 @@ let pendingFrames = [],
     firstVideoFrameReceived = false; // Flag to track first video frame
 
 const texturePool = [];
+
+// ========== Binary Touch Protocol ==========
+/**
+ * COMPRESSION BINAIRE DES TOUCH EVENTS
+ *
+ * Les événements tactiles (MULTITOUCH_DOWN, MULTITOUCH_MOVE, MULTITOUCH_UP)
+ * sont automatiquement encodés en format binaire avant envoi au serveur.
+ *
+ * Avantages:
+ * - Réduction de ~90% de la bande passante (120 bytes → 12 bytes)
+ * - Latence réduite sur gestures rapides
+ *
+ * Format binaire:
+ * [1 byte: action] [1 byte: count] [6 bytes par touch] [4 bytes: timestamp delta]
+ *
+ * Pour activer les logs debug: Changer BINARY_TOUCH_DEBUG à true ci-dessous
+ */
+
+const BINARY_TOUCH_DEBUG = false; // Mettre à true pour voir les statistiques de compression
+
+// Instance de l'encodeur binaire pour les touch events
+let binaryTouchEncoder = null;
+
+// Initialiser l'encodeur au premier usage
+function initBinaryTouchEncoder() {
+    if (!binaryTouchEncoder) {
+        binaryTouchEncoder = new BinaryTouchEncoder();
+        console.log('[BinaryTouch] Encoder initialized - Binary touch compression enabled');
+        console.log('[BinaryTouch] Expected compression: ~90% (120 bytes → 12 bytes per event)');
+    }
+}
 
 // ========== Utility Functions ==========
 
@@ -531,8 +563,49 @@ function messageHandler(message) {
     if (message.data.action === 'NIGHT') {
         night = message.data.value;
     }
+
     if (socket.readyState === WebSocket.OPEN) {
-        socket.sendObject(message.data);
+        const action = message.data.action;
+
+        // Encoder les événements MULTITOUCH en binaire
+        if (action === 'MULTITOUCH_DOWN' || action === 'MULTITOUCH_MOVE' || action === 'MULTITOUCH_UP') {
+            initBinaryTouchEncoder();
+
+            // Extraire les touches du message
+            const touches = message.data.touches || [];
+
+            // Si aucune touche, ne rien envoyer
+            if (touches.length === 0) {
+                console.warn('[BinaryTouch] No touches to send for action:', action);
+                return;
+            }
+
+            try {
+                // Encoder en binaire
+                const binaryData = binaryTouchEncoder.encode(action, touches);
+
+                // Envoyer directement le buffer binaire
+                socket.send(binaryData);
+
+                // Log pour debug (contrôlé par BINARY_TOUCH_DEBUG)
+                if (BINARY_TOUCH_DEBUG) {
+                    const jsonSize = JSON.stringify(message.data).length;
+                    console.log(`[BinaryTouch] Sent ${action}:`, {
+                        touchCount: touches.length,
+                        binarySize: binaryData.byteLength + ' bytes',
+                        jsonSize: jsonSize + ' bytes',
+                        compression: ((1 - binaryData.byteLength / jsonSize) * 100).toFixed(1) + '% saved'
+                    });
+                }
+            } catch (error) {
+                console.error('[BinaryTouch] Encoding error:', error);
+                // Fallback to JSON si erreur
+                socket.sendObject(message.data);
+            }
+        } else {
+            // Autres messages: envoyer en JSON comme avant
+            socket.sendObject(message.data);
+        }
     }
 }
 

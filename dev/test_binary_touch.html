@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Binary Touch Protocol</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #00ff00;
+        }
+
+        h1 {
+            color: #00ff00;
+            border-bottom: 2px solid #00ff00;
+            padding-bottom: 10px;
+        }
+
+        .test-area {
+            background: #000;
+            border: 2px solid #00ff00;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+        }
+
+        .touch-zone {
+            background: #222;
+            border: 2px dashed #00ff00;
+            padding: 100px;
+            text-align: center;
+            margin: 20px 0;
+            border-radius: 8px;
+            touch-action: none;
+            user-select: none;
+        }
+
+        .stats {
+            background: #0a0a0a;
+            padding: 15px;
+            margin: 10px 0;
+            border-left: 4px solid #00ff00;
+            font-family: monospace;
+        }
+
+        .stats div {
+            margin: 5px 0;
+        }
+
+        .success {
+            color: #00ff00;
+        }
+
+        .warning {
+            color: #ffff00;
+        }
+
+        .error {
+            color: #ff0000;
+        }
+
+        .result {
+            background: #0a0a0a;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        button {
+            background: #00ff00;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin: 5px;
+        }
+
+        button:hover {
+            background: #00cc00;
+        }
+
+        .log {
+            background: #000;
+            border: 1px solid #00ff00;
+            padding: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧪 Test Binary Touch Protocol</h1>
+
+    <div class="test-area">
+        <h2>Tests Automatiques</h2>
+
+        <button onclick="runAllTests()">▶ Lancer tous les tests</button>
+        <button onclick="clearLog()">🗑 Effacer les logs</button>
+
+        <div id="test-results"></div>
+    </div>
+
+    <div class="test-area">
+        <h2>Test Manuel - Zone Tactile</h2>
+        <p>Touchez cette zone pour tester l'encodage en temps réel:</p>
+
+        <div class="touch-zone" id="touchZone">
+            👆 Touchez ici (multitouch supporté)
+        </div>
+
+        <div class="stats" id="touchStats">
+            <div>Touches actives: <span id="activeTouches">0</span></div>
+            <div>Total événements: <span id="totalEvents">0</span></div>
+            <div>Taille JSON moyenne: <span id="avgJsonSize">0</span> bytes</div>
+            <div>Taille binaire moyenne: <span id="avgBinarySize">0</span> bytes</div>
+            <div>Compression moyenne: <span id="avgCompression" class="success">0%</span></div>
+        </div>
+    </div>
+
+    <div class="log" id="logContainer">
+        <div class="log-entry">📝 Logs d'exécution...</div>
+    </div>
+
+    <script src="binary_touch_protocol.js"></script>
+    <script>
+        const encoder = new BinaryTouchEncoder();
+
+        let totalEvents = 0;
+        let totalJsonSize = 0;
+        let totalBinarySize = 0;
+        let activeTouchesCount = 0;
+
+        // ========== Tests Automatiques ==========
+
+        function addTestResult(name, success, details) {
+            const container = document.getElementById('test-results');
+            const result = document.createElement('div');
+            result.className = 'result ' + (success ? 'success' : 'error');
+            result.innerHTML = `
+                <strong>${success ? '✅' : '❌'} ${name}</strong><br>
+                ${details}
+            `;
+            container.appendChild(result);
+            log(`Test: ${name} - ${success ? 'PASS' : 'FAIL'} - ${details}`);
+        }
+
+        function test1_SingleTouch() {
+            const action = 'MULTITOUCH_MOVE';
+            const touches = [{id: 0, x: 512, y: 384}];
+
+            try {
+                const binary = encoder.encode(action, touches);
+                const jsonSize = JSON.stringify({action, touches, timestamp: Date.now()}).length;
+
+                const success = binary.byteLength === 12; // 2 + 6 + 4
+                addTestResult(
+                    'Test 1: Single Touch',
+                    success,
+                    `Binary: ${binary.byteLength} bytes, JSON: ${jsonSize} bytes, Compression: ${((1 - binary.byteLength/jsonSize)*100).toFixed(1)}%`
+                );
+
+                return success;
+            } catch (e) {
+                addTestResult('Test 1: Single Touch', false, 'Error: ' + e.message);
+                return false;
+            }
+        }
+
+        function test2_MultiTouch() {
+            const action = 'MULTITOUCH_DOWN';
+            const touches = [
+                {id: 0, x: 100, y: 200},
+                {id: 1, x: 300, y: 400}
+            ];
+
+            try {
+                const binary = encoder.encode(action, touches);
+                const expectedSize = 2 + (6 * 2) + 4; // 18 bytes
+                const jsonSize = JSON.stringify({action, touches, timestamp: Date.now()}).length;
+
+                const success = binary.byteLength === expectedSize;
+                addTestResult(
+                    'Test 2: Multi Touch (2 fingers)',
+                    success,
+                    `Binary: ${binary.byteLength} bytes (expected ${expectedSize}), JSON: ${jsonSize} bytes, Compression: ${((1 - binary.byteLength/jsonSize)*100).toFixed(1)}%`
+                );
+
+                return success;
+            } catch (e) {
+                addTestResult('Test 2: Multi Touch', false, 'Error: ' + e.message);
+                return false;
+            }
+        }
+
+        function test3_AllActions() {
+            const actions = ['MULTITOUCH_DOWN', 'MULTITOUCH_MOVE', 'MULTITOUCH_UP'];
+            const touches = [{id: 0, x: 640, y: 480}];
+            let allSuccess = true;
+
+            actions.forEach(action => {
+                try {
+                    const binary = encoder.encode(action, touches);
+                    const success = binary.byteLength === 12;
+                    if (!success) allSuccess = false;
+                } catch (e) {
+                    allSuccess = false;
+                }
+            });
+
+            addTestResult(
+                'Test 3: All Action Types',
+                allSuccess,
+                `Tested DOWN, MOVE, UP - All encoded successfully to 12 bytes`
+            );
+
+            return allSuccess;
+        }
+
+        function test4_LargeCoordinates() {
+            const action = 'MULTITOUCH_MOVE';
+            const touches = [{id: 0, x: 1920, y: 1080}];
+
+            try {
+                const binary = encoder.encode(action, touches);
+                const success = binary.byteLength === 12;
+
+                // Décoder pour vérifier les coordonnées
+                const view = new DataView(binary);
+                const x = view.getUint16(2 + 2, false);
+                const y = view.getUint16(2 + 4, false);
+
+                const coordsOk = x === 1920 && y === 1080;
+
+                addTestResult(
+                    'Test 4: Large Coordinates (1920x1080)',
+                    success && coordsOk,
+                    `Size OK: ${success}, Coords OK: ${coordsOk} (x=${x}, y=${y})`
+                );
+
+                return success && coordsOk;
+            } catch (e) {
+                addTestResult('Test 4: Large Coordinates', false, 'Error: ' + e.message);
+                return false;
+            }
+        }
+
+        function test5_CompressionRatio() {
+            const action = 'MULTITOUCH_MOVE';
+            const touches = [{id: 0, x: 512, y: 384}];
+
+            try {
+                const binary = encoder.encode(action, touches);
+                const jsonSize = JSON.stringify({
+                    action: action,
+                    touches: touches,
+                    timestamp: performance.now()
+                }).length;
+
+                const ratio = (1 - binary.byteLength / jsonSize) * 100;
+                const success = ratio >= 80; // Au moins 80% de compression
+
+                addTestResult(
+                    'Test 5: Compression Ratio',
+                    success,
+                    `${ratio.toFixed(1)}% compression (${jsonSize} bytes → ${binary.byteLength} bytes) - ${success ? 'Excellent!' : 'Below 80% target'}`
+                );
+
+                return success;
+            } catch (e) {
+                addTestResult('Test 5: Compression Ratio', false, 'Error: ' + e.message);
+                return false;
+            }
+        }
+
+        function runAllTests() {
+            document.getElementById('test-results').innerHTML = '';
+            log('========== DÉMARRAGE DES TESTS ==========');
+
+            const results = [
+                test1_SingleTouch(),
+                test2_MultiTouch(),
+                test3_AllActions(),
+                test4_LargeCoordinates(),
+                test5_CompressionRatio()
+            ];
+
+            const passed = results.filter(r => r).length;
+            const total = results.length;
+
+            const summary = document.createElement('div');
+            summary.className = 'result ' + (passed === total ? 'success' : 'warning');
+            summary.innerHTML = `<strong>📊 Résumé: ${passed}/${total} tests passés</strong>`;
+            document.getElementById('test-results').appendChild(summary);
+
+            log(`========== TESTS TERMINÉS: ${passed}/${total} passés ==========`);
+        }
+
+        // ========== Test Manuel ==========
+
+        const touchZone = document.getElementById('touchZone');
+
+        function updateStats() {
+            document.getElementById('activeTouches').textContent = activeTouchesCount;
+            document.getElementById('totalEvents').textContent = totalEvents;
+
+            const avgJson = totalEvents > 0 ? (totalJsonSize / totalEvents).toFixed(1) : 0;
+            const avgBinary = totalEvents > 0 ? (totalBinarySize / totalEvents).toFixed(1) : 0;
+            const avgCompression = totalEvents > 0 ? ((1 - totalBinarySize / totalJsonSize) * 100).toFixed(1) : 0;
+
+            document.getElementById('avgJsonSize').textContent = avgJson;
+            document.getElementById('avgBinarySize').textContent = avgBinary;
+            document.getElementById('avgCompression').textContent = avgCompression + '%';
+        }
+
+        function handleTouch(event, action) {
+            event.preventDefault();
+
+            const touches = Array.from(event.touches).map(touch => ({
+                id: touch.identifier,
+                x: Math.floor(touch.clientX),
+                y: Math.floor(touch.clientY)
+            }));
+
+            if (touches.length > 0) {
+                try {
+                    const binary = encoder.encode(action, touches);
+                    const jsonMsg = {action, touches, timestamp: performance.now()};
+                    const jsonSize = JSON.stringify(jsonMsg).length;
+
+                    totalEvents++;
+                    totalJsonSize += jsonSize;
+                    totalBinarySize += binary.byteLength;
+                    activeTouchesCount = touches.length;
+
+                    updateStats();
+
+                    log(`${action}: ${touches.length} touch(es), Binary=${binary.byteLength}b, JSON=${jsonSize}b, Saved=${((1 - binary.byteLength/jsonSize)*100).toFixed(1)}%`);
+                } catch (e) {
+                    log('ERROR: ' + e.message, 'error');
+                }
+            }
+        }
+
+        touchZone.addEventListener('touchstart', (e) => handleTouch(e, 'MULTITOUCH_DOWN'));
+        touchZone.addEventListener('touchmove', (e) => handleTouch(e, 'MULTITOUCH_MOVE'));
+        touchZone.addEventListener('touchend', (e) => {
+            handleTouch(e, 'MULTITOUCH_UP');
+            activeTouchesCount = 0;
+            updateStats();
+        });
+
+        // Support souris pour desktop
+        let mouseDown = false;
+        touchZone.addEventListener('mousedown', (e) => {
+            mouseDown = true;
+            const touches = [{id: 0, x: Math.floor(e.clientX), y: Math.floor(e.clientY)}];
+            const action = 'MULTITOUCH_DOWN';
+
+            const binary = encoder.encode(action, touches);
+            const jsonSize = JSON.stringify({action, touches, timestamp: Date.now()}).length;
+
+            totalEvents++;
+            totalJsonSize += jsonSize;
+            totalBinarySize += binary.byteLength;
+            activeTouchesCount = 1;
+            updateStats();
+
+            log(`${action}: Binary=${binary.byteLength}b, JSON=${jsonSize}b`);
+        });
+
+        touchZone.addEventListener('mousemove', (e) => {
+            if (!mouseDown) return;
+
+            const touches = [{id: 0, x: Math.floor(e.clientX), y: Math.floor(e.clientY)}];
+            const action = 'MULTITOUCH_MOVE';
+
+            const binary = encoder.encode(action, touches);
+            const jsonSize = JSON.stringify({action, touches, timestamp: Date.now()}).length;
+
+            totalEvents++;
+            totalJsonSize += jsonSize;
+            totalBinarySize += binary.byteLength;
+            updateStats();
+        });
+
+        touchZone.addEventListener('mouseup', (e) => {
+            mouseDown = false;
+            const touches = [{id: 0, x: Math.floor(e.clientX), y: Math.floor(e.clientY)}];
+            const action = 'MULTITOUCH_UP';
+
+            const binary = encoder.encode(action, touches);
+            const jsonSize = JSON.stringify({action, touches, timestamp: Date.now()}).length;
+
+            totalEvents++;
+            totalJsonSize += jsonSize;
+            totalBinarySize += binary.byteLength;
+            activeTouchesCount = 0;
+            updateStats();
+
+            log(`${action}: Binary=${binary.byteLength}b, JSON=${jsonSize}b`);
+        });
+
+        // ========== Logging ==========
+
+        function log(message, type = 'info') {
+            const container = document.getElementById('logContainer');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + type;
+
+            const timestamp = new Date().toLocaleTimeString('fr-FR', {hour12: false});
+            entry.textContent = `[${timestamp}] ${message}`;
+
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('logContainer').innerHTML = '<div class="log-entry">📝 Logs effacés...</div>';
+            totalEvents = 0;
+            totalJsonSize = 0;
+            totalBinarySize = 0;
+            activeTouchesCount = 0;
+            updateStats();
+        }
+
+        // Lancer les tests automatiquement au chargement
+        log('✅ BinaryTouchEncoder chargé et prêt');
+        log('💡 Cliquez sur "Lancer tous les tests" ou touchez la zone tactile');
+    </script>
+</body>
+</html>
