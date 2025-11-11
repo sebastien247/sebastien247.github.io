@@ -669,6 +669,13 @@ function handleTouchStart(event) {
 
     const allTouches = convertTouchListToCoords(event.touches);
 
+    // DEBUG: Logs détaillés pour comprendre le problème
+    console.log('[MULTITOUCH_DOWN] event.changedTouches.length:', event.changedTouches.length);
+    console.log('[MULTITOUCH_DOWN] event.touches.length:', event.touches.length);
+    console.log('[MULTITOUCH_DOWN] newTouches:', JSON.stringify(newTouches));
+    console.log('[MULTITOUCH_DOWN] allTouches:', JSON.stringify(allTouches));
+    console.log('[MULTITOUCH_DOWN] activeTouches.size:', activeTouches.size);
+
     // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_DOWN",
@@ -678,14 +685,14 @@ function handleTouchStart(event) {
     });
 
     // Gérer la rétrocompatibilité pour le single-touch
-    /*if (allTouches.length === 1 && newTouches.length > 0) {
+    if (allTouches.length === 1 && newTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "DOWN",
             X: newTouches[0].x,
             Y: newTouches[0].y,
             timestamp: performance.now()
         });
-    }*/
+    }
 }
 
 bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false });
@@ -703,6 +710,13 @@ function handleTouchEnd(event) {
     const allTouches = convertTouchListToCoords(event.touches);
     const action = event.type === 'touchend' ? 'MULTITOUCH_UP' : 'MULTITOUCH_CANCEL';
 
+    // DEBUG: Logs pour MULTITOUCH_UP/CANCEL
+    console.log('[' + action + '] event.changedTouches.length:', event.changedTouches.length);
+    console.log('[' + action + '] event.touches.length:', event.touches.length);
+    console.log('[' + action + '] endedTouches:', JSON.stringify(endedTouches));
+    console.log('[' + action + '] allTouches:', JSON.stringify(allTouches));
+    console.log('[' + action + '] activeTouches.size:', activeTouches.size);
+
     // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
         action: action,
@@ -712,14 +726,14 @@ function handleTouchEnd(event) {
     });
 
     // Gérer la rétrocompatibilité pour le single-touch
-    /*if (allTouches.length === 0 && endedTouches.length > 0) {
+    if (allTouches.length === 0 && endedTouches.length > 0) {
         demuxDecodeWorker.postMessage({
             action: "UP",
             X: endedTouches[0].x,
             Y: endedTouches[0].y,
             timestamp: performance.now()
         });
-    }*/
+    }
 }
 
 bodyElement.addEventListener('touchend', handleTouchEnd, { passive: false });
@@ -742,6 +756,11 @@ function processTouchMove() {
         activeTouches.set(touch.id, touch);
     });
 
+    // DEBUG: Logs pour MULTITOUCH_MOVE
+    console.log('[MULTITOUCH_MOVE] latestTouchEvent.touches.length:', latestTouchEvent.touches.length);
+    console.log('[MULTITOUCH_MOVE] movingTouches:', JSON.stringify(movingTouches));
+    console.log('[MULTITOUCH_MOVE] activeTouches.size:', activeTouches.size);
+
     // Envoyer l'événement multitouch optimisé
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_MOVE",
@@ -751,14 +770,14 @@ function processTouchMove() {
     });
 
     // Rétrocompatibilité : envoyer l'ancien format si une seule touche est active
-    /*if (movingTouches.length === 1) {
+    if (movingTouches.length === 1) {
         demuxDecodeWorker.postMessage({
             action: "DRAG",
             X: movingTouches[0].x,
             Y: movingTouches[0].y,
             timestamp: performance.now()
         });
-    }*/
+    }
 
     latestTouchEvent = null;
     touchMovePending = false;

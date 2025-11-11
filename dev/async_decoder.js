@@ -35,7 +35,7 @@ const texturePool = [];
  * Pour activer les logs debug: Changer BINARY_TOUCH_DEBUG à true ci-dessous
  */
 
-const BINARY_TOUCH_DEBUG = false; // Mettre à true pour voir les statistiques de compression
+const BINARY_TOUCH_DEBUG = true; // Mettre à true pour voir les statistiques de compression
 
 // Instance de l'encodeur binaire pour les touch events
 let binaryTouchEncoder = null;
@@ -568,11 +568,13 @@ function messageHandler(message) {
         const action = message.data.action;
 
         // Encoder les événements MULTITOUCH en binaire
-        if (action === 'MULTITOUCH_DOWN' || action === 'MULTITOUCH_MOVE' || action === 'MULTITOUCH_UP') {
+        if (action === 'MULTITOUCH_DOWN' || action === 'MULTITOUCH_MOVE' || action === 'MULTITOUCH_UP' || action === 'MULTITOUCH_CANCEL') {
             initBinaryTouchEncoder();
 
-            // Extraire les touches du message
+            // Extraire les touches et allTouches du message
             const touches = message.data.touches || [];
+            const allTouches = message.data.allTouches || [];
+            const timestamp = message.data.timestamp || performance.now();
 
             // Si aucune touche, ne rien envoyer
             if (touches.length === 0) {
@@ -581,8 +583,15 @@ function messageHandler(message) {
             }
 
             try {
-                // Encoder en binaire
-                const binaryData = binaryTouchEncoder.encode(action, touches);
+                // Encoder en binaire avec TOUS les paramètres (touches, allTouches, timestamp)
+                const binaryData = binaryTouchEncoder.encode(action, touches, allTouches, timestamp);
+
+                // Vérifier que l'encodage a réussi
+                if (!binaryData) {
+                    console.error('[BinaryTouch] Encoding failed - falling back to JSON');
+                    socket.sendObject(message.data);
+                    return;
+                }
 
                 // Envoyer directement le buffer binaire
                 socket.send(binaryData);
@@ -592,6 +601,7 @@ function messageHandler(message) {
                     const jsonSize = JSON.stringify(message.data).length;
                     console.log(`[BinaryTouch] Sent ${action}:`, {
                         touchCount: touches.length,
+                        allTouchesCount: allTouches.length,
                         binarySize: binaryData.byteLength + ' bytes',
                         jsonSize: jsonSize + ' bytes',
                         compression: ((1 - binaryData.byteLength / jsonSize) * 100).toFixed(1) + '% saved'
