@@ -608,7 +608,7 @@ function isJson(item) {
 // Ajout de variables pour la gestion optimisée des événements tactiles multitouch
 let activeTouches = new Map(); // Suivi des touches actives avec leurs IDs
 let touchMovePending = false;
-let latestTouchEvent = null;
+let latestTouchData = null;  // Stocke les données converties, pas l'événement
 // 4ms (250Hz) → plus fluide mais plus gourmand en ressources
 // 8ms (120Hz) → bon équilibre entre fluidité et performance
 // 16ms (60Hz) → économie supplémentaire de ressources mais un peu moins fluide
@@ -684,15 +684,8 @@ function handleTouchStart(event) {
         timestamp: performance.now()
     });
 
-    // Gérer la rétrocompatibilité pour le single-touch
-    /*if (allTouches.length === 1 && newTouches.length > 0) {
-        demuxDecodeWorker.postMessage({
-            action: "DOWN",
-            X: newTouches[0].x,
-            Y: newTouches[0].y,
-            timestamp: performance.now()
-        });
-    }*/
+    // Note: Les événements legacy (DOWN) ont été supprimés car MULTITOUCH_DOWN
+    // gère maintenant à la fois le single touch et le multitouch
 }
 
 bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false });
@@ -725,15 +718,8 @@ function handleTouchEnd(event) {
         timestamp: performance.now()
     });
 
-    // Gérer la rétrocompatibilité pour le single-touch
-    /*if (allTouches.length === 0 && endedTouches.length > 0) {
-        demuxDecodeWorker.postMessage({
-            action: "UP",
-            X: endedTouches[0].x,
-            Y: endedTouches[0].y,
-            timestamp: performance.now()
-        });
-    }*/
+    // Note: Les événements legacy (UP) ont été supprimés car MULTITOUCH_UP
+    // gère maintenant à la fois le single touch et le multitouch
 }
 
 bodyElement.addEventListener('touchend', handleTouchEnd, { passive: false });
@@ -744,12 +730,13 @@ bodyElement.addEventListener('touchcancel', handleTouchEnd, { passive: false });
  * N'envoie que le dernier événement tactile avant le prochain rendu du navigateur
  */
 function processTouchMove() {
-    if (!latestTouchEvent) {
+    if (!latestTouchData) {
         touchMovePending = false;
         return;
     }
 
-    const movingTouches = convertTouchListToCoords(latestTouchEvent.touches);
+    const movingTouches = latestTouchData.touches;
+    const timestamp = latestTouchData.timestamp;
 
     // Mettre à jour le suivi des touches actives
     movingTouches.forEach(touch => {
@@ -757,7 +744,7 @@ function processTouchMove() {
     });
 
     // DEBUG: Logs pour MULTITOUCH_MOVE
-    console.log('[MULTITOUCH_MOVE] latestTouchEvent.touches.length:', latestTouchEvent.touches.length);
+    console.log('[MULTITOUCH_MOVE] movingTouches.length:', movingTouches.length);
     console.log('[MULTITOUCH_MOVE] movingTouches:', JSON.stringify(movingTouches));
     console.log('[MULTITOUCH_MOVE] activeTouches.size:', activeTouches.size);
 
@@ -765,27 +752,25 @@ function processTouchMove() {
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_MOVE",
         touches: movingTouches,
-        timestamp: performance.now()
+        allTouches: movingTouches,  // CRUCIAL pour le multitouch en binaire !
+        timestamp: timestamp
     });
 
-    // Rétrocompatibilité : envoyer l'ancien format si une seule touche est active
-    /*if (movingTouches.length === 1) {
-        demuxDecodeWorker.postMessage({
-            action: "DRAG",
-            X: movingTouches[0].x,
-            Y: movingTouches[0].y,
-            timestamp: performance.now()
-        });
-    }*/
+    // Note: Les événements legacy (DRAG) ont été supprimés car MULTITOUCH_MOVE
+    // gère maintenant à la fois le single touch et le multitouch
 
-    latestTouchEvent = null;
+    latestTouchData = null;
     touchMovePending = false;
 }
 
 bodyElement.addEventListener('touchmove', (event) => {
-    // Stocker le dernier événement pour le traitement
-    latestTouchEvent = event;
-    
+    // Convertir les données tactiles IMMÉDIATEMENT pour éviter la mutation de l'événement
+    // (le navigateur peut réutiliser l'objet TouchEvent pour des raisons de performance)
+    latestTouchData = {
+        touches: convertTouchListToCoords(event.touches),
+        timestamp: performance.now()
+    };
+
     // Si une mise à jour n'est pas déjà en attente, en programmer une
     if (!touchMovePending) {
         touchMovePending = true;
