@@ -54,6 +54,109 @@ function hideErrorOverlay() {
 }
 
 /**
+ * Vérifie si le serveur est accessible
+ * @returns {Promise<boolean>} True si le serveur est accessible
+ */
+async function checkServerReachability() {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+        // Essayer de ping le serveur principal
+        const response = await fetch(`https://taada.top:${DEFAULT_HTTPS_PORT}/getsocketport`, {
+            method: 'HEAD',
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+        return response.ok;
+    } catch (error) {
+        console.log('Server not reachable:', error.message);
+        return false;
+    }
+}
+
+/**
+ * Attend que la connexion internet revienne
+ * @returns {Promise<void>} Se résout quand la connexion est rétablie
+ */
+function waitForConnection() {
+    return new Promise((resolve) => {
+        console.log('Waiting for internet connection...');
+        showErrorOverlay("No internet connection. Waiting to reconnect...");
+
+        let checkInterval;
+        let isChecking = false;
+
+        // Fonction pour vérifier la connexion
+        const checkConnection = async () => {
+            // Éviter les vérifications concurrentes
+            if (isChecking) return;
+            isChecking = true;
+
+            console.log('Checking connection... navigator.onLine =', navigator.onLine);
+
+            if (navigator.onLine) {
+                const isReachable = await checkServerReachability();
+                console.log('Server reachable:', isReachable);
+
+                if (isReachable) {
+                    // Connexion rétablie !
+                    if (checkInterval) {
+                        clearInterval(checkInterval);
+                    }
+                    window.removeEventListener('online', checkConnection);
+                    showErrorOverlay("Connection restored. Reloading...");
+                    resolve();
+                }
+            }
+
+            isChecking = false;
+        };
+
+        // Vérifier périodiquement toutes les 2 secondes
+        checkInterval = setInterval(checkConnection, 2000);
+
+        // Écouter aussi l'événement 'online' du navigateur pour réagir rapidement
+        window.addEventListener('online', checkConnection);
+
+        // Faire une première vérification immédiate
+        checkConnection();
+    });
+}
+
+/**
+ * Recharge la page seulement quand internet est disponible
+ * Attend si nécessaire que la connexion revienne
+ * @param {string} reason - Raison du rechargement (pour les logs)
+ */
+async function reloadWhenOnline(reason = 'Unknown') {
+    console.log(`Reload requested: ${reason}`);
+
+    // Vérifier d'abord si nous sommes en ligne
+    if (navigator.onLine) {
+        // Faire un ping réel au serveur pour confirmer
+        const isReachable = await checkServerReachability();
+
+        if (isReachable) {
+            console.log('Internet available, reloading page');
+            location.reload();
+            return;
+        }
+    }
+
+    // Pas de connexion ou serveur injoignable, attendre
+    console.log('No connection or server unreachable, waiting...');
+    await waitForConnection();
+
+    // Une fois la connexion rétablie, attendre 1 seconde puis recharger
+    setTimeout(() => {
+        console.log('Connection restored, reloading page');
+        location.reload();
+    }, 1000);
+}
+
+/**
  * Updates the connection progress indicator with step-by-step status
  * @param {number} step - Current step (1, 2, or 3)
  * @param {string} message - Status message to display
@@ -452,10 +555,10 @@ function postWorkerMessages(json) {
             }
 
             // 🚨 Afficher l'overlay d'erreur permanent
-            showErrorOverlay("Server disconnected. Refreshing in 3 seconds...");
+            showErrorOverlay("Server disconnected. Checking connection...");
 
             setTimeout(() => {
-                location.reload();
+                reloadWhenOnline('Server shutdown');
             }, 3000);
 
             return;
@@ -484,7 +587,7 @@ function postWorkerMessages(json) {
                 // Use a delayed reload to allow logging to appear
                 setTimeout(function() {
                     console.log("Reloading page due to connection error");
-                    location.reload(); // 🚨 Changé de document.location.reload() à location.reload()
+                    reloadWhenOnline('Connection error: ' + e.data.error);
                 }, 2000);
             } else {
                 // For less critical errors, just show a warning
