@@ -27,7 +27,8 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     drageventCounter=0,
     videoFrameReceived = false,
     timeoutId,
-    isServerShuttingDown = false; // 🚨 Flag pour éviter les actions en double lors du shutdown
+    isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
+    isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
 
 canvasElement.style.display = "none";
 
@@ -132,6 +133,9 @@ function waitForConnection() {
  */
 async function reloadWhenOnline(reason = 'Unknown') {
     console.log(`Reload requested: ${reason}`);
+
+    // 🚨 Marquer qu'on est en attente de reload
+    isWaitingForReload = true;
 
     // Vérifier d'abord si nous sommes en ligne
     if (navigator.onLine) {
@@ -611,15 +615,19 @@ function postWorkerMessages(json) {
                 waitingMessageElement.style.display = "none";
             }
 
-            // 🚨 Afficher l'overlay d'erreur permanent
-            showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
+            // 🚨 Ne pas afficher l'overlay si on est déjà en attente de reload
+            // (notre fonction reloadWhenOnline gère déjà l'affichage)
+            if (!isWaitingForReload) {
+                // 🚨 Afficher l'overlay d'erreur permanent
+                showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
 
-            // Cacher l'overlay après 5 secondes si la reconnexion réussit
-            setTimeout(() => {
-                if (!isServerShuttingDown) {
-                    hideErrorOverlay();
-                }
-            }, 5000);
+                // Cacher l'overlay après 5 secondes si la reconnexion réussit
+                setTimeout(() => {
+                    if (!isServerShuttingDown && !isWaitingForReload) {
+                        hideErrorOverlay();
+                    }
+                }, 5000);
+            }
 
             return;
         }
