@@ -63,7 +63,7 @@ async function checkServerReachability() {
         const timeoutId = setTimeout(() => controller.abort(), 3000);
 
         // Essayer de ping le serveur principal
-        const response = await fetch(`https://taada.top:${DEFAULT_HTTPS_PORT}/getsocketport`, {
+        const response = await fetch(`https://taada.top`, {
             method: 'HEAD',
             signal: controller.signal
         });
