@@ -18,6 +18,14 @@ let pendingFrames = [],
 
 const texturePool = [];
 
+// ========== WebSocket Reconnection Management ==========
+let isReconnecting = false; // Flag pour éviter les tentatives de reconnexion multiples
+let reconnectionAttempt = 0; // Compteur de tentatives de reconnexion
+let reconnectionTimeout = null; // Référence au timeout de reconnexion
+const MAX_RECONNECTION_ATTEMPTS = 5; // Nombre maximum de tentatives avant abandon
+const BASE_RECONNECTION_DELAY = 2000; // Délai de base en ms (2 secondes)
+const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
+
 // ========== Binary Touch Protocol ==========
 /**
  * COMPRESSION BINAIRE DES TOUCH EVENTS
@@ -460,6 +468,22 @@ function handleVideoMessage(dat){
         separateNalUnits(dat).forEach(headerMagic)
 }
 
+/**
+ * Réinitialise les compteurs de reconnexion (appelé au démarrage initial)
+ * Permet de réessayer après avoir atteint la limite de tentatives
+ */
+function resetReconnectionState() {
+    isReconnecting = false;
+    reconnectionAttempt = 0;
+
+    if (reconnectionTimeout) {
+        clearTimeout(reconnectionTimeout);
+        reconnectionTimeout = null;
+    }
+
+    console.log('🔄 Reconnection state reset');
+}
+
 function startSocket() {
     socket = new WebSocket(`wss://taada.top:${port}`);
     socket.sendObject = (obj) => {
@@ -475,6 +499,18 @@ function startSocket() {
     socket.binaryType = "arraybuffer";
     socket.addEventListener('open', () => {
         socket.binaryType = "arraybuffer";
+
+        // 🎉 Connexion réussie! Réinitialiser les compteurs de reconnexion
+        isReconnecting = false;
+        reconnectionAttempt = 0;
+
+        // Annuler tout timeout de reconnexion en attente
+        if (reconnectionTimeout) {
+            clearTimeout(reconnectionTimeout);
+            reconnectionTimeout = null;
+        }
+
+        console.log('✅ WebSocket connected successfully');
 
         // Notify main thread: Socket connected
         self.postMessage({
@@ -509,22 +545,86 @@ function startSocket() {
 }
 
 function socketClose(event) {
-    console.log('Error: Socket Closed ', event)
+    console.log('Error: Socket Closed ', event);
 
-    // 🚨 NOUVEAU: Ne pas reconnecter si le serveur est en shutdown
+    // 🚨 PROTECTION #1: Ne pas reconnecter si le serveur est en shutdown
     if (isServerShuttingDown) {
         console.log('Server is shutting down, not reconnecting');
         return;
     }
 
-    // 🚨 NOUVEAU: Notifier le thread principal pour cacher le message waiting
-    self.postMessage({connectionLost: true, reason: event.reason || "Connection closed"});
-    self.postMessage({error: "Lost connection to phone, trying to reconnect"});
+    // 🚨 PROTECTION #2: Éviter les tentatives de reconnexion multiples simultanées
+    // Cette vérification empêche la boucle infinie quand 'error' ET 'close' se déclenchent
+    if (isReconnecting) {
+        console.log('Reconnection already in progress, ignoring duplicate event');
+        return;
+    }
 
-    // Attendre un peu avant de reconnecter
-    setTimeout(() => {
-        startSocket();
-    }, 2000);
+    // 🚨 PROTECTION #3: Limiter le nombre de tentatives de reconnexion
+    if (reconnectionAttempt >= MAX_RECONNECTION_ATTEMPTS) {
+        console.error(`❌ Maximum reconnection attempts (${MAX_RECONNECTION_ATTEMPTS}) reached. Giving up.`);
+
+        // Notifier le thread principal de l'échec définitif
+        self.postMessage({
+            error: `Failed to reconnect after ${MAX_RECONNECTION_ATTEMPTS} attempts. Please restart the service.`,
+            connectionFailed: true
+        });
+
+        // Afficher un message d'erreur permanent
+        self.postMessage({
+            connectionLost: true,
+            reason: "Maximum reconnection attempts reached",
+            permanent: true
+        });
+
+        return;
+    }
+
+    // Marquer qu'une reconnexion est en cours
+    isReconnecting = true;
+    reconnectionAttempt++;
+
+    // 🚨 AMÉLIORATION: Calculer le délai avec backoff exponentiel
+    // Formule: min(BASE_DELAY * 2^(attempt-1), MAX_DELAY)
+    // Exemple: 2s, 4s, 8s, 16s, 30s (plafonné)
+    const exponentialDelay = Math.min(
+        BASE_RECONNECTION_DELAY * Math.pow(2, reconnectionAttempt - 1),
+        MAX_RECONNECTION_DELAY
+    );
+
+    console.log(`🔄 Connection lost. Reconnection attempt ${reconnectionAttempt}/${MAX_RECONNECTION_ATTEMPTS} in ${exponentialDelay}ms`);
+
+    // 🚨 NOUVEAU: Notifier le thread principal de la perte de connexion
+    self.postMessage({
+        connectionLost: true,
+        reason: event.reason || "Connection closed",
+        reconnectionAttempt: reconnectionAttempt,
+        maxAttempts: MAX_RECONNECTION_ATTEMPTS,
+        nextRetryIn: exponentialDelay
+    });
+
+    // Afficher un message informatif
+    self.postMessage({
+        error: `Lost connection to phone, trying to reconnect (attempt ${reconnectionAttempt}/${MAX_RECONNECTION_ATTEMPTS})...`
+    });
+
+    // Attendre avant de reconnecter (backoff exponentiel)
+    reconnectionTimeout = setTimeout(() => {
+        console.log(`🚀 Attempting reconnection #${reconnectionAttempt}`);
+
+        try {
+            startSocket();
+        } catch (error) {
+            console.error('❌ Failed to start socket during reconnection:', error);
+            // Réinitialiser le flag et permettre une nouvelle tentative
+            isReconnecting = false;
+
+            // Tenter à nouveau si on n'a pas atteint la limite
+            if (reconnectionAttempt < MAX_RECONNECTION_ATTEMPTS) {
+                socketClose(event); // Relancer le processus
+            }
+        }
+    }, exponentialDelay);
 }
 
 async function isWebCodecsWorkingWithDecode() {
