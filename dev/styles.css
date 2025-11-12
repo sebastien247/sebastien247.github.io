@@ -55,7 +55,7 @@ canvas, video {
 
 .error-content {
     padding: 40px 60px;
-    max-width: 600px;
+    max-width: 100%;
     text-align: center;
     /* Remove red background
     background: rgba(232, 33, 39, 0.95);
