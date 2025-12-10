@@ -724,15 +724,19 @@ let latestTouchData = null;  // Stocke les données converties, pas l'événemen
 // 8ms (120Hz) → bon équilibre entre fluidité et performance
 // 16ms (60Hz) → économie supplémentaire de ressources mais un peu moins fluide
 
-// === LONG PRESS DETECTION ===
+// === LONG TOUCH DETECTION WITH PERIODIC MOVE ===
 const LONG_PRESS_TIMEOUT_MS = 500;  // Durée avant déclenchement (standard Android)
 const LONG_PRESS_MOVE_THRESHOLD = 20;  // Mouvement max en pixels avant annulation
+const LONG_TOUCH_MOVE_INTERVAL_MS = 50;  // Intervalle entre les MOVE périodiques (50ms = 20Hz)
+
 let longPressTimer = null;
 let longPressStartPosition = null;
 let longPressFired = false;
+let longTouchMoveInterval = null;  // Intervalle pour envoyer des MOVE périodiques
 
 /**
  * Démarre le timer pour détecter un appui long
+ * ET lance les MOVE périodiques pour garder le touch actif
  * @param {Object} touch - L'objet touch {id, x, y}
  */
 function startLongPressTimer(touch) {
@@ -740,33 +744,44 @@ function startLongPressTimer(touch) {
     longPressFired = false;
     longPressStartPosition = { id: touch.id, x: touch.x, y: touch.y };
     
+    // Timer pour détecter le long press après 500ms
     longPressTimer = setTimeout(() => {
         if (longPressStartPosition) {
-            console.log('[LONGPRESS] Detected at', longPressStartPosition);
-            
-            // Envoyer l'événement LONGPRESS via le même pipeline que les autres touch events
+            console.log('[LONGPRESS] 500ms reached - long touch active at', longPressStartPosition);
+            longPressFired = true;
+            // Ne pas annuler - continuer les MOVE périodiques
+        }
+    }, LONG_PRESS_TIMEOUT_MS);
+
+    // MOVE périodiques pour garder le touch "actif" dans Android Auto
+    // Commencer immédiatement et répéter toutes les 50ms
+    longTouchMoveInterval = setInterval(() => {
+        if (longPressStartPosition) {
+            // Envoyer un MOVE avec la même position pour maintenir le touch actif
             demuxDecodeWorker.postMessage({
-                action: "LONGPRESS",
+                action: "MULTITOUCH_MOVE",
                 touches: [longPressStartPosition],
                 allTouches: [longPressStartPosition],
                 timestamp: performance.now()
             });
-            
-            longPressFired = true;
-            longPressStartPosition = null;
         }
-    }, LONG_PRESS_TIMEOUT_MS);
+    }, LONG_TOUCH_MOVE_INTERVAL_MS);
 }
 
 /**
- * Annule le timer de long press
+ * Annule le timer et l'intervalle de long press
  */
 function cancelLongPressTimer() {
     if (longPressTimer) {
         clearTimeout(longPressTimer);
         longPressTimer = null;
     }
+    if (longTouchMoveInterval) {
+        clearInterval(longTouchMoveInterval);
+        longTouchMoveInterval = null;
+    }
     longPressStartPosition = null;
+    longPressFired = false;
 }
 
 /**
@@ -774,7 +789,7 @@ function cancelLongPressTimer() {
  * @param {Array} touches - Liste des touches en mouvement
  */
 function checkLongPressMove(touches) {
-    if (!longPressStartPosition || !longPressTimer) return;
+    if (!longPressStartPosition) return;
     
     for (const touch of touches) {
         if (touch.id === longPressStartPosition.id) {
