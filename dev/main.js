@@ -724,6 +724,71 @@ let latestTouchData = null;  // Stocke les données converties, pas l'événemen
 // 8ms (120Hz) → bon équilibre entre fluidité et performance
 // 16ms (60Hz) → économie supplémentaire de ressources mais un peu moins fluide
 
+// === LONG PRESS DETECTION ===
+const LONG_PRESS_TIMEOUT_MS = 500;  // Durée avant déclenchement (standard Android)
+const LONG_PRESS_MOVE_THRESHOLD = 20;  // Mouvement max en pixels avant annulation
+let longPressTimer = null;
+let longPressStartPosition = null;
+let longPressFired = false;
+
+/**
+ * Démarre le timer pour détecter un appui long
+ * @param {Object} touch - L'objet touch {id, x, y}
+ */
+function startLongPressTimer(touch) {
+    cancelLongPressTimer();
+    longPressFired = false;
+    longPressStartPosition = { id: touch.id, x: touch.x, y: touch.y };
+    
+    longPressTimer = setTimeout(() => {
+        if (longPressStartPosition) {
+            console.log('[LONGPRESS] Detected at', longPressStartPosition);
+            
+            // Envoyer l'événement LONGPRESS via le même pipeline que les autres touch events
+            demuxDecodeWorker.postMessage({
+                action: "LONGPRESS",
+                touches: [longPressStartPosition],
+                allTouches: [longPressStartPosition],
+                timestamp: performance.now()
+            });
+            
+            longPressFired = true;
+            longPressStartPosition = null;
+        }
+    }, LONG_PRESS_TIMEOUT_MS);
+}
+
+/**
+ * Annule le timer de long press
+ */
+function cancelLongPressTimer() {
+    if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+    }
+    longPressStartPosition = null;
+}
+
+/**
+ * Vérifie si le mouvement dépasse le seuil et annule le long press si nécessaire
+ * @param {Array} touches - Liste des touches en mouvement
+ */
+function checkLongPressMove(touches) {
+    if (!longPressStartPosition || !longPressTimer) return;
+    
+    for (const touch of touches) {
+        if (touch.id === longPressStartPosition.id) {
+            const dx = Math.abs(touch.x - longPressStartPosition.x);
+            const dy = Math.abs(touch.y - longPressStartPosition.y);
+            if (dx > LONG_PRESS_MOVE_THRESHOLD || dy > LONG_PRESS_MOVE_THRESHOLD) {
+                console.log('[LONGPRESS] Cancelled - movement exceeded threshold');
+                cancelLongPressTimer();
+            }
+            break;
+        }
+    }
+}
+
 /**
  * Convertit une TouchList en tableau de coordonnées avec leurs IDs
  * @param {TouchList} touchList - Liste des touches
@@ -795,8 +860,13 @@ function handleTouchStart(event) {
         timestamp: performance.now()
     });
 
-    // Note: Les événements legacy (DOWN) ont été supprimés car MULTITOUCH_DOWN
-    // gère maintenant à la fois le single touch et le multitouch
+    // LONG PRESS: Démarrer le timer uniquement pour un single touch
+    if (allTouches.length === 1 && newTouches.length === 1) {
+        startLongPressTimer(newTouches[0]);
+    } else {
+        // Multi-touch annule le long press
+        cancelLongPressTimer();
+    }
 }
 
 bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false });
@@ -812,6 +882,9 @@ function handleTouchEnd(event) {
     // Si un touchmove a programmé un requestAnimationFrame qui n'a pas encore été exécuté,
     // on doit l'empêcher de traiter les anciennes données de touch
     latestTouchData = null;
+
+    // LONG PRESS: Annuler le timer (le doigt s'est levé)
+    cancelLongPressTimer();
 
     const endedTouches = convertTouchListToCoords(event.changedTouches);
     endedTouches.forEach(touch => activeTouches.delete(touch.id));
@@ -853,6 +926,9 @@ function processTouchMove() {
 
     const movingTouches = latestTouchData.touches;
     const timestamp = latestTouchData.timestamp;
+
+    // LONG PRESS: Vérifier si le mouvement dépasse le seuil
+    checkLongPressMove(movingTouches);
 
     // Mettre à jour le suivi des touches actives
     movingTouches.forEach(touch => {

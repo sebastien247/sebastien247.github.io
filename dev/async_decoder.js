@@ -667,8 +667,8 @@ function messageHandler(message) {
     if (socket.readyState === WebSocket.OPEN) {
         const action = message.data.action;
 
-        // Encoder les événements MULTITOUCH en binaire
-        if (action === 'MULTITOUCH_DOWN' || action === 'MULTITOUCH_MOVE' || action === 'MULTITOUCH_UP' || action === 'MULTITOUCH_CANCEL') {
+        // Encoder les événements MULTITOUCH et LONGPRESS en binaire
+        if (action === 'MULTITOUCH_DOWN' || action === 'MULTITOUCH_MOVE' || action === 'MULTITOUCH_UP' || action === 'MULTITOUCH_CANCEL' || action === 'LONGPRESS') {
             initBinaryTouchEncoder();
 
             // Extraire les touches et allTouches du message
