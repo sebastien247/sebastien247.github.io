@@ -1,0 +1,537 @@
+/**
+ * Feedback Component Styles for TaaDa
+ * Tesla-inspired design for snackbar and dialog components
+ */
+
+/* ===========================================
+   SNACKBAR COMPONENT
+   =========================================== */
+
+.feedback-snackbar {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 10000; /* Always on top */
+    
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    
+    background: rgba(26, 27, 31, 0.95);
+    backdrop-filter: blur(10px);
+    border-radius: 12px;
+    padding: 16px 20px;
+    
+    box-shadow: 
+        0 10px 40px rgba(0, 0, 0, 0.5),
+        0 0 0 1px rgba(255, 255, 255, 0.1);
+    border-left: 4px solid #E82127;
+    
+    transform: translateX(calc(100% + 40px));
+    opacity: 0;
+    transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+    
+    max-width: 400px;
+}
+
+.feedback-snackbar-visible {
+    transform: translateX(0);
+    opacity: 1;
+}
+
+.feedback-snackbar-hiding {
+    transform: translateX(calc(100% + 40px));
+    opacity: 0;
+}
+
+.feedback-snackbar-content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+}
+
+.feedback-snackbar-icon {
+    font-size: 1.8em;
+    line-height: 1;
+}
+
+.feedback-snackbar-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.feedback-snackbar-title {
+    font-size: 1em;
+    font-weight: 600;
+    color: white;
+}
+
+.feedback-snackbar-subtitle {
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.feedback-snackbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.feedback-snackbar-btn {
+    border: none;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 0.9em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.feedback-snackbar-btn-primary {
+    background: #E82127;
+    color: white;
+}
+
+.feedback-snackbar-btn-primary:hover {
+    background: #ff3b41;
+    transform: scale(1.05);
+}
+
+.feedback-snackbar-btn-dismiss {
+    background: transparent;
+    color: rgba(255, 255, 255, 0.5);
+    padding: 8px;
+    font-size: 1em;
+}
+
+.feedback-snackbar-btn-dismiss:hover {
+    color: white;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+/* Timer progress bar - now a background overlay */
+.feedback-snackbar-timer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 0 12px 12px 0;
+    width: 100%;
+    pointer-events: none;
+}
+
+@keyframes feedbackTimerProgress {
+    from {
+        width: 100%;
+        opacity: 1;
+    }
+    to {
+        width: 0%;
+        opacity: 0.3;
+    }
+}
+
+/* ===========================================
+   DIALOG OVERLAY
+   =========================================== */
+
+.feedback-dialog-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10001; /* Above snackbar */
+    
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    
+    background: rgba(0, 0, 0, 0);
+    backdrop-filter: blur(0px);
+    
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.3s ease;
+}
+
+.feedback-dialog-overlay.feedback-dialog-open {
+    opacity: 1;
+    visibility: visible;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(5px);
+}
+
+/* ===========================================
+   DIALOG CONTAINER
+   =========================================== */
+
+.feedback-dialog {
+    background: rgba(26, 27, 31, 0.98);
+    border-radius: 16px;
+    width: 100%;
+    max-width: 480px;
+    max-height: 90vh;
+    overflow-y: auto;
+    
+    box-shadow: 
+        0 25px 80px rgba(0, 0, 0, 0.6),
+        0 0 0 1px rgba(255, 255, 255, 0.1);
+    
+    transform: scale(0.9) translateY(20px);
+    transition: transform 0.3s ease;
+}
+
+.feedback-dialog-open .feedback-dialog {
+    transform: scale(1) translateY(0);
+}
+
+/* Dialog Header */
+.feedback-dialog-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 24px 24px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.feedback-dialog-header h2 {
+    font-size: 1.4em;
+    font-weight: 600;
+    color: white;
+    margin: 0;
+}
+
+.feedback-dialog-close {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 1.5em;
+    cursor: pointer;
+    padding: 8px;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+    line-height: 1;
+}
+
+.feedback-dialog-close:hover {
+    color: white;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+/* ===========================================
+   FORM STYLES
+   =========================================== */
+
+.feedback-dialog-form {
+    padding: 24px;
+}
+
+.feedback-form-group {
+    margin-bottom: 20px;
+}
+
+.feedback-form-label {
+    display: block;
+    font-size: 0.95em;
+    font-weight: 500;
+    color: white;
+    margin-bottom: 8px;
+}
+
+.feedback-form-optional {
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.9em;
+}
+
+/* Star Rating */
+.feedback-star-rating {
+    display: flex;
+    gap: 8px;
+}
+
+.feedback-star {
+    background: transparent;
+    border: none;
+    font-size: 2em;
+    color: rgba(255, 255, 255, 0.2);
+    cursor: pointer;
+    padding: 4px;
+    transition: all 0.15s ease;
+    line-height: 1;
+}
+
+.feedback-star:hover,
+.feedback-star.active {
+    color: #FFD700;
+    transform: scale(1.15);
+    text-shadow: 0 0 20px rgba(255, 215, 0, 0.5);
+}
+
+.feedback-rating-text {
+    display: inline-block;
+    margin-left: 12px;
+    font-size: 0.9em;
+    color: #FFD700;
+    font-weight: 500;
+}
+
+/* Select */
+.feedback-form-select {
+    width: 100%;
+    padding: 12px 16px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 10px;
+    color: white;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1em;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23ffffff' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 16px center;
+}
+
+.feedback-form-select:focus {
+    outline: none;
+    border-color: #E82127;
+    box-shadow: 0 0 0 3px rgba(232, 33, 39, 0.2);
+}
+
+.feedback-form-select option {
+    background: #1a1b1f;
+    color: white;
+}
+
+/* Textarea */
+.feedback-form-textarea {
+    width: 100%;
+    padding: 12px 16px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 10px;
+    color: white;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1em;
+    resize: vertical;
+    min-height: 100px;
+    transition: all 0.2s ease;
+}
+
+.feedback-form-textarea:focus {
+    outline: none;
+    border-color: #E82127;
+    box-shadow: 0 0 0 3px rgba(232, 33, 39, 0.2);
+}
+
+.feedback-form-textarea::placeholder {
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.feedback-char-count {
+    display: block;
+    text-align: right;
+    font-size: 0.8em;
+    color: rgba(255, 255, 255, 0.4);
+    margin-top: 6px;
+}
+
+/* Input */
+.feedback-form-input {
+    width: 100%;
+    padding: 12px 16px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 10px;
+    color: white;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1em;
+    transition: all 0.2s ease;
+}
+
+.feedback-form-input:focus {
+    outline: none;
+    border-color: #E82127;
+    box-shadow: 0 0 0 3px rgba(232, 33, 39, 0.2);
+}
+
+.feedback-form-input::placeholder {
+    color: rgba(255, 255, 255, 0.4);
+}
+
+/* Error message */
+.feedback-form-error {
+    background: rgba(232, 33, 39, 0.15);
+    border: 1px solid rgba(232, 33, 39, 0.4);
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: #ff6b6b;
+    font-size: 0.9em;
+    margin-bottom: 16px;
+}
+
+/* Form Actions */
+.feedback-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 24px;
+}
+
+.feedback-btn {
+    border: none;
+    border-radius: 10px;
+    padding: 12px 24px;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.feedback-btn-primary {
+    background: #E82127;
+    color: white;
+}
+
+.feedback-btn-primary:hover:not(:disabled) {
+    background: #ff3b41;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(232, 33, 39, 0.4);
+}
+
+.feedback-btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.feedback-btn-secondary {
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.feedback-btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
+}
+
+/* Loading spinner */
+.feedback-btn-loading {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.feedback-spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: feedbackSpin 0.8s linear infinite;
+}
+
+@keyframes feedbackSpin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ===========================================
+   SUCCESS STATE
+   =========================================== */
+
+.feedback-dialog-success {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+    text-align: center;
+}
+
+.feedback-success-icon {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #00C2B1, #00a99d);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.5em;
+    color: white;
+    margin-bottom: 24px;
+    box-shadow: 0 10px 30px rgba(0, 194, 177, 0.4);
+    animation: feedbackSuccessPop 0.4s ease-out;
+}
+
+@keyframes feedbackSuccessPop {
+    0% {
+        transform: scale(0);
+        opacity: 0;
+    }
+    50% {
+        transform: scale(1.2);
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.feedback-dialog-success h3 {
+    font-size: 1.5em;
+    font-weight: 600;
+    color: white;
+    margin: 0 0 8px;
+}
+
+.feedback-dialog-success p {
+    font-size: 1em;
+    color: rgba(255, 255, 255, 0.7);
+    margin: 0 0 24px;
+}
+
+/* ===========================================
+   RESPONSIVE DESIGN
+   =========================================== */
+
+@media (max-width: 520px) {
+    .feedback-snackbar {
+        right: 10px;
+        left: 10px;
+        bottom: 10px;
+        max-width: none;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+
+    .feedback-snackbar-actions {
+        justify-content: flex-end;
+    }
+
+    .feedback-dialog {
+        margin: 10px;
+        max-height: calc(100vh - 20px);
+    }
+
+    .feedback-dialog-header {
+        padding: 20px 20px 16px;
+    }
+
+    .feedback-dialog-form {
+        padding: 20px;
+    }
+
+    .feedback-star {
+        font-size: 1.6em;
+    }
+}
