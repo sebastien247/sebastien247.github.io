@@ -48,6 +48,13 @@ const FeedbackSnackbar = (function() {
         document.body.appendChild(snackbar);
         snackbarElement = snackbar;
 
+        // Prevent touch events from bubbling to the body (which handles Android Auto stream interactions)
+        ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'mousedown', 'mouseup', 'mousemove', 'click'].forEach(eventType => {
+            snackbar.addEventListener(eventType, (e) => {
+                e.stopPropagation();
+            }, { passive: false });
+        });
+
         // Attach event listeners
         document.getElementById('feedback-snackbar-open').addEventListener('click', handleOpenClick);
         document.getElementById('feedback-snackbar-dismiss').addEventListener('click', handleDismissClick);

@@ -124,6 +124,13 @@ const FeedbackDialog = (function() {
         document.body.appendChild(dialog);
         dialogElement = dialog;
 
+        // Prevent touch events from bubbling to the body
+        ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'mousedown', 'mouseup', 'mousemove', 'click'].forEach(eventType => {
+            dialog.addEventListener(eventType, (e) => {
+                e.stopPropagation();
+            }, { passive: false });
+        });
+
         // Attach event listeners
         attachEventListeners();
     }
