@@ -125,7 +125,9 @@ const FeedbackDialog = (function() {
         dialogElement = dialog;
 
         // Prevent touch events from bubbling to the body
-        ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'mousedown', 'mouseup', 'mousemove', 'click'].forEach(eventType => {
+        // Only stopping touch events because main.js only listens to touch events.
+        // Letting mouse/click events bubble ensures native form elements (like <select>) work correctly.
+        ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach(eventType => {
             dialog.addEventListener(eventType, (e) => {
                 e.stopPropagation();
             }, { passive: false });

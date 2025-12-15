@@ -49,7 +49,8 @@ const FeedbackSnackbar = (function() {
         snackbarElement = snackbar;
 
         // Prevent touch events from bubbling to the body (which handles Android Auto stream interactions)
-        ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'mousedown', 'mouseup', 'mousemove', 'click'].forEach(eventType => {
+        // Only stopping touch events because main.js only listens to touch events.
+        ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach(eventType => {
             snackbar.addEventListener(eventType, (e) => {
                 e.stopPropagation();
             }, { passive: false });
