@@ -342,6 +342,21 @@ canvas, video {
     line-height: 1.5;
 }
 
+/* Upgrade/Maintenance Card Variant */
+.notification-card.upgrade {
+    border-left-color: #2196F3;
+    background: linear-gradient(135deg, rgba(33, 150, 243, 0.15), rgba(33, 150, 243, 0.05));
+}
+
+.notification-card.upgrade .notification-content h3 {
+    color: #2196F3;
+}
+
+.notification-card.upgrade .notification-content .action-required {
+    color: #ff9800;
+    font-weight: 600;
+}
+
 .download-section {
     background: rgba(26, 27, 31, 0.9);
     border-radius: 12px;
