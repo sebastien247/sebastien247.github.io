@@ -9,6 +9,10 @@
     <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/>
     <link rel="icon" href="favicon.ico"/>
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="feedback.css">
+    <!-- Firebase SDK (compat version for simpler integration) -->
+    <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore-compat.js"></script>
     <meta name="HandheldFriendly" content="true"/>
 </head>
 
@@ -96,4 +100,19 @@
 </body>
 <script src="pcm-player.min.js"></script>
 <script src="main.js"></script>
+
+<!-- Feedback System Modules -->
+<script src="firebase-config.js"></script>
+<script src="feedback-service.js"></script>
+<script src="feedback-dialog.js"></script>
+<script src="feedback-snackbar.js"></script>
+<script>
+    // Initialize Firebase when page loads
+    document.addEventListener('DOMContentLoaded', function() {
+        if (window.FirebaseConfig) {
+            window.FirebaseConfig.init();
+        }
+    });
+</script>
 </html>
+

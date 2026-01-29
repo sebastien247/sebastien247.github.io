@@ -27,7 +27,8 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     drageventCounter=0,
     videoFrameReceived = false,
     timeoutId,
-    isServerShuttingDown = false; // 🚨 Flag pour éviter les actions en double lors du shutdown
+    isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
+    isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
 
 canvasElement.style.display = "none";
 
@@ -51,6 +52,112 @@ function hideErrorOverlay() {
     if (errorOverlay) {
         errorOverlay.style.display = "none";
     }
+}
+
+/**
+ * Vérifie si le serveur est accessible
+ * @returns {Promise<boolean>} True si le serveur est accessible
+ */
+async function checkServerReachability() {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+        // Essayer de ping le serveur principal
+        const response = await fetch(`https://app.taada.top`, {
+            method: 'HEAD',
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+        return response.ok;
+    } catch (error) {
+        console.log('Server not reachable:', error.message);
+        return false;
+    }
+}
+
+/**
+ * Attend que la connexion internet revienne
+ * @returns {Promise<void>} Se résout quand la connexion est rétablie
+ */
+function waitForConnection() {
+    return new Promise((resolve) => {
+        console.log('Waiting for internet connection...');
+        showErrorOverlay("No internet connection. Waiting to reconnect...");
+
+        let checkInterval;
+        let isChecking = false;
+
+        // Fonction pour vérifier la connexion
+        const checkConnection = async () => {
+            // Éviter les vérifications concurrentes
+            if (isChecking) return;
+            isChecking = true;
+
+            console.log('Checking connection... navigator.onLine =', navigator.onLine);
+
+            if (navigator.onLine) {
+                const isReachable = await checkServerReachability();
+                console.log('Server reachable:', isReachable);
+
+                if (isReachable) {
+                    // Connexion rétablie !
+                    if (checkInterval) {
+                        clearInterval(checkInterval);
+                    }
+                    window.removeEventListener('online', checkConnection);
+                    showErrorOverlay("Connection restored. Reloading...");
+                    resolve();
+                }
+            }
+
+            isChecking = false;
+        };
+
+        // Vérifier périodiquement toutes les 2 secondes
+        checkInterval = setInterval(checkConnection, 2000);
+
+        // Écouter aussi l'événement 'online' du navigateur pour réagir rapidement
+        window.addEventListener('online', checkConnection);
+
+        // Faire une première vérification immédiate
+        checkConnection();
+    });
+}
+
+/**
+ * Recharge la page seulement quand internet est disponible
+ * Attend si nécessaire que la connexion revienne
+ * @param {string} reason - Raison du rechargement (pour les logs)
+ */
+async function reloadWhenOnline(reason = 'Unknown') {
+    console.log(`Reload requested: ${reason}`);
+
+    // 🚨 Marquer qu'on est en attente de reload
+    isWaitingForReload = true;
+
+    // Vérifier d'abord si nous sommes en ligne
+    if (navigator.onLine) {
+        // Faire un ping réel au serveur pour confirmer
+        const isReachable = await checkServerReachability();
+
+        if (isReachable) {
+            console.log('Internet available, reloading page');
+            location.reload();
+            return;
+        }
+    }
+
+    // Pas de connexion ou serveur injoignable, attendre
+    console.log('No connection or server unreachable, waiting...');
+    await waitForConnection();
+
+    // Une fois la connexion rétablie, attendre 1 seconde puis recharger
+    setTimeout(() => {
+        console.log('Connection restored, reloading page');
+        location.reload();
+    }, 1000);
 }
 
 /**
@@ -385,8 +492,8 @@ function postWorkerMessages(json) {
         }
     }
 
-    if (appVersion < 45) {
-        alert("You need to run TaaDa 1.5.5 (build 45) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+    if (appVersion < 53) {
+        alert("You need to run TaaDa 2.1.0 (build 53) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
         //return;
     }
 
@@ -452,10 +559,10 @@ function postWorkerMessages(json) {
             }
 
             // 🚨 Afficher l'overlay d'erreur permanent
-            showErrorOverlay("Server disconnected. Refreshing in 3 seconds...");
+            showErrorOverlay("Server disconnected. Checking connection...");
 
             setTimeout(() => {
-                location.reload();
+                reloadWhenOnline('Server shutdown');
             }, 3000);
 
             return;
@@ -484,7 +591,7 @@ function postWorkerMessages(json) {
                 // Use a delayed reload to allow logging to appear
                 setTimeout(function() {
                     console.log("Reloading page due to connection error");
-                    location.reload(); // 🚨 Changé de document.location.reload() à location.reload()
+                    reloadWhenOnline('Connection error: ' + e.data.error);
                 }, 2000);
             } else {
                 // For less critical errors, just show a warning
@@ -508,15 +615,19 @@ function postWorkerMessages(json) {
                 waitingMessageElement.style.display = "none";
             }
 
-            // 🚨 Afficher l'overlay d'erreur permanent
-            showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
+            // 🚨 Ne pas afficher l'overlay si on est déjà en attente de reload
+            // (notre fonction reloadWhenOnline gère déjà l'affichage)
+            if (!isWaitingForReload) {
+                // 🚨 Afficher l'overlay d'erreur permanent
+                showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
 
-            // Cacher l'overlay après 5 secondes si la reconnexion réussit
-            setTimeout(() => {
-                if (!isServerShuttingDown) {
-                    hideErrorOverlay();
-                }
-            }, 5000);
+                // Cacher l'overlay après 5 secondes si la reconnexion réussit
+                setTimeout(() => {
+                    if (!isServerShuttingDown && !isWaitingForReload) {
+                        hideErrorOverlay();
+                    }
+                }, 5000);
+            }
 
             return;
         }
@@ -608,7 +719,7 @@ function isJson(item) {
 // Ajout de variables pour la gestion optimisée des événements tactiles multitouch
 let activeTouches = new Map(); // Suivi des touches actives avec leurs IDs
 let touchMovePending = false;
-let latestTouchEvent = null;
+let latestTouchData = null;  // Stocke les données converties, pas l'événement
 // 4ms (250Hz) → plus fluide mais plus gourmand en ressources
 // 8ms (120Hz) → bon équilibre entre fluidité et performance
 // 16ms (60Hz) → économie supplémentaire de ressources mais un peu moins fluide
@@ -669,6 +780,13 @@ function handleTouchStart(event) {
 
     const allTouches = convertTouchListToCoords(event.touches);
 
+    // DEBUG: Logs détaillés pour comprendre le problème
+    console.log('[MULTITOUCH_DOWN] event.changedTouches.length:', event.changedTouches.length);
+    console.log('[MULTITOUCH_DOWN] event.touches.length:', event.touches.length);
+    console.log('[MULTITOUCH_DOWN] newTouches:', JSON.stringify(newTouches));
+    console.log('[MULTITOUCH_DOWN] allTouches:', JSON.stringify(allTouches));
+    console.log('[MULTITOUCH_DOWN] activeTouches.size:', activeTouches.size);
+
     // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_DOWN",
@@ -677,15 +795,8 @@ function handleTouchStart(event) {
         timestamp: performance.now()
     });
 
-    // Gérer la rétrocompatibilité pour le single-touch
-    if (allTouches.length === 1 && newTouches.length > 0) {
-        demuxDecodeWorker.postMessage({
-            action: "DOWN",
-            X: newTouches[0].x,
-            Y: newTouches[0].y,
-            timestamp: performance.now()
-        });
-    }
+    // Note: Les événements legacy (DOWN) ont été supprimés car MULTITOUCH_DOWN
+    // gère maintenant à la fois le single touch et le multitouch
 }
 
 bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false });
@@ -697,11 +808,23 @@ bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false })
 function handleTouchEnd(event) {
     event.preventDefault();
 
+    // CRITIQUE: Annuler tout MULTITOUCH_MOVE en attente pour éviter le bug "sticky touch"
+    // Si un touchmove a programmé un requestAnimationFrame qui n'a pas encore été exécuté,
+    // on doit l'empêcher de traiter les anciennes données de touch
+    latestTouchData = null;
+
     const endedTouches = convertTouchListToCoords(event.changedTouches);
     endedTouches.forEach(touch => activeTouches.delete(touch.id));
 
     const allTouches = convertTouchListToCoords(event.touches);
     const action = event.type === 'touchend' ? 'MULTITOUCH_UP' : 'MULTITOUCH_CANCEL';
+
+    // DEBUG: Logs pour MULTITOUCH_UP/CANCEL
+    console.log('[' + action + '] event.changedTouches.length:', event.changedTouches.length);
+    console.log('[' + action + '] event.touches.length:', event.touches.length);
+    console.log('[' + action + '] endedTouches:', JSON.stringify(endedTouches));
+    console.log('[' + action + '] allTouches:', JSON.stringify(allTouches));
+    console.log('[' + action + '] activeTouches.size:', activeTouches.size);
 
     // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
@@ -711,15 +834,8 @@ function handleTouchEnd(event) {
         timestamp: performance.now()
     });
 
-    // Gérer la rétrocompatibilité pour le single-touch
-    if (allTouches.length === 0 && endedTouches.length > 0) {
-        demuxDecodeWorker.postMessage({
-            action: "UP",
-            X: endedTouches[0].x,
-            Y: endedTouches[0].y,
-            timestamp: performance.now()
-        });
-    }
+    // Note: Les événements legacy (UP) ont été supprimés car MULTITOUCH_UP
+    // gère maintenant à la fois le single touch et le multitouch
 }
 
 bodyElement.addEventListener('touchend', handleTouchEnd, { passive: false });
@@ -730,43 +846,47 @@ bodyElement.addEventListener('touchcancel', handleTouchEnd, { passive: false });
  * N'envoie que le dernier événement tactile avant le prochain rendu du navigateur
  */
 function processTouchMove() {
-    if (!latestTouchEvent) {
+    if (!latestTouchData) {
         touchMovePending = false;
         return;
     }
 
-    const movingTouches = convertTouchListToCoords(latestTouchEvent.touches);
-    
+    const movingTouches = latestTouchData.touches;
+    const timestamp = latestTouchData.timestamp;
+
     // Mettre à jour le suivi des touches actives
     movingTouches.forEach(touch => {
         activeTouches.set(touch.id, touch);
     });
 
+    // DEBUG: Logs pour MULTITOUCH_MOVE
+    console.log('[MULTITOUCH_MOVE] movingTouches.length:', movingTouches.length);
+    console.log('[MULTITOUCH_MOVE] movingTouches:', JSON.stringify(movingTouches));
+    console.log('[MULTITOUCH_MOVE] activeTouches.size:', activeTouches.size);
+
     // Envoyer l'événement multitouch optimisé
     demuxDecodeWorker.postMessage({
         action: "MULTITOUCH_MOVE",
         touches: movingTouches,
-        timestamp: performance.now()
+        allTouches: movingTouches,  // CRUCIAL pour le multitouch en binaire !
+        timestamp: timestamp
     });
 
-    // Rétrocompatibilité : envoyer l'ancien format si une seule touche est active
-    if (movingTouches.length === 1) {
-        demuxDecodeWorker.postMessage({
-            action: "DRAG",
-            X: movingTouches[0].x,
-            Y: movingTouches[0].y,
-            timestamp: performance.now()
-        });
-    }
+    // Note: Les événements legacy (DRAG) ont été supprimés car MULTITOUCH_MOVE
+    // gère maintenant à la fois le single touch et le multitouch
 
-    latestTouchEvent = null;
+    latestTouchData = null;
     touchMovePending = false;
 }
 
 bodyElement.addEventListener('touchmove', (event) => {
-    // Stocker le dernier événement pour le traitement
-    latestTouchEvent = event;
-    
+    // Convertir les données tactiles IMMÉDIATEMENT pour éviter la mutation de l'événement
+    // (le navigateur peut réutiliser l'objet TouchEvent pour des raisons de performance)
+    latestTouchData = {
+        touches: convertTouchListToCoords(event.touches),
+        timestamp: performance.now()
+    };
+
     // Si une mise à jour n'est pas déjà en attente, en programmer une
     if (!touchMovePending) {
         touchMovePending = true;
@@ -813,6 +933,7 @@ window.simulateMultitouch = function(testType = 'basic') {
             demuxDecodeWorker.postMessage({
                 action: "MULTITOUCH_MOVE",
                 touches: movedTouches,
+                allTouches: movedTouches,
                 timestamp: performance.now()
             });
         }, 500);
@@ -860,6 +981,7 @@ window.simulateMultitouch = function(testType = 'basic') {
             demuxDecodeWorker.postMessage({
                 action: "MULTITOUCH_MOVE",
                 touches: pinchTouches,
+                allTouches: pinchTouches,
                 timestamp: performance.now()
             });
             

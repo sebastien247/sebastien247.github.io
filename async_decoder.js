@@ -1,4 +1,5 @@
 importScripts("Decoder.js");
+importScripts("binary_touch_protocol.js");
 
 // ========== Constants and Variable Declarations ==========
 
@@ -16,6 +17,45 @@ let pendingFrames = [],
     firstVideoFrameReceived = false; // Flag to track first video frame
 
 const texturePool = [];
+
+// ========== WebSocket Reconnection Management ==========
+let isReconnecting = false; // Flag pour éviter les tentatives de reconnexion multiples
+let reconnectionAttempt = 0; // Compteur de tentatives de reconnexion
+let reconnectionTimeout = null; // Référence au timeout de reconnexion
+const MAX_RECONNECTION_ATTEMPTS = 5; // Nombre maximum de tentatives avant abandon
+const BASE_RECONNECTION_DELAY = 2000; // Délai de base en ms (2 secondes)
+const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
+
+// ========== Binary Touch Protocol ==========
+/**
+ * COMPRESSION BINAIRE DES TOUCH EVENTS
+ *
+ * Les événements tactiles (MULTITOUCH_DOWN, MULTITOUCH_MOVE, MULTITOUCH_UP)
+ * sont automatiquement encodés en format binaire avant envoi au serveur.
+ *
+ * Avantages:
+ * - Réduction de ~90% de la bande passante (120 bytes → 12 bytes)
+ * - Latence réduite sur gestures rapides
+ *
+ * Format binaire:
+ * [1 byte: action] [1 byte: count] [6 bytes par touch] [4 bytes: timestamp delta]
+ *
+ * Pour activer les logs debug: Changer BINARY_TOUCH_DEBUG à true ci-dessous
+ */
+
+const BINARY_TOUCH_DEBUG = true; // Mettre à true pour voir les statistiques de compression
+
+// Instance de l'encodeur binaire pour les touch events
+let binaryTouchEncoder = null;
+
+// Initialiser l'encodeur au premier usage
+function initBinaryTouchEncoder() {
+    if (!binaryTouchEncoder) {
+        binaryTouchEncoder = new BinaryTouchEncoder();
+        console.log('[BinaryTouch] Encoder initialized - Binary touch compression enabled');
+        console.log('[BinaryTouch] Expected compression: ~90% (120 bytes → 12 bytes per event)');
+    }
+}
 
 // ========== Utility Functions ==========
 
@@ -346,7 +386,11 @@ function heartbeat() {
     }
 
     lastheart = Date.now();
-    socket.sendObject({action: "PING"});
+    let pingPayload = {action: "PING"};
+    if (typeof frameRate !== 'undefined') {
+        pingPayload.fps = frameRate;
+    }
+    socket.sendObject(pingPayload);
 }
 
 
@@ -397,13 +441,18 @@ function handleMessage(event) {
 
 function handleVideoMessage(dat){
 
+    // 🚨 AMÉLIORATION: Réinitialiser le watchdog sur TOUT paquet vidéo reçu
+    // Cela prouve que la connexion est active même si le PING/PONG spécifique saute
+    if (pongtimer !== null) clearTimeout(pongtimer);
+    pongtimer = setTimeout(noPong, 3000);
+
     let unittype = (dat[4] & 0x1f);
     if (unittype === 31)
     {
-        if (pongtimer !== null)
+        /*if (pongtimer !== null)
             clearTimeout(pongtimer);
 
-        pongtimer=setTimeout(noPong,3000);
+        pongtimer=setTimeout(noPong,3000);*/
         return;
     }
     if (unittype === 1 || unittype === 5) {
@@ -428,6 +477,22 @@ function handleVideoMessage(dat){
         separateNalUnits(dat).forEach(headerMagic)
 }
 
+/**
+ * Réinitialise les compteurs de reconnexion (appelé au démarrage initial)
+ * Permet de réessayer après avoir atteint la limite de tentatives
+ */
+function resetReconnectionState() {
+    isReconnecting = false;
+    reconnectionAttempt = 0;
+
+    if (reconnectionTimeout) {
+        clearTimeout(reconnectionTimeout);
+        reconnectionTimeout = null;
+    }
+
+    console.log('🔄 Reconnection state reset');
+}
+
 function startSocket() {
     socket = new WebSocket(`wss://taada.top:${port}`);
     socket.sendObject = (obj) => {
@@ -443,6 +508,18 @@ function startSocket() {
     socket.binaryType = "arraybuffer";
     socket.addEventListener('open', () => {
         socket.binaryType = "arraybuffer";
+
+        // 🎉 Connexion réussie! Réinitialiser les compteurs de reconnexion
+        isReconnecting = false;
+        reconnectionAttempt = 0;
+
+        // Annuler tout timeout de reconnexion en attente
+        if (reconnectionTimeout) {
+            clearTimeout(reconnectionTimeout);
+            reconnectionTimeout = null;
+        }
+
+        console.log('✅ WebSocket connected successfully');
 
         // Notify main thread: Socket connected
         self.postMessage({
@@ -466,7 +543,7 @@ function startSocket() {
         }, 1000);
 
         if (heart === 0) {
-            heart = setInterval(heartbeat, 200);
+            heart = setInterval(heartbeat, 1000);
             setInterval(updateFrameCounter, 1000)
         }
     });
@@ -477,22 +554,86 @@ function startSocket() {
 }
 
 function socketClose(event) {
-    console.log('Error: Socket Closed ', event)
+    console.log('Error: Socket Closed ', event);
 
-    // 🚨 NOUVEAU: Ne pas reconnecter si le serveur est en shutdown
+    // 🚨 PROTECTION #1: Ne pas reconnecter si le serveur est en shutdown
     if (isServerShuttingDown) {
         console.log('Server is shutting down, not reconnecting');
         return;
     }
 
-    // 🚨 NOUVEAU: Notifier le thread principal pour cacher le message waiting
-    self.postMessage({connectionLost: true, reason: event.reason || "Connection closed"});
-    self.postMessage({error: "Lost connection to phone, trying to reconnect"});
+    // 🚨 PROTECTION #2: Éviter les tentatives de reconnexion multiples simultanées
+    // Cette vérification empêche la boucle infinie quand 'error' ET 'close' se déclenchent
+    if (isReconnecting) {
+        console.log('Reconnection already in progress, ignoring duplicate event');
+        return;
+    }
 
-    // Attendre un peu avant de reconnecter
-    setTimeout(() => {
-        startSocket();
-    }, 2000);
+    // 🚨 PROTECTION #3: Limiter le nombre de tentatives de reconnexion
+    if (reconnectionAttempt >= MAX_RECONNECTION_ATTEMPTS) {
+        console.error(`❌ Maximum reconnection attempts (${MAX_RECONNECTION_ATTEMPTS}) reached. Giving up.`);
+
+        // Notifier le thread principal de l'échec définitif
+        self.postMessage({
+            error: `Failed to reconnect after ${MAX_RECONNECTION_ATTEMPTS} attempts. Please restart the service.`,
+            connectionFailed: true
+        });
+
+        // Afficher un message d'erreur permanent
+        self.postMessage({
+            connectionLost: true,
+            reason: "Maximum reconnection attempts reached",
+            permanent: true
+        });
+
+        return;
+    }
+
+    // Marquer qu'une reconnexion est en cours
+    isReconnecting = true;
+    reconnectionAttempt++;
+
+    // 🚨 AMÉLIORATION: Calculer le délai avec backoff exponentiel
+    // Formule: min(BASE_DELAY * 2^(attempt-1), MAX_DELAY)
+    // Exemple: 2s, 4s, 8s, 16s, 30s (plafonné)
+    const exponentialDelay = Math.min(
+        BASE_RECONNECTION_DELAY * Math.pow(2, reconnectionAttempt - 1),
+        MAX_RECONNECTION_DELAY
+    );
+
+    console.log(`🔄 Connection lost. Reconnection attempt ${reconnectionAttempt}/${MAX_RECONNECTION_ATTEMPTS} in ${exponentialDelay}ms`);
+
+    // 🚨 NOUVEAU: Notifier le thread principal de la perte de connexion
+    self.postMessage({
+        connectionLost: true,
+        reason: event.reason || "Connection closed",
+        reconnectionAttempt: reconnectionAttempt,
+        maxAttempts: MAX_RECONNECTION_ATTEMPTS,
+        nextRetryIn: exponentialDelay
+    });
+
+    // Afficher un message informatif
+    self.postMessage({
+        error: `Lost connection to phone, trying to reconnect (attempt ${reconnectionAttempt}/${MAX_RECONNECTION_ATTEMPTS})...`
+    });
+
+    // Attendre avant de reconnecter (backoff exponentiel)
+    reconnectionTimeout = setTimeout(() => {
+        console.log(`🚀 Attempting reconnection #${reconnectionAttempt}`);
+
+        try {
+            startSocket();
+        } catch (error) {
+            console.error('❌ Failed to start socket during reconnection:', error);
+            // Réinitialiser le flag et permettre une nouvelle tentative
+            isReconnecting = false;
+
+            // Tenter à nouveau si on n'a pas atteint la limite
+            if (reconnectionAttempt < MAX_RECONNECTION_ATTEMPTS) {
+                socketClose(event); // Relancer le processus
+            }
+        }
+    }, exponentialDelay);
 }
 
 async function isWebCodecsWorkingWithDecode() {
@@ -531,8 +672,59 @@ function messageHandler(message) {
     if (message.data.action === 'NIGHT') {
         night = message.data.value;
     }
+
     if (socket.readyState === WebSocket.OPEN) {
-        socket.sendObject(message.data);
+        const action = message.data.action;
+
+        // Encoder les événements MULTITOUCH en binaire
+        if (action === 'MULTITOUCH_DOWN' || action === 'MULTITOUCH_MOVE' || action === 'MULTITOUCH_UP' || action === 'MULTITOUCH_CANCEL') {
+            initBinaryTouchEncoder();
+
+            // Extraire les touches et allTouches du message
+            const touches = message.data.touches || [];
+            const allTouches = message.data.allTouches || [];
+            const timestamp = message.data.timestamp || performance.now();
+
+            // Si aucune touche, ne rien envoyer
+            if (touches.length === 0) {
+                console.warn('[BinaryTouch] No touches to send for action:', action);
+                return;
+            }
+
+            try {
+                // Encoder en binaire avec TOUS les paramètres (touches, allTouches, timestamp)
+                const binaryData = binaryTouchEncoder.encode(action, touches, allTouches, timestamp);
+
+                // Vérifier que l'encodage a réussi
+                if (!binaryData) {
+                    console.error('[BinaryTouch] Encoding failed - falling back to JSON');
+                    socket.sendObject(message.data);
+                    return;
+                }
+
+                // Envoyer directement le buffer binaire
+                socket.send(binaryData);
+
+                // Log pour debug (contrôlé par BINARY_TOUCH_DEBUG)
+                if (BINARY_TOUCH_DEBUG) {
+                    const jsonSize = JSON.stringify(message.data).length;
+                    console.log(`[BinaryTouch] Sent ${action}:`, {
+                        touchCount: touches.length,
+                        allTouchesCount: allTouches.length,
+                        binarySize: binaryData.byteLength + ' bytes',
+                        jsonSize: jsonSize + ' bytes',
+                        compression: ((1 - binaryData.byteLength / jsonSize) * 100).toFixed(1) + '% saved'
+                    });
+                }
+            } catch (error) {
+                console.error('[BinaryTouch] Encoding error:', error);
+                // Fallback to JSON si erreur
+                socket.sendObject(message.data);
+            }
+        } else {
+            // Autres messages: envoyer en JSON comme avant
+            socket.sendObject(message.data);
+        }
     }
 }
 
