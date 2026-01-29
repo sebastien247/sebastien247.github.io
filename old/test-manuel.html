@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TesAA Client - Test Manuel</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #1e1e1e;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            flex: 1;
+        }
+        
+        .panel {
+            background-color: #2d2d2d;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .control-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+            transition: background-color 0.2s;
+        }
+        
+        button:hover {
+            background-color: #2980b9;
+        }
+        
+        button:disabled {
+            background-color: #95a5a6;
+            cursor: not-allowed;
+        }
+        
+        .button-container {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .status-panel {
+            min-height: 100px;
+        }
+        
+        .log-panel {
+            flex: 1;
+            min-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            white-space: pre-wrap;
+            padding: 10px;
+            background-color: #333;
+            border-radius: 4px;
+        }
+        
+        .stats-panel {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        
+        .stat-box {
+            background-color: #333;
+            padding: 15px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 5px 0;
+        }
+        
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.8;
+        }
+        
+        canvas {
+            width: 100%;
+            height: 300px;
+            background-color: black;
+            margin-top: 20px;
+            border-radius: 8px;
+        }
+        
+        .mode-toggle {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+        }
+        
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>TesAA Client - Test Manuel</h1>
+        <p>Page de test avec déclenchement manuel des étapes</p>
+    </header>
+    
+    <div class="container">
+        <div class="panel control-panel">
+            <h2>Contrôles</h2>
+            <div class="button-container">
+                <button id="getPortsBtn">1. Récupérer les ports</button>
+                <button id="connectBtn" disabled>2. Connecter aux sockets et décoder</button>
+                <div class="mode-toggle">
+                    <span>Mode de décodage:</span>
+                    <label class="switch">
+                        <input type="checkbox" id="decodeMode" checked>
+                        <span class="slider"></span>
+                    </label>
+                    <span id="decodeModeLabel">Web (direct)</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="panel status-panel">
+            <h2>Statut</h2>
+            <div id="status">En attente...</div>
+        </div>
+        
+        <canvas id="videoCanvas"></canvas>
+        
+        <div class="panel stats-panel">
+            <div class="stat-box">
+                <div class="stat-label">FPS</div>
+                <div class="stat-value" id="fpsValue">0</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Temps décodage</div>
+                <div class="stat-value" id="decodeTime">0 ms</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Frames reçues</div>
+                <div class="stat-value" id="framesReceived">0</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Frames envoyées</div>
+                <div class="stat-value" id="framesSent">0</div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h2>Logs</h2>
+            <div class="log-panel" id="logPanel"></div>
+        </div>
+    </div>
+    
+    <script>
+        // Éléments DOM
+        const getPortsBtn = document.getElementById('getPortsBtn');
+        const connectBtn = document.getElementById('connectBtn');
+        const statusEl = document.getElementById('status');
+        const logPanel = document.getElementById('logPanel');
+        const canvasElement = document.getElementById('videoCanvas');
+        const decodeModeToggle = document.getElementById('decodeMode');
+        const decodeModeLabel = document.getElementById('decodeModeLabel');
+        
+        // Éléments statistiques
+        const fpsValueElement = document.getElementById('fpsValue');
+        const decodeTimeElement = document.getElementById('decodeTime');
+        const framesReceivedElement = document.getElementById('framesReceived');
+        const framesSentElement = document.getElementById('framesSent');
+        
+        // Configuration
+        const supportedWebCodec = true;
+        const baseUrl = 'https://taada.top:8081';
+        let demuxDecodeWorker = null;
+        let offscreen = null;
+        let socketPort = null;
+        let isDirectMode = true;
+        
+        // Fonction de log avec timestamp
+        function log(message, isError = false) {
+            const timestamp = new Date().toLocaleTimeString();
+            const formattedMessage = `[${timestamp}] ${message}`;
+            
+            const messageEl = document.createElement('div');
+            messageEl.textContent = formattedMessage;
+            if (isError) {
+                messageEl.style.color = '#ff6b6b';
+            }
+            
+            logPanel.appendChild(messageEl);
+            logPanel.scrollTop = logPanel.scrollHeight;
+            
+            console.log(formattedMessage);
+        }
+        
+        // Étape 1: Récupérer les ports
+        getPortsBtn.addEventListener('click', async () => {
+            try {
+                log('Récupération des ports...');
+                statusEl.textContent = 'Récupération des ports en cours...';
+                getPortsBtn.disabled = true;
+                
+                const urlToFetch = `${baseUrl}/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
+                
+                const response = await fetch(urlToFetch);
+                const data = await response.text();
+                
+                if (!isJson(data)) {
+                    throw new Error("Le serveur n'a pas renvoyé un JSON valide. Vérifiez que TeslAA 2.3+ est en cours d'exécution.");
+                }
+                
+                const json = JSON.parse(data);
+                
+                if (json.hasOwnProperty("wrongresolution")) {
+                    throw new Error("La résolution du navigateur ne correspond pas à celle de l'application.");
+                }
+                
+                socketPort = json.port;
+                log(`Ports récupérés avec succès: ${socketPort}`);
+                log(`Résolution: ${json.resolution === 2 ? '1080p' : json.resolution === 1 ? '720p' : '480p'}`);
+                
+                // Préparation du canvas avec les dimensions correctes
+                if (json.resolution === 2) {
+                    canvasElement.width = 1920;
+                    canvasElement.height = 1080;
+                } else if (json.resolution === 1) {
+                    canvasElement.width = 1280;
+                    canvasElement.height = 720;
+                } else {
+                    canvasElement.width = 800;
+                    canvasElement.height = 480;
+                }
+                
+                statusEl.textContent = 'Ports récupérés avec succès. Prêt à connecter.';
+                connectBtn.disabled = false;
+            } catch (error) {
+                log(`Erreur lors de la récupération des ports: ${error.message}`, true);
+                statusEl.textContent = 'Erreur: ' + error.message;
+                getPortsBtn.disabled = false;
+            }
+        });
+        
+        // Étape 2: Connecter aux sockets et décoder
+        connectBtn.addEventListener('click', () => {
+            try {
+                log('Initialisation du décodeur...');
+                statusEl.textContent = 'Connexion aux sockets en cours...';
+                connectBtn.disabled = true;
+                
+                // Initialiser le worker de décodage
+                demuxDecodeWorker = new Worker("./async_decoder.js");
+                
+                // Configurer les écouteurs d'événements
+                setupWorkerListeners();
+                
+                // Transférer le canvas au worker
+                offscreen = canvasElement.transferControlToOffscreen();
+                
+                // Initialiser le décodeur avec le canvas
+                demuxDecodeWorker.postMessage({
+                    canvas: offscreen, 
+                    port: socketPort, 
+                    action: 'INIT', 
+                    appVersion: 23, 
+                    broadway: false
+                }, [offscreen]);
+                
+                log('Décodeur initialisé, connexion aux sockets établie');
+                statusEl.textContent = 'Connexion établie. Décodage en cours...';
+            } catch (error) {
+                log(`Erreur lors de la connexion: ${error.message}`, true);
+                statusEl.textContent = 'Erreur: ' + error.message;
+                connectBtn.disabled = false;
+            }
+        });
+        
+        // Configurer les écouteurs d'événements pour le worker
+        function setupWorkerListeners() {
+            demuxDecodeWorker.addEventListener("message", function (e) {
+                if (e.data.hasOwnProperty('error')) {
+                    log(`Erreur du décodeur: ${e.data.error}`, true);
+                    statusEl.textContent = 'Erreur: ' + e.data.error;
+                    return;
+                }
+                
+                if (e.data.hasOwnProperty('warning')) {
+                    log(`Avertissement: ${e.data.warning}`);
+                }
+                
+                // Mise à jour des statistiques
+                if (e.data.hasOwnProperty('fps')) {
+                    fpsValueElement.textContent = e.data.fps || 0;
+                }
+                
+                if (e.data.hasOwnProperty('avgDecodeTime')) {
+                    decodeTimeElement.textContent = `${e.data.avgDecodeTime || 0} ms`;
+                }
+                
+                if (e.data.hasOwnProperty('received') && e.data.hasOwnProperty('sent')) {
+                    framesReceivedElement.textContent = e.data.received || 0;
+                    framesSentElement.textContent = e.data.sent || 0;
+                }
+            });
+        }
+        
+        // Gestion du basculement de mode de décodage
+        decodeModeToggle.addEventListener('change', function() {
+            isDirectMode = this.checked;
+            decodeModeLabel.textContent = isDirectMode ? 'Web (direct)' : 'Android (décodé)';
+            
+            if (demuxDecodeWorker) {
+                log(`Basculement vers le mode de décodage ${isDirectMode ? 'Web (direct)' : 'Android (décodé)'}`);
+                
+                // Envoyer la commande au worker
+                demuxDecodeWorker.postMessage({
+                    action: 'TOGGLE_DIRECT_MODE',
+                    value: isDirectMode
+                });
+            }
+        });
+        
+        // Fonction utilitaire pour vérifier si une chaîne est un JSON valide
+        function isJson(str) {
+            if (typeof str !== 'string') return false;
+            try {
+                JSON.parse(str);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+        
+        // Initialisation
+        log('Page de test initialisée');
+    </script>
+</body>
+</html> 

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Test Simple TesAA</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        button { padding: 10px; margin: 10px 0; }
+        #result { border: 1px solid #ccc; padding: 10px; min-height: 50px; margin-top: 10px; }
+        .warning { color: orange; font-weight: bold; }
+        .steps { background-color: #f5f5f5; padding: 10px; margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <h1>Test Simple de Connexion TesAA</h1>
+    
+    <div class="warning">
+        <p>⚠️ Attention: L'erreur "ERR_CERT_AUTHORITY_INVALID" est normale, car il s'agit d'un certificat auto-signé.</p>
+    </div>
+    
+    <div class="steps">
+        <h2>Pour contourner l'erreur de certificat:</h2>
+        <ol>
+            <li>Cliquez sur le lien: <a href="https://taada.top:8081/" target="_blank">https://taada.top:8081/</a></li>
+            <li>Dans Chrome: cliquez sur "Avancé" puis "Continuer vers le site"</li>
+            <li>Dans Firefox: cliquez sur "Avancé" puis "Accepter le risque et continuer"</li>
+            <li>Revenez sur cette page et testez à nouveau la connexion</li>
+        </ol>
+    </div>
+    
+    <button onclick="testConnection()">Tester la connexion</button>
+    
+    <div id="result"></div>
+    
+    <script>
+        function testConnection() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = "Tentative de connexion à taada.top:8081...";
+            
+            fetch('https://taada.top:8081/getsocketport?w=1920&h=1080&webcodec=true')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Statut HTTP: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    resultDiv.innerHTML = `<p>Connexion réussie!</p><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                })
+                .catch(error => {
+                    resultDiv.innerHTML = `<p>Erreur: ${error.message}</p>`;
+                    if (error.message.includes('Failed to fetch')) {
+                        resultDiv.innerHTML += `
+                            <p>Cette erreur peut être due au certificat auto-signé.</p>
+                            <p>Suivez les étapes ci-dessus pour accepter le certificat.</p>`;
+                    }
+                    console.error('Erreur:', error);
+                });
+        }
+    </script>
+</body>
+</html> 

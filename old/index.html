@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>TaaDa | Tesla Android Auto - Driver Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+    <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/>
+    <link rel="icon" href="favicon.ico"/>
+    <link rel="stylesheet" href="styles.css">
+    <meta name="HandheldFriendly" content="true"/>
+</head>
+
+<body id="body">
+    <canvas></canvas>
+
+    <!-- New waiting message that will be shown after socket port is retrieved -->
+    <div id="waiting-message" class="waiting-message" style="display: none;">
+        <p id="connection-status-text">Connecting...</p>
+        <div class="progress-steps">
+            <div class="step" id="step-1">
+                <span class="step-number">1</span>
+                <span class="step-label">Server</span>
+            </div>
+            <div class="step" id="step-2">
+                <span class="step-number">2</span>
+                <span class="step-label">Socket</span>
+            </div>
+            <div class="step" id="step-3">
+                <span class="step-number">3</span>
+                <span class="step-label">Stream</span>
+            </div>
+        </div>
+        <div class="loading-indicator"></div>
+    </div>
+
+    <!-- 🚨 NOUVEAU: Overlay pour les messages d'erreur (toujours au-dessus) -->
+    <div id="error-overlay" class="error-overlay" style="display: none;">
+        <div class="error-content">
+            <div class="error-icon">⚠️</div>
+            <p id="error-message"></p>
+            <p class="error-subtitle">Please check your connection and try again.</p>
+        </div>
+    </div>
+
+    <div class="tesla-container" id="info">
+        <div class="tesla-header">
+            <h1>TaaDa</h1>
+            <h2>Tesla Android Auto - Driver Assistant</h2>
+        </div>
+        
+        <div class="tesla-content">
+            <div class="connection-status">
+                <div class="status-icon"></div>
+                <div class="status-message">
+                    <p>Please connect to your phone's hotspot and make sure TaaDa is running on the phone...</p>
+                    <p class="note">Please make sure you have updated your TaaDa app to the latest version</p>
+                </div>
+            </div>
+            
+            <div class="notification-card upgrade" style="display: flex;">
+                <div class="notification-content">
+                    <h3>🚀 We're Upgrading!</h3>
+                    <p>We're making TaaDa faster and more reliable. During <strong>January 28-30</strong>, you may experience brief connection hiccups.</p>
+                    <p class="action-required" style="margin-top: 10px;">📲 Please update the TaaDa app when the new version is available on Google Play Store.</p>
+                    <p style="margin-top: 8px; font-size: 0.9em; color: #ccc;">Thank you for your patience – great things are loading... ✨</p>
+                </div>
+            </div>
+            
+            <div class="download-section">
+                <h3>Don't have the app yet?</h3>
+                <div class="download-options">
+                    <div class="qr-code">
+                        <a href="https://play.google.com/store/apps/details?id=fr.sd.taada" target="_blank" class="qr-code-button">
+                            <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=https://play.google.com/store/apps/details?id=fr.sd.taada" alt="TaaDa App QR Code">
+                        </a>
+                    </div>
+                    <div class="play-store">
+                        <a href="https://play.google.com/store/apps/details?id=fr.sd.taada" target="_blank" class="play-store-button">
+                            <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play">
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <p style="font-size: 0.8em; color: #ccc; text-align: center; margin-top: 20px;">If you encounter any problems, please contact me at <a id="contact-link" href="#" style="color: #ccc; cursor: pointer;">[click to reveal email]</a></p>
+        </div>
+        
+        <div class="tesla-footer">
+            <span id="log"></span>
+            <span id="warning"></span>
+        </div>
+    </div>
+    
+</body>
+<script src="pcm-player.min.js"></script>
+<script src="main.js"></script>
+</html>

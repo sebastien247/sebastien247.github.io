@@ -1,0 +1,502 @@
+* {
+    font-family: 'Montserrat', sans-serif;
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    position: absolute;
+    /*display: flex;*/
+    justify-content: center;
+    /*align-items: center;*/
+    background: #000;
+    color: white;
+    overscroll-behavior-x: none;
+}
+
+canvas, video {
+    margin: 0 auto;
+}
+
+/* Waiting message styling */
+.waiting-message {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.8);
+    z-index: 1;
+    color: white;
+}
+
+/* 🚨 NOUVEAU: Error overlay styling - Toujours au-dessus */
+.error-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.9);
+    z-index: 9999;
+    pointer-events: none;
+}
+
+.error-content {
+    padding: 40px 60px;
+    max-width: 600px;
+    text-align: center;
+    /* Remove red background
+    background: rgba(232, 33, 39, 0.95);
+    border: 3px solid #E82127;
+    border-radius: 15px;
+    box-shadow: 0 0 30px rgba(232, 33, 39, 0.7), 0 0 60px rgba(232, 33, 39, 0.4);
+    animation: errorPulse 2s ease-in-out infinite;*/
+}
+
+.error-icon {
+    font-size: 4em;
+    margin-bottom: 20px;
+    animation: shake 0.5s ease-in-out infinite;
+}
+
+.error-content p {
+    font-size: 1.8em;
+    font-weight: 600;
+    color: white;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    line-height: 1.4;
+}
+
+.error-subtitle {
+    font-size: 1.2em;
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.8);
+    margin-top: 15px;
+    text-shadow: 0 1px 5px rgba(0, 0, 0, 0.3);
+}
+
+@keyframes errorPulse {
+    0%, 100% {
+        transform: scale(1);
+        box-shadow: 0 0 30px rgba(165, 42, 42, 0.7), 0 0 60px rgba(165, 42, 42, 0.4);
+    }
+    50% {
+        transform: scale(1.02);
+        box-shadow: 0 0 40px rgba(165, 42, 42, 0.9), 0 0 80px rgba(165, 42, 42, 0.6);
+    }
+}
+
+@keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-5px) rotate(-5deg); }
+    75% { transform: translateX(5px) rotate(5deg); }
+}
+
+.waiting-message p {
+    font-size: 1.8em;
+    margin-bottom: 20px;
+    color: #E82127;
+    text-shadow: 0 0 10px rgba(232, 33, 39, 0.3);
+}
+
+/* Progress steps container */
+.progress-steps {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 30px;
+    margin: 30px 0;
+}
+
+/* Individual step */
+.step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    opacity: 0.4;
+    transition: all 0.4s ease;
+}
+
+.step-number {
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4em;
+    font-weight: bold;
+    border: 3px solid rgba(255, 255, 255, 0.3);
+    transition: all 0.4s ease;
+}
+
+.step-label {
+    font-size: 0.9em;
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 500;
+    transition: all 0.4s ease;
+}
+
+/* Active step */
+.step.active {
+    opacity: 1;
+}
+
+.step.active .step-number {
+    background: #E82127;
+    border-color: #E82127;
+    box-shadow: 0 0 20px rgba(232, 33, 39, 0.6);
+    transform: scale(1.15);
+}
+
+.step.active .step-label {
+    color: #E82127;
+    font-weight: 600;
+}
+
+/* Completed step */
+.step.completed {
+    opacity: 1;
+}
+
+.step.completed .step-number {
+    background: #00C2B1;
+    border-color: #00C2B1;
+    box-shadow: 0 0 15px rgba(0, 194, 177, 0.5);
+}
+
+.step.completed .step-label {
+    color: #00C2B1;
+}
+
+
+.loading-indicator {
+    width: 50px;
+    height: 50px;
+    border: 5px solid rgba(255, 255, 255, 0.2);
+    border-top: 5px solid #E82127;
+    border-radius: 50%;
+    animation: spin 1.5s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.tesla-container {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.8);
+}
+
+.tesla-header {
+    text-align: center;
+    padding: 20px 0;
+}
+
+.tesla-header h1 {
+    font-size: 4em;
+    font-weight: 600;
+    color: #E82127; /* Vibrant Tesla Red */
+    margin-bottom: 10px;
+    text-shadow: 0 0 10px rgba(232, 33, 39, 0.3);
+}
+
+.tesla-header h2 {
+    font-size: 1.5em;
+    font-weight: 400;
+    color: #ccc;
+}
+
+.tesla-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 50px; /* Increased spacing between elements */
+    padding: 30px;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.connection-status {
+    display: flex;
+    align-items: center;
+    background: rgba(26, 27, 31, 0.9);
+    border-radius: 12px;
+    padding: 25px;
+    width: 100%;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+    border-left: 6px solid #00B2FF; /* More vibrant Tesla Blue */
+    transform: translateZ(0);
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.connection-status:hover {
+    transform: translateY(-5px) translateZ(0);
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+}
+
+.status-icon {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #00B2FF; /* More vibrant Tesla Blue */
+    margin-right: 20px;
+    box-shadow: 0 0 15px #00B2FF;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(0, 178, 255, 0.7);
+    }
+    70% {
+        transform: scale(1);
+        box-shadow: 0 0 0 15px rgba(0, 178, 255, 0);
+    }
+    100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(0, 178, 255, 0);
+    }
+}
+
+.status-message {
+    flex: 1;
+}
+
+.status-message p {
+    font-size: 1.3em;
+    margin-bottom: 8px;
+}
+
+.status-message .note {
+    font-size: 0.9em;
+    color: #aaa;
+}
+
+.notification-card {
+    display: flex;
+    align-items: flex-start;
+    background: rgba(26, 27, 31, 0.9);
+    border-radius: 12px;
+    padding: 25px;
+    width: 100%;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+    border-left: 6px solid #f9a825; /* Warning yellow */
+    transform: translateZ(0);
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.notification-card:hover {
+    transform: translateY(-5px) translateZ(0);
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+}
+
+.notification-icon {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 40px;
+    height: 40px;
+    margin-right: 15px;
+    color: #f9a825;
+}
+
+.notification-icon svg {
+    width: 30px;
+    height: 30px;
+}
+
+.notification-content h3 {
+    font-size: 1.3em;
+    margin-bottom: 10px;
+    color: #f9a825;
+}
+
+.notification-content p {
+    font-size: 1em;
+    line-height: 1.5;
+}
+
+/* Upgrade/Maintenance Card Variant */
+.notification-card.upgrade {
+    border-left-color: #2196F3;
+    background: linear-gradient(135deg, rgba(33, 150, 243, 0.15), rgba(33, 150, 243, 0.05));
+}
+
+.notification-card.upgrade .notification-content h3 {
+    color: #2196F3;
+}
+
+.notification-card.upgrade .notification-content .action-required {
+    color: #ff9800;
+    font-weight: 600;
+}
+
+.download-section {
+    background: rgba(26, 27, 31, 0.9);
+    border-radius: 12px;
+    padding: 30px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+    border-left: 6px solid #00C2B1; /* Vibrant Tesla Green */
+    background-image: radial-gradient(rgba(0, 194, 177, 0.15) 1px, transparent 1px);
+    background-size: 20px 20px;
+    position: relative;
+    overflow: hidden;
+    transform: translateZ(0);
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.download-section:hover {
+    transform: translateY(-5px) translateZ(0);
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+}
+
+.download-section::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 100%;
+    width: 40%;
+    background: linear-gradient(to left, rgba(0, 194, 177, 0.15), transparent);
+    pointer-events: none;
+}
+
+.download-section h3 {
+    font-size: 1.8em;
+    margin-bottom: 30px;
+    color: #00C2B1; /* Vibrant Tesla Green */
+    position: relative;
+    display: inline-block;
+    text-shadow: 0 0 10px rgba(0, 194, 177, 0.3);
+}
+
+.download-section h3::after {
+    content: "";
+    position: absolute;
+    bottom: -8px;
+    left: 20%;
+    width: 60%;
+    height: 3px;
+    background: #00C2B1;
+    box-shadow: 0 0 5px rgba(0, 194, 177, 0.5);
+}
+
+.download-options {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 50px;
+    margin-top: 20px;
+}
+
+.qr-code {
+    background: white;
+    padding: 15px;
+    border-radius: 12px;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+    box-shadow: 0 10px 25px rgba(0, 194, 177, 0.3);
+}
+
+.qr-code:hover {
+    transform: translateY(-8px);
+    box-shadow: 0 15px 35px rgba(0, 194, 177, 0.5);
+}
+
+.qr-code img {
+    width: 150px;
+    height: 150px;
+}
+
+.play-store-button {
+    display: inline-block;
+    transition: transform 0.3s ease;
+}
+
+.play-store-button:hover {
+    transform: scale(1.1);
+}
+
+.play-store-button img {
+    height: 70px;
+    filter: drop-shadow(0 5px 15px rgba(0, 0, 0, 0.3));
+}
+
+.tesla-footer {
+    padding: 20px 0;
+    display: flex;
+    justify-content: space-between;
+}
+
+#log {
+    position: absolute;
+    bottom: 0;
+    right: 10px;
+    color: #ffeb00;
+    font-size: 1.4em;
+}
+
+#warning {
+    position: absolute;
+    bottom: 0;
+    right: 10px;
+    font-size: 1.4em;
+    color: #e82127; /* Tesla Red */
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .tesla-content {
+        padding: 10px;
+    }
+    
+    .download-options {
+        flex-direction: column;
+    }
+    
+    .tesla-header h1 {
+        font-size: 2.5em;
+    }
+    
+    .tesla-header h2 {
+        font-size: 1.2em;
+    }
+}
+
+@media (max-height: 700px) {
+    .tesla-content {
+        gap: 15px;
+    }
+    
+    .connection-status, .notification-card, .download-section {
+        padding: 15px;
+    }
+}
