@@ -149,7 +149,8 @@
     
     display: flex;
     justify-content: center;
-    align-items: center;
+    align-items: flex-start; /* Align to top */
+    padding-top: 40px; /* Add some space from top */
     
     background: rgba(0, 0, 0, 0);
     backdrop-filter: blur(0px);
@@ -174,7 +175,7 @@
     background: rgba(26, 27, 31, 0.98);
     border-radius: 16px;
     width: 100%;
-    max-width: 480px;
+    max-width: 800px; /* Wider for 2-column layout */
     max-height: 90vh;
     overflow-y: auto;
     
@@ -229,10 +230,32 @@
 
 .feedback-dialog-form {
     padding: 24px;
+    display: grid !important;
+    grid-template-columns: 1fr 3fr !important; /* Right column 3x wider */
+    grid-template-rows: auto auto;
+    gap: 24px;
+}
+
+/* Left Column Container */
+.feedback-form-left-col {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    grid-column: 1;
+    grid-row: 1;
+}
+
+/* Right Column Container */
+.feedback-form-right-col {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    grid-column: 2;
+    grid-row: 1;
 }
 
 .feedback-form-group {
-    margin-bottom: 20px;
+    margin-bottom: 0; /* Clear default margin as we use gap */
 }
 
 .feedback-form-label {
@@ -281,33 +304,64 @@
     font-weight: 500;
 }
 
-/* Select */
-.feedback-form-select {
-    width: 100%;
-    padding: 12px 16px;
+/* Radio Buttons Group - 2x2 grid for categories */
+.feedback-category-group {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.feedback-radio-option {
+    position: relative;
+    flex: 1 1 auto;
+}
+
+.feedback-radio-input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.feedback-radio-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 16px;
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 10px;
-    color: white;
-    font-family: 'Montserrat', sans-serif;
-    font-size: 1em;
+    border-radius: 20px;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.9em;
+    font-weight: 500;
     cursor: pointer;
     transition: all 0.2s ease;
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23ffffff' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 16px center;
+    white-space: nowrap;
+    user-select: none;
+    text-align: center;
+    height: 100%;
 }
 
-.feedback-form-select:focus {
-    outline: none;
+.feedback-radio-input:checked + .feedback-radio-label {
+    background: #E82127;
     border-color: #E82127;
-    box-shadow: 0 0 0 3px rgba(232, 33, 39, 0.2);
+    color: white;
+    box-shadow: 0 4px 12px rgba(232, 33, 39, 0.3);
 }
 
-.feedback-form-select option {
-    background: #1a1b1f;
+.feedback-radio-input:focus + .feedback-radio-label {
+    box-shadow: 0 0 0 2px rgba(232, 33, 39, 0.4);
+}
+
+.feedback-radio-label:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.3);
     color: white;
+}
+
+.feedback-radio-input:checked + .feedback-radio-label:hover {
+    background: #ff3b41;
+    border-color: #ff3b41;
 }
 
 /* Textarea */
@@ -320,8 +374,9 @@
     color: white;
     font-family: 'Montserrat', sans-serif;
     font-size: 1em;
-    resize: vertical;
-    min-height: 100px;
+    resize: none; /* fix height */
+    min-height: 80px;
+    height: 120px; /* Slightly taller for 2-col layout */
     transition: all 0.2s ease;
 }
 
@@ -371,10 +426,11 @@
     background: rgba(232, 33, 39, 0.15);
     border: 1px solid rgba(232, 33, 39, 0.4);
     border-radius: 8px;
-    padding: 12px 16px;
+    padding: 10px 16px;
     color: #ff6b6b;
     font-size: 0.9em;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
+    grid-column: 1 / -1;
 }
 
 /* Form Actions */
@@ -382,7 +438,8 @@
     display: flex;
     justify-content: flex-end;
     gap: 12px;
-    margin-top: 24px;
+    margin-top: 0;
+    grid-column: 1 / -1; /* Span full width */
 }
 
 .feedback-btn {
@@ -390,7 +447,7 @@
     border-radius: 10px;
     padding: 12px 24px;
     font-family: 'Montserrat', sans-serif;
-    font-size: 1em;
+    font-size: 0.95em;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.2s ease;
@@ -453,21 +510,22 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 48px 24px;
+    padding: 32px 24px;
     text-align: center;
+    min-height: 300px;
 }
 
 .feedback-success-icon {
-    width: 80px;
-    height: 80px;
+    width: 60px;
+    height: 60px;
     border-radius: 50%;
     background: linear-gradient(135deg, #00C2B1, #00a99d);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 2.5em;
+    font-size: 2em;
     color: white;
-    margin-bottom: 24px;
+    margin-bottom: 20px;
     box-shadow: 0 10px 30px rgba(0, 194, 177, 0.4);
     animation: feedbackSuccessPop 0.4s ease-out;
 }
@@ -487,14 +545,14 @@
 }
 
 .feedback-dialog-success h3 {
-    font-size: 1.5em;
+    font-size: 1.4em;
     font-weight: 600;
     color: white;
     margin: 0 0 8px;
 }
 
 .feedback-dialog-success p {
-    font-size: 1em;
+    font-size: 0.95em;
     color: rgba(255, 255, 255, 0.7);
     margin: 0 0 24px;
 }
@@ -502,6 +560,32 @@
 /* ===========================================
    RESPONSIVE DESIGN
    =========================================== */
+
+/* Tablet and smaller - Stack to single column */
+/* For narrow mobile phones only - stack to single column */
+@media (max-width: 600px) {
+    .feedback-dialog-form {
+        grid-template-columns: 1fr !important;
+        gap: 20px;
+    }
+    
+    .feedback-form-left-col,
+    .feedback-form-right-col {
+        grid-column: 1;
+    }
+    
+    .feedback-dialog {
+        max-width: 480px;
+        max-height: 80vh; 
+    }
+}
+
+/* Tesla Browser Specific - Ensure it fits in top half */
+@media (max-height: 600px) {
+    .feedback-dialog {
+        max-height: 85vh; /* Use more height on very short screens if needed, but top align handles position */
+    }
+}
 
 @media (max-width: 520px) {
     .feedback-snackbar {
@@ -517,21 +601,30 @@
     .feedback-snackbar-actions {
         justify-content: flex-end;
     }
-
+    
     .feedback-dialog {
         margin: 10px;
         max-height: calc(100vh - 20px);
     }
 
     .feedback-dialog-header {
-        padding: 20px 20px 16px;
+        padding: 16px 20px 12px;
     }
 
     .feedback-dialog-form {
-        padding: 20px;
+        padding: 16px 20px;
+    }
+    
+    .feedback-form-group {
+        margin-bottom: 16px;
     }
 
     .feedback-star {
         font-size: 1.6em;
+    }
+    
+    .feedback-radio-label {
+        padding: 8px 12px;
+        font-size: 0.85em;
     }
 }
