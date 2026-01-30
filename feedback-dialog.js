@@ -84,6 +84,7 @@ const FeedbackDialog = (function() {
                                 placeholder="Tell us what you think... What's working well? What could be improved?"
                                 rows="3"
                                 maxlength="2000"
+                                required
                             ></textarea>
                             <span class="feedback-char-count" id="feedback-char-count">0 / 2000</span>
                         </div>
@@ -91,13 +92,14 @@ const FeedbackDialog = (function() {
                         <!-- Email (optional) -->
                         <div class="feedback-form-group">
                             <label class="feedback-form-label" for="feedback-email">
-                                Email <span class="feedback-form-optional">(optional)</span>
+                                Email
                             </label>
                             <input 
                                 type="email" 
                                 id="feedback-email" 
                                 class="feedback-form-input" 
                                 placeholder="your@email.com"
+                                required
                             />
                         </div>
                     </div>
