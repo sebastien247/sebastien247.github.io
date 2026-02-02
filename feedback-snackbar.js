@@ -5,7 +5,7 @@
 
 const FeedbackSnackbar = (function() {
     // Configuration
-    const AUTO_HIDE_DELAY = 60000; // 1 minute in milliseconds
+    const AUTO_HIDE_DELAY = 10000; // 10 seconds in milliseconds
     const ANIMATION_DURATION = 300; // ms
 
     // State
