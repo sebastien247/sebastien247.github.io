@@ -100,6 +100,34 @@
     transform: scale(1.05);
 }
 
+.feedback-snackbar-btn-secondary {
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.feedback-snackbar-btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: white;
+}
+
+.feedback-snackbar-btn-icon {
+    background: transparent;
+    color: rgba(255, 255, 255, 0.5); /* Discreet default state */
+    padding: 8px;
+    border-radius: 50%;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.feedback-snackbar-btn-icon:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+    transform: scale(1.1);
+}
+
 .feedback-snackbar-btn-dismiss {
     background: transparent;
     color: rgba(255, 255, 255, 0.5);
