@@ -29,9 +29,12 @@ const FeedbackDialog = (function() {
             return;
         }
 
-        const categoryOptions = CATEGORIES.map(cat => 
-            `<option value="${cat.value}">${cat.label}</option>`
-        ).join('');
+            const categoryOptions = CATEGORIES.slice(1).map(cat => `
+                <div class="feedback-radio-option">
+                    <input type="radio" name="feedback-category" id="cat-${cat.value}" value="${cat.value}" class="feedback-radio-input" required>
+                    <label for="cat-${cat.value}" class="feedback-radio-label">${cat.label}</label>
+                </div>
+            `).join('');
 
         const dialog = document.createElement('div');
         dialog.id = 'feedback-dialog';
@@ -46,51 +49,59 @@ const FeedbackDialog = (function() {
                 </div>
 
                 <form id="feedback-form" class="feedback-dialog-form">
-                    <!-- Star Rating -->
-                    <div class="feedback-form-group">
-                        <label class="feedback-form-label">How would you rate TaaDa?</label>
-                        <div class="feedback-star-rating" id="feedback-star-rating">
-                            <button type="button" class="feedback-star" data-rating="1" aria-label="1 star">★</button>
-                            <button type="button" class="feedback-star" data-rating="2" aria-label="2 stars">★</button>
-                            <button type="button" class="feedback-star" data-rating="3" aria-label="3 stars">★</button>
-                            <button type="button" class="feedback-star" data-rating="4" aria-label="4 stars">★</button>
-                            <button type="button" class="feedback-star" data-rating="5" aria-label="5 stars">★</button>
+                    <!-- Left Column -->
+                    <div class="feedback-form-left-col">
+                        <!-- Star Rating -->
+                        <div class="feedback-form-group">
+                            <label class="feedback-form-label">How would you rate TaaDa?</label>
+                            <div class="feedback-star-rating" id="feedback-star-rating">
+                                <button type="button" class="feedback-star" data-rating="1" aria-label="1 star">★</button>
+                                <button type="button" class="feedback-star" data-rating="2" aria-label="2 stars">★</button>
+                                <button type="button" class="feedback-star" data-rating="3" aria-label="3 stars">★</button>
+                                <button type="button" class="feedback-star" data-rating="4" aria-label="4 stars">★</button>
+                                <button type="button" class="feedback-star" data-rating="5" aria-label="5 stars">★</button>
+                            </div>
+                            <span class="feedback-rating-text" id="feedback-rating-text"></span>
                         </div>
-                        <span class="feedback-rating-text" id="feedback-rating-text"></span>
+
+                        <!-- Category (Radio Buttons) -->
+                        <div class="feedback-form-group">
+                            <label class="feedback-form-label">Category</label>
+                            <div class="feedback-category-group">
+                                ${categoryOptions}
+                            </div>
+                        </div>
                     </div>
 
-                    <!-- Category -->
-                    <div class="feedback-form-group">
-                        <label class="feedback-form-label" for="feedback-category">Category</label>
-                        <select id="feedback-category" class="feedback-form-select" required>
-                            ${categoryOptions}
-                        </select>
-                    </div>
+                    <!-- Right Column -->
+                    <div class="feedback-form-right-col">
+                        <!-- Message -->
+                        <div class="feedback-form-group">
+                            <label class="feedback-form-label" for="feedback-message">Your feedback</label>
+                            <textarea 
+                                id="feedback-message" 
+                                class="feedback-form-textarea" 
+                                placeholder="Tell us what you think... What's working well? What could be improved?"
+                                rows="3"
+                                maxlength="2000"
+                                required
+                            ></textarea>
+                            <span class="feedback-char-count" id="feedback-char-count">0 / 2000</span>
+                        </div>
 
-                    <!-- Message -->
-                    <div class="feedback-form-group">
-                        <label class="feedback-form-label" for="feedback-message">Your feedback</label>
-                        <textarea 
-                            id="feedback-message" 
-                            class="feedback-form-textarea" 
-                            placeholder="Tell us what you think... What's working well? What could be improved?"
-                            rows="4"
-                            maxlength="2000"
-                        ></textarea>
-                        <span class="feedback-char-count" id="feedback-char-count">0 / 2000</span>
-                    </div>
-
-                    <!-- Email (optional) -->
-                    <div class="feedback-form-group">
-                        <label class="feedback-form-label" for="feedback-email">
-                            Email <span class="feedback-form-optional">(optional - for follow-up)</span>
-                        </label>
-                        <input 
-                            type="email" 
-                            id="feedback-email" 
-                            class="feedback-form-input" 
-                            placeholder="your@email.com"
-                        />
+                        <!-- Email (optional) -->
+                        <div class="feedback-form-group">
+                            <label class="feedback-form-label" for="feedback-email">
+                                Email
+                            </label>
+                            <input 
+                                type="email" 
+                                id="feedback-email" 
+                                class="feedback-form-input" 
+                                placeholder="your@email.com"
+                                required
+                            />
+                        </div>
                     </div>
 
                     <!-- Error message -->
@@ -245,10 +256,14 @@ const FeedbackDialog = (function() {
         e.preventDefault();
         hideError();
 
+        // Get selected radio
+        const selectedRadio = document.querySelector('input[name="feedback-category"]:checked');
+        const categoryValue = selectedRadio ? selectedRadio.value : '';
+
         // Get form data
         const feedbackData = {
             rating: currentRating,
-            category: document.getElementById('feedback-category').value,
+            category: categoryValue,
             message: document.getElementById('feedback-message').value.trim(),
             email: document.getElementById('feedback-email').value.trim()
         };

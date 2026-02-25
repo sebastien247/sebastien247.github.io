@@ -386,7 +386,11 @@ function heartbeat() {
     }
 
     lastheart = Date.now();
-    socket.sendObject({action: "PING"});
+    let pingPayload = {action: "PING"};
+    if (typeof frameRate !== 'undefined') {
+        pingPayload.fps = frameRate;
+    }
+    socket.sendObject(pingPayload);
 }
 
 
@@ -437,13 +441,18 @@ function handleMessage(event) {
 
 function handleVideoMessage(dat){
 
+    // 🚨 AMÉLIORATION: Réinitialiser le watchdog sur TOUT paquet vidéo reçu
+    // Cela prouve que la connexion est active même si le PING/PONG spécifique saute
+    if (pongtimer !== null) clearTimeout(pongtimer);
+    pongtimer = setTimeout(noPong, 3000);
+
     let unittype = (dat[4] & 0x1f);
     if (unittype === 31)
     {
-        if (pongtimer !== null)
+        /*if (pongtimer !== null)
             clearTimeout(pongtimer);
 
-        pongtimer=setTimeout(noPong,3000);
+        pongtimer=setTimeout(noPong,3000);*/
         return;
     }
     if (unittype === 1 || unittype === 5) {
@@ -534,7 +543,7 @@ function startSocket() {
         }, 1000);
 
         if (heart === 0) {
-            heart = setInterval(heartbeat, 200);
+            heart = setInterval(heartbeat, 1000);
             setInterval(updateFrameCounter, 1000)
         }
     });
@@ -667,8 +676,8 @@ function messageHandler(message) {
     if (socket.readyState === WebSocket.OPEN) {
         const action = message.data.action;
 
-        // Encoder les événements MULTITOUCH et LONGPRESS en binaire
-        if (action === 'MULTITOUCH_DOWN' || action === 'MULTITOUCH_MOVE' || action === 'MULTITOUCH_UP' || action === 'MULTITOUCH_CANCEL' || action === 'LONGPRESS') {
+        // Encoder les événements MULTITOUCH en binaire
+        if (action === 'MULTITOUCH_DOWN' || action === 'MULTITOUCH_MOVE' || action === 'MULTITOUCH_UP' || action === 'MULTITOUCH_CANCEL') {
             initBinaryTouchEncoder();
 
             // Extraire les touches et allTouches du message

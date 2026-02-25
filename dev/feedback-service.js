@@ -96,13 +96,17 @@ const FeedbackService = (function() {
             errors.push('Please select a category');
         }
 
-        // Message should have some content (optional but recommended)
-        if (feedbackData.message && feedbackData.message.length > 2000) {
+        // Message is required
+        if (!feedbackData.message || feedbackData.message.trim() === '') {
+            errors.push('Please enter your feedback message');
+        } else if (feedbackData.message.length > 2000) {
             errors.push('Message is too long (max 2000 characters)');
         }
 
-        // Email validation if provided
-        if (feedbackData.email && feedbackData.email.trim() !== '') {
+        // Email is required and must be valid
+        if (!feedbackData.email || feedbackData.email.trim() === '') {
+            errors.push('Please enter your email address');
+        } else {
             const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
             if (!emailRegex.test(feedbackData.email)) {
                 errors.push('Please enter a valid email address');

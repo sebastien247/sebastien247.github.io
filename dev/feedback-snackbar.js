@@ -5,7 +5,9 @@
 
 const FeedbackSnackbar = (function() {
     // Configuration
-    const AUTO_HIDE_DELAY = 60000; // 1 minute in milliseconds
+    const AUTO_HIDE_DELAY = 10000; // 10 seconds in milliseconds
+
+    const SNOOZE_DURATION = 7 * 24 * 60 * 60 * 1000; // 1 week in milliseconds
     const ANIMATION_DURATION = 300; // ms
 
     // State
@@ -38,6 +40,9 @@ const FeedbackSnackbar = (function() {
                 <button class="feedback-snackbar-btn feedback-snackbar-btn-primary" id="feedback-snackbar-open">
                     Give Feedback
                 </button>
+                <button class="feedback-snackbar-btn feedback-snackbar-btn-icon" id="feedback-snackbar-snooze" aria-label="Remind me next week" title="Remind me next week">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                </button>
                 <button class="feedback-snackbar-btn feedback-snackbar-btn-dismiss" id="feedback-snackbar-dismiss" aria-label="Dismiss">
                     ✕
                 </button>
@@ -58,6 +63,7 @@ const FeedbackSnackbar = (function() {
 
         // Attach event listeners
         document.getElementById('feedback-snackbar-open').addEventListener('click', handleOpenClick);
+        document.getElementById('feedback-snackbar-snooze').addEventListener('click', handleSnoozeClick);
         document.getElementById('feedback-snackbar-dismiss').addEventListener('click', handleDismissClick);
     }
 
@@ -66,6 +72,13 @@ const FeedbackSnackbar = (function() {
      */
     function show() {
         if (isVisible) return;
+        
+        // Check for snooze
+        const snoozeUntil = localStorage.getItem('feedback_snooze_until');
+        if (snoozeUntil && Date.now() < parseInt(snoozeUntil, 10)) {
+            console.log('[FeedbackSnackbar] Snoozed until ' + new Date(parseInt(snoozeUntil, 10)).toLocaleString());
+            return;
+        }
 
         createSnackbar();
 
@@ -148,6 +161,18 @@ const FeedbackSnackbar = (function() {
         } else {
             console.error('[FeedbackSnackbar] FeedbackDialog not available');
         }
+    }
+
+    /**
+     * Handle click on "Snooze" button
+     */
+    function handleSnoozeClick() {
+        const snoozeUntil = Date.now() + SNOOZE_DURATION;
+        localStorage.setItem('feedback_snooze_until', snoozeUntil.toString());
+        
+        console.log('[FeedbackSnackbar] Snoozing until ' + new Date(snoozeUntil).toLocaleString());
+        
+        hide();
     }
 
     /**

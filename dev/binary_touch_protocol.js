@@ -28,8 +28,7 @@ class BinaryTouchEncoder {
             'MULTITOUCH_MOVE': 1,
             'MULTITOUCH_UP': 2,
             'MULTITOUCH_CANCEL': 2,  // Traiter CANCEL comme UP
-            'TOUCH': 3,  // Legacy single touch
-            'LONGPRESS': 4  // Appui long détecté côté client
+            'TOUCH': 3  // Legacy single touch
         };
 
         // Timestamp de référence pour compression delta
