@@ -195,6 +195,24 @@ function updateConnectionProgress(step, message) {
             stepElement.classList.remove('active', 'completed');
         }
     }
+
+    // Troubleshoot message logic for step 2
+    const troubleshootEl = document.getElementById('troubleshoot-message');
+    if (troubleshootEl) {
+        if (step === 2) {
+            if (step2TimeoutId) clearTimeout(step2TimeoutId);
+            troubleshootEl.style.display = 'none';
+            step2TimeoutId = setTimeout(() => {
+                troubleshootEl.style.display = 'block';
+            }, 20000);
+        } else {
+            if (step2TimeoutId) {
+                clearTimeout(step2TimeoutId);
+                step2TimeoutId = null;
+            }
+            troubleshootEl.style.display = 'none';
+        }
+    }
 }
 
 /**

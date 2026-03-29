@@ -185,6 +185,70 @@ canvas, video {
 }
 
 
+/* Troubleshoot message for step 2 timeout */
+.troubleshoot-message {
+    max-width: 600px;
+    margin-top: 25px;
+    padding: 20px 25px;
+    background: rgba(249, 168, 37, 0.15);
+    border: 1px solid rgba(249, 168, 37, 0.4);
+    border-radius: 12px;
+    text-align: center;
+    animation: fadeIn 0.5s ease;
+}
+
+.troubleshoot-message .troubleshoot-title {
+    font-size: 1.1em !important;
+    font-weight: 600;
+    color: #f9a825 !important;
+    margin-bottom: 12px;
+}
+
+.troubleshoot-message p {
+    font-size: 0.9em !important;
+    color: rgba(255, 255, 255, 0.85) !important;
+    line-height: 1.6;
+    margin-bottom: 8px;
+    text-shadow: none;
+}
+
+.troubleshoot-message p:last-child {
+    margin-bottom: 0;
+}
+
+.troubleshoot-steps {
+    text-align: left;
+    margin: 0 auto;
+    padding-left: 24px;
+    list-style: none;
+    counter-reset: troubleshoot;
+}
+
+.troubleshoot-steps li {
+    font-size: 0.9em;
+    color: rgba(255, 255, 255, 0.85);
+    line-height: 1.6;
+    margin-bottom: 10px;
+    counter-increment: troubleshoot;
+    padding-left: 8px;
+}
+
+.troubleshoot-steps li::before {
+    content: counter(troubleshoot) ".";
+    font-weight: 700;
+    color: #f9a825;
+    margin-right: 8px;
+}
+
+.troubleshoot-steps li:last-child {
+    margin-bottom: 0;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 .loading-indicator {
     width: 50px;
     height: 50px;
