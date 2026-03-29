@@ -28,6 +28,7 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     videoFrameReceived = false,
     timeoutId,
     isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
+    step2TimeoutId = null,
     isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
 
 canvasElement.style.display = "none";
