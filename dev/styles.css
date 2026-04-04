@@ -185,6 +185,124 @@ canvas, video {
 }
 
 
+/* Troubleshoot message for step 2 timeout */
+.troubleshoot-message {
+    max-width: 600px;
+    margin-top: 25px;
+    padding: 20px 25px;
+    background: rgba(249, 168, 37, 0.15);
+    border: 1px solid rgba(249, 168, 37, 0.4);
+    border-radius: 12px;
+    text-align: center;
+    animation: fadeIn 0.5s ease;
+}
+
+.troubleshoot-message .troubleshoot-title {
+    font-size: 1.1em !important;
+    font-weight: 600;
+    color: #f9a825 !important;
+    margin-bottom: 12px;
+}
+
+.troubleshoot-message p {
+    font-size: 0.9em !important;
+    color: rgba(255, 255, 255, 0.85) !important;
+    line-height: 1.6;
+    margin-bottom: 8px;
+    text-shadow: none;
+}
+
+.troubleshoot-message p:last-child {
+    margin-bottom: 0;
+}
+
+.troubleshoot-divider {
+    border-top: 1px solid rgba(249, 168, 37, 0.3);
+    margin: 16px 0;
+}
+
+.troubleshoot-reset-title {
+    font-size: 0.9em !important;
+    color: rgba(255, 255, 255, 0.85) !important;
+    margin-bottom: 12px !important;
+}
+
+.troubleshoot-reset-btn {
+    background: rgba(249, 168, 37, 0.25);
+    border: 1px solid rgba(249, 168, 37, 0.6);
+    border-radius: 8px;
+    color: #f9a825;
+    cursor: pointer;
+    font-size: 0.95em;
+    font-weight: 600;
+    padding: 10px 20px;
+    transition: background 0.2s;
+}
+
+.troubleshoot-reset-btn:hover {
+    background: rgba(249, 168, 37, 0.4);
+}
+
+.troubleshoot-reset-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.reset-aa-confirm {
+    margin-top: 14px;
+    padding: 12px 16px;
+    background: rgba(76, 175, 80, 0.15);
+    border: 1px solid rgba(76, 175, 80, 0.4);
+    border-radius: 8px;
+    animation: fadeIn 0.4s ease;
+}
+
+.reset-aa-confirm-text {
+    font-size: 0.9em !important;
+    color: #81c784 !important;
+    font-weight: 600;
+    margin-bottom: 6px !important;
+}
+
+.reset-aa-confirm-hint {
+    font-size: 0.9em !important;
+    color: rgba(255, 255, 255, 0.9) !important;
+    margin-bottom: 0 !important;
+}
+
+.troubleshoot-steps {
+    text-align: left;
+    margin: 0 auto;
+    padding-left: 24px;
+    list-style: none;
+    counter-reset: troubleshoot;
+}
+
+.troubleshoot-steps li {
+    font-size: 0.9em;
+    color: rgba(255, 255, 255, 0.85);
+    line-height: 1.6;
+    margin-bottom: 10px;
+    counter-increment: troubleshoot;
+    padding-left: 8px;
+}
+
+.troubleshoot-steps li::before {
+    content: counter(troubleshoot) ".";
+    font-weight: 700;
+    color: #f9a825;
+    margin-right: 8px;
+}
+
+.troubleshoot-steps li:last-child {
+    margin-bottom: 0;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 .loading-indicator {
     width: 50px;
     height: 50px;
@@ -340,6 +458,21 @@ canvas, video {
 .notification-content p {
     font-size: 1em;
     line-height: 1.5;
+}
+
+/* Upgrade/Maintenance Card Variant */
+.notification-card.upgrade {
+    border-left-color: #2196F3;
+    background: linear-gradient(135deg, rgba(33, 150, 243, 0.15), rgba(33, 150, 243, 0.05));
+}
+
+.notification-card.upgrade .notification-content h3 {
+    color: #2196F3;
+}
+
+.notification-card.upgrade .notification-content .action-required {
+    color: #ff9800;
+    font-weight: 600;
 }
 
 .download-section {

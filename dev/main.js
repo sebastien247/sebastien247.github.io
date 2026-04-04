@@ -28,6 +28,7 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     videoFrameReceived = false,
     timeoutId,
     isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
+    step2TimeoutId = null,
     isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
 
 canvasElement.style.display = "none";
@@ -195,6 +196,25 @@ function updateConnectionProgress(step, message) {
             stepElement.classList.remove('active', 'completed');
         }
     }
+
+    // Troubleshoot message logic for step 2
+    const troubleshootEl = document.getElementById('troubleshoot-message');
+    if (troubleshootEl) {
+        if (step === 2) {
+            if (step2TimeoutId) clearTimeout(step2TimeoutId);
+            troubleshootEl.style.display = 'none';
+            step2TimeoutId = setTimeout(() => {
+                troubleshootEl.style.display = 'block';
+            }, 20000);
+        } else {
+            if (step2TimeoutId) {
+                clearTimeout(step2TimeoutId);
+                step2TimeoutId = null;
+            }
+            troubleshootEl.style.display = 'none';
+        }
+    }
+
 }
 
 /**
@@ -641,6 +661,7 @@ function postWorkerMessages(json) {
             },2000);
         }
 
+        // Handle AA status updates from worker
         // Handle connection progress updates from worker
         if (e.data.hasOwnProperty('connectionProgress')) {
             const progress = e.data.connectionProgress;
@@ -1021,6 +1042,19 @@ function setupContactLink() {
 
 // Call the function when the page loads
 document.addEventListener('DOMContentLoaded', setupContactLink);
+
+// Wire up the Reset AA Profile button in the troubleshoot message
+document.addEventListener('DOMContentLoaded', () => {
+    const btnResetAA = document.getElementById('btn-reset-aa-profile');
+    const confirmEl = document.getElementById('reset-aa-confirm');
+    if (btnResetAA) {
+        btnResetAA.addEventListener('click', () => {
+            btnResetAA.disabled = true;
+            if (confirmEl) confirmEl.style.display = 'block';
+            demuxDecodeWorker.postMessage({ action: 'RESET_AA_PROFILE' });
+        });
+    }
+});
 checkPhone();
 
 let audiostart=false;

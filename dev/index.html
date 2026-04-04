@@ -37,6 +37,25 @@
             </div>
         </div>
         <div class="loading-indicator"></div>
+        <div id="troubleshoot-message" class="troubleshoot-message" style="display: none;">
+            <p class="troubleshoot-title">Waiting for Android Auto stream is taking longer than expected.</p>
+            <p>If this step takes too long, please try the following:</p>
+            <ol class="troubleshoot-steps">
+                <li>Follow the troubleshooting steps in the TaaDa app to <strong>clear the Android Auto cache</strong></li>
+                <li><strong>Restart your phone</strong> if the issue persists</li>
+            </ol>
+            <div class="troubleshoot-divider"></div>
+            <p class="troubleshoot-reset-title">Still stuck? Try resetting the Android Auto vehicle profile:</p>
+            <button id="btn-reset-aa-profile" class="troubleshoot-reset-btn">
+                🔄 Reset AA Vehicle Profile
+            </button>
+            <div id="reset-aa-confirm" class="reset-aa-confirm" style="display: none;">
+                <p class="reset-aa-confirm-text">✅ Profile reset in progress — service is restarting...</p>
+                <p class="reset-aa-confirm-hint">👆 Please tap <strong>Continue</strong> on your phone when prompted by Android Auto.</p>
+            </div>
+            <div class="troubleshoot-divider"></div>
+            <p style="text-align: center; margin-top: 10px; font-size: 0.95em;">Still not working? Contact me at <strong>seb.duboc.dev@gmail.com</strong></p>
+        </div>
     </div>
 
     <!-- 🚨 NOUVEAU: Overlay pour les messages d'erreur (toujours au-dessus) -->

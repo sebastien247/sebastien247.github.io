@@ -842,6 +842,11 @@ self.addEventListener('message', async (message) => {
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.sendObject({action: "REQUEST_KEYFRAME"});
         }
+    } else if (message.data.action === 'RESET_AA_PROFILE') {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            console.log("Sending RESET_AA_PROFILE to Android");
+            socket.sendObject({action: "RESET_AA_PROFILE"});
+        }
     } else if(!initted) {
         postInitJobs.push(message);
     } else {
