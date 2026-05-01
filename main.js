@@ -1038,6 +1038,19 @@ function setupContactLink() {
 
 // Call the function when the page loads
 document.addEventListener('DOMContentLoaded', setupContactLink);
+
+// Wire up the Reset AA Profile button in the troubleshoot message
+document.addEventListener('DOMContentLoaded', () => {
+    const btnResetAA = document.getElementById('btn-reset-aa-profile');
+    const confirmEl = document.getElementById('reset-aa-confirm');
+    if (btnResetAA) {
+        btnResetAA.addEventListener('click', () => {
+            btnResetAA.disabled = true;
+            if (confirmEl) confirmEl.style.display = 'block';
+            demuxDecodeWorker.postMessage({ action: 'RESET_AA_PROFILE' });
+        });
+    }
+});
 checkPhone();
 
 let audiostart=false;
