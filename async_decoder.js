@@ -43,7 +43,7 @@ const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
  * Pour activer les logs debug: Changer BINARY_TOUCH_DEBUG à true ci-dessous
  */
 
-const BINARY_TOUCH_DEBUG = true; // Mettre à true pour voir les statistiques de compression
+const BINARY_TOUCH_DEBUG = false; // Mettre à true pour voir les statistiques de compression
 
 // Instance de l'encodeur binaire pour les touch events
 let binaryTouchEncoder = null;

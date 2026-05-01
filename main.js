@@ -800,11 +800,11 @@ function handleTouchStart(event) {
     const allTouches = convertTouchListToCoords(event.touches);
 
     // DEBUG: Logs détaillés pour comprendre le problème
-    console.log('[MULTITOUCH_DOWN] event.changedTouches.length:', event.changedTouches.length);
-    console.log('[MULTITOUCH_DOWN] event.touches.length:', event.touches.length);
-    console.log('[MULTITOUCH_DOWN] newTouches:', JSON.stringify(newTouches));
-    console.log('[MULTITOUCH_DOWN] allTouches:', JSON.stringify(allTouches));
-    console.log('[MULTITOUCH_DOWN] activeTouches.size:', activeTouches.size);
+    //console.log('[MULTITOUCH_DOWN] event.changedTouches.length:', event.changedTouches.length);
+    //console.log('[MULTITOUCH_DOWN] event.touches.length:', event.touches.length);
+    //console.log('[MULTITOUCH_DOWN] newTouches:', JSON.stringify(newTouches));
+    //console.log('[MULTITOUCH_DOWN] allTouches:', JSON.stringify(allTouches));
+    //console.log('[MULTITOUCH_DOWN] activeTouches.size:', activeTouches.size);
 
     // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
@@ -839,11 +839,11 @@ function handleTouchEnd(event) {
     const action = event.type === 'touchend' ? 'MULTITOUCH_UP' : 'MULTITOUCH_CANCEL';
 
     // DEBUG: Logs pour MULTITOUCH_UP/CANCEL
-    console.log('[' + action + '] event.changedTouches.length:', event.changedTouches.length);
-    console.log('[' + action + '] event.touches.length:', event.touches.length);
-    console.log('[' + action + '] endedTouches:', JSON.stringify(endedTouches));
-    console.log('[' + action + '] allTouches:', JSON.stringify(allTouches));
-    console.log('[' + action + '] activeTouches.size:', activeTouches.size);
+    //console.log('[' + action + '] event.changedTouches.length:', event.changedTouches.length);
+    //console.log('[' + action + '] event.touches.length:', event.touches.length);
+    //console.log('[' + action + '] endedTouches:', JSON.stringify(endedTouches));
+    //console.log('[' + action + '] allTouches:', JSON.stringify(allTouches));
+    //console.log('[' + action + '] activeTouches.size:', activeTouches.size);
 
     // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
@@ -879,9 +879,9 @@ function processTouchMove() {
     });
 
     // DEBUG: Logs pour MULTITOUCH_MOVE
-    console.log('[MULTITOUCH_MOVE] movingTouches.length:', movingTouches.length);
-    console.log('[MULTITOUCH_MOVE] movingTouches:', JSON.stringify(movingTouches));
-    console.log('[MULTITOUCH_MOVE] activeTouches.size:', activeTouches.size);
+    //console.log('[MULTITOUCH_MOVE] movingTouches.length:', movingTouches.length);
+    //console.log('[MULTITOUCH_MOVE] movingTouches:', JSON.stringify(movingTouches));
+    //console.log('[MULTITOUCH_MOVE] activeTouches.size:', activeTouches.size);
 
     // Envoyer l'événement multitouch optimisé
     demuxDecodeWorker.postMessage({
