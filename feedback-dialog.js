@@ -44,7 +44,7 @@ const FeedbackDialog = (function() {
                 <div class="feedback-dialog-header">
                     <h2 id="feedback-dialog-title">Share Your Feedback</h2>
                     <button class="feedback-dialog-close" id="feedback-dialog-close" aria-label="Close dialog">
-                        ✕
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                     </button>
                 </div>
 
@@ -55,11 +55,11 @@ const FeedbackDialog = (function() {
                         <div class="feedback-form-group">
                             <label class="feedback-form-label">How would you rate TaaDa?</label>
                             <div class="feedback-star-rating" id="feedback-star-rating">
-                                <button type="button" class="feedback-star" data-rating="1" aria-label="1 star">★</button>
-                                <button type="button" class="feedback-star" data-rating="2" aria-label="2 stars">★</button>
-                                <button type="button" class="feedback-star" data-rating="3" aria-label="3 stars">★</button>
-                                <button type="button" class="feedback-star" data-rating="4" aria-label="4 stars">★</button>
-                                <button type="button" class="feedback-star" data-rating="5" aria-label="5 stars">★</button>
+                                <button type="button" class="feedback-star" data-rating="1" aria-label="1 star"><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
+                                <button type="button" class="feedback-star" data-rating="2" aria-label="2 stars"><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
+                                <button type="button" class="feedback-star" data-rating="3" aria-label="3 stars"><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
+                                <button type="button" class="feedback-star" data-rating="4" aria-label="4 stars"><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
+                                <button type="button" class="feedback-star" data-rating="5" aria-label="5 stars"><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg></button>
                             </div>
                             <span class="feedback-rating-text" id="feedback-rating-text"></span>
                         </div>
@@ -124,7 +124,7 @@ const FeedbackDialog = (function() {
 
                 <!-- Success state -->
                 <div class="feedback-dialog-success" id="feedback-success" style="display: none;">
-                    <div class="feedback-success-icon">✓</div>
+                    <div class="feedback-success-icon"><svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>
                     <h3>Thank you!</h3>
                     <p>Your feedback has been submitted successfully.</p>
                     <button class="feedback-btn feedback-btn-primary" id="feedback-success-close">Close</button>
