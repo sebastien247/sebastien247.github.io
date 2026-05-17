@@ -132,7 +132,9 @@
     background: transparent;
     color: rgba(255, 255, 255, 0.5);
     padding: 8px;
-    font-size: 1em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .feedback-snackbar-btn-dismiss:hover {
@@ -239,12 +241,13 @@
     background: transparent;
     border: none;
     color: rgba(255, 255, 255, 0.5);
-    font-size: 1.5em;
     cursor: pointer;
     padding: 8px;
     border-radius: 8px;
     transition: all 0.2s ease;
-    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .feedback-dialog-close:hover {
@@ -309,19 +312,20 @@
 .feedback-star {
     background: transparent;
     border: none;
-    font-size: 2em;
     color: rgba(255, 255, 255, 0.2);
     cursor: pointer;
     padding: 4px;
     transition: all 0.15s ease;
-    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .feedback-star:hover,
 .feedback-star.active {
     color: #FFD700;
     transform: scale(1.15);
-    text-shadow: 0 0 20px rgba(255, 215, 0, 0.5);
+    filter: drop-shadow(0 0 20px rgba(255, 215, 0, 0.5));
 }
 
 .feedback-rating-text {
@@ -551,7 +555,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 2em;
     color: white;
     margin-bottom: 20px;
     box-shadow: 0 10px 30px rgba(0, 194, 177, 0.4);
@@ -647,8 +650,9 @@
         margin-bottom: 16px;
     }
 
-    .feedback-star {
-        font-size: 1.6em;
+    .feedback-star svg {
+        width: 26px;
+        height: 26px;
     }
     
     .feedback-radio-label {
