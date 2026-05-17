@@ -18,8 +18,15 @@ html, body {
     overscroll-behavior-x: none;
 }
 
+/* Center the canvas on both axes. A letterboxed stream sizes the canvas larger
+   than the viewport on purpose, so the in-stream black margins fall off-screen
+   equally — `margin: auto` does not center an element wider than its container,
+   which left the black band stuck on the left edge. */
 canvas, video {
-    margin: 0 auto;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
 }
 
 /* Waiting message styling */

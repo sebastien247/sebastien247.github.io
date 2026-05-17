@@ -623,15 +623,11 @@ function postWorkerMessages(json) {
             // 🚨 Ne pas afficher l'overlay si on est déjà en attente de reload
             // (notre fonction reloadWhenOnline gère déjà l'affichage)
             if (!isWaitingForReload) {
-                // 🚨 Afficher l'overlay d'erreur permanent
+                // Keep the overlay visible until the stream is confirmed live
+                // again (hidden by videoFrameReceived). No timed auto-hide:
+                // reconnection backoff can outlast any fixed delay, so hiding on
+                // a timer flickers the overlay and masks a still-down connection.
                 showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
-
-                // Cacher l'overlay après 5 secondes si la reconnexion réussit
-                setTimeout(() => {
-                    if (!isServerShuttingDown && !isWaitingForReload) {
-                        hideErrorOverlay();
-                    }
-                }, 5000);
             }
 
             return;
