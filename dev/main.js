@@ -597,31 +597,17 @@ function postWorkerMessages(json) {
             console.error('Socket error received:', e.data.error);
             forcedRefreshCounter++;
 
-            // Only reload if error contains critical information
-            // Show warning instead for most errors
-            if (typeof e.data.error === 'string' &&
-                (e.data.error.includes("no pong") ||
-                e.data.error === "Reconnecting...")) {
-
-                warningElement.style.display = "block";
-                logElement.style.display = "none";
-                warningElement.innerText = "Connection issue detected: " + e.data.error;
-
-                // Use a delayed reload to allow logging to appear
-                setTimeout(function() {
-                    console.log("Reloading page due to connection error");
-                    reloadWhenOnline('Connection error: ' + e.data.error);
-                }, 2000);
-            } else {
-                // For less critical errors, just show a warning
-                warningElement.style.display = "block";
-                logElement.style.display = "none";
-                warningElement.innerText = "Error detected: " + e.data.error;
-                setTimeout(function() {
-                    warningElement.style.display = "none";
-                    logElement.style.display = "block";
-                }, 5000);
-            }
+            // Transient connection errors recover via the worker's in-place
+            // WebSocket reconnect — never reload the page. The page is hosted
+            // remotely (app.taada.top), so a reload hangs in a no-coverage zone.
+            // serverShutdown stays the only legitimate reload path.
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = "Error detected: " + e.data.error;
+            setTimeout(function() {
+                warningElement.style.display = "none";
+                logElement.style.display = "block";
+            }, 5000);
             return;
         }
 
@@ -672,6 +658,9 @@ function postWorkerMessages(json) {
         if (e.data.hasOwnProperty('videoFrameReceived')) {
             console.log("Video frame received message received!", e.data);
             videoFrameReceived = true;
+
+            // Stream is live again — clear any reconnecting overlay.
+            hideErrorOverlay();
 
             // Update to step 3/3 - Stream ready
             updateConnectionProgress(3, '3/3 - Stream ready!');
@@ -804,11 +793,11 @@ function handleTouchStart(event) {
     const allTouches = convertTouchListToCoords(event.touches);
 
     // DEBUG: Logs détaillés pour comprendre le problème
-    console.log('[MULTITOUCH_DOWN] event.changedTouches.length:', event.changedTouches.length);
-    console.log('[MULTITOUCH_DOWN] event.touches.length:', event.touches.length);
-    console.log('[MULTITOUCH_DOWN] newTouches:', JSON.stringify(newTouches));
-    console.log('[MULTITOUCH_DOWN] allTouches:', JSON.stringify(allTouches));
-    console.log('[MULTITOUCH_DOWN] activeTouches.size:', activeTouches.size);
+    //console.log('[MULTITOUCH_DOWN] event.changedTouches.length:', event.changedTouches.length);
+    //console.log('[MULTITOUCH_DOWN] event.touches.length:', event.touches.length);
+    //console.log('[MULTITOUCH_DOWN] newTouches:', JSON.stringify(newTouches));
+    //console.log('[MULTITOUCH_DOWN] allTouches:', JSON.stringify(allTouches));
+    //console.log('[MULTITOUCH_DOWN] activeTouches.size:', activeTouches.size);
 
     // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
@@ -843,11 +832,11 @@ function handleTouchEnd(event) {
     const action = event.type === 'touchend' ? 'MULTITOUCH_UP' : 'MULTITOUCH_CANCEL';
 
     // DEBUG: Logs pour MULTITOUCH_UP/CANCEL
-    console.log('[' + action + '] event.changedTouches.length:', event.changedTouches.length);
-    console.log('[' + action + '] event.touches.length:', event.touches.length);
-    console.log('[' + action + '] endedTouches:', JSON.stringify(endedTouches));
-    console.log('[' + action + '] allTouches:', JSON.stringify(allTouches));
-    console.log('[' + action + '] activeTouches.size:', activeTouches.size);
+    //console.log('[' + action + '] event.changedTouches.length:', event.changedTouches.length);
+    //console.log('[' + action + '] event.touches.length:', event.touches.length);
+    //console.log('[' + action + '] endedTouches:', JSON.stringify(endedTouches));
+    //console.log('[' + action + '] allTouches:', JSON.stringify(allTouches));
+    //console.log('[' + action + '] activeTouches.size:', activeTouches.size);
 
     // Envoyer l'événement multitouch principal
     demuxDecodeWorker.postMessage({
@@ -883,9 +872,9 @@ function processTouchMove() {
     });
 
     // DEBUG: Logs pour MULTITOUCH_MOVE
-    console.log('[MULTITOUCH_MOVE] movingTouches.length:', movingTouches.length);
-    console.log('[MULTITOUCH_MOVE] movingTouches:', JSON.stringify(movingTouches));
-    console.log('[MULTITOUCH_MOVE] activeTouches.size:', activeTouches.size);
+    //console.log('[MULTITOUCH_MOVE] movingTouches.length:', movingTouches.length);
+    //console.log('[MULTITOUCH_MOVE] movingTouches:', JSON.stringify(movingTouches));
+    //console.log('[MULTITOUCH_MOVE] activeTouches.size:', activeTouches.size);
 
     // Envoyer l'événement multitouch optimisé
     demuxDecodeWorker.postMessage({

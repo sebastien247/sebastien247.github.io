@@ -11,8 +11,11 @@ let pendingFrames = [],
     runtime = 0,
     frameCounter = 0,
     sps, decoder = null, socket, height, width, port, gl, heart = 0,
+    frameCounterTimer = 0,
     broadwayDecoder = null,
     lastheart = 0, pongtimer, frameRate,
+    lastPongAt = 0, // Timestamp of the last server PONG sentinel (unittype 31)
+    connectTimeout = null, // Watchdog handle for a WebSocket stuck in CONNECTING
     isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
     firstVideoFrameReceived = false; // Flag to track first video frame
 
@@ -22,9 +25,16 @@ const texturePool = [];
 let isReconnecting = false; // Flag pour éviter les tentatives de reconnexion multiples
 let reconnectionAttempt = 0; // Compteur de tentatives de reconnexion
 let reconnectionTimeout = null; // Référence au timeout de reconnexion
-const MAX_RECONNECTION_ATTEMPTS = 5; // Nombre maximum de tentatives avant abandon
+let forceReconnectPending = false; // True between forceReconnect() and socketClose()
+const SOFT_RECONNECTION_THRESHOLD = 5; // Attempts after which only the UI message changes — reconnection never stops
 const BASE_RECONNECTION_DELAY = 2000; // Délai de base en ms (2 secondes)
 const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
+const PONG_TIMEOUT = 6000; // No server PONG for this long ⇒ dead control channel
+
+// The phone re-randomises the WebSocket port on every service start; the stable
+// HTTP discovery endpoint is served on this fixed port range.
+const DISCOVERY_PORT_BASE = 8081;
+const DISCOVERY_PORT_COUNT = 5;
 
 // ========== Binary Touch Protocol ==========
 /**
@@ -43,7 +53,7 @@ const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
  * Pour activer les logs debug: Changer BINARY_TOUCH_DEBUG à true ci-dessous
  */
 
-const BINARY_TOUCH_DEBUG = true; // Mettre à true pour voir les statistiques de compression
+const BINARY_TOUCH_DEBUG = false; // Mettre à true pour voir les statistiques de compression
 
 // Instance de l'encodeur binaire pour les touch events
 let binaryTouchEncoder = null;
@@ -148,6 +158,25 @@ function switchToBroadway() {
     }
 }
 
+/**
+ * Creates a fresh WebCodecs VideoDecoder. Extracted so the decoder can be
+ * recreated on reconnect — a decoder wedged on a partial GOP from before the
+ * drop would otherwise stay wedged after it.
+ */
+function createVideoDecoder() {
+    decoder = new VideoDecoder({
+        output: (frame) => {
+            pendingFrames.push(frame);
+            if (underflow) {
+                renderFrame();
+            }
+        },
+        error: (e) => {
+            switchToBroadway()
+        },
+    });
+}
+
 function initCanvas(canvas, forceBroadway) {
 
     height = canvas.height;
@@ -204,17 +233,7 @@ function initCanvas(canvas, forceBroadway) {
 
     if(!forceBroadway) {
         try {
-            decoder = new VideoDecoder({
-                output: (frame) => {
-                    pendingFrames.push(frame);
-                    if (underflow) {
-                        renderFrame();
-                    }
-                },
-                error: (e) => {
-                    switchToBroadway()
-                },
-            })
+            createVideoDecoder();
         } catch(e) {
             switchToBroadway();
         }
@@ -296,6 +315,13 @@ function videoMagic(dat){
     }
 
     if (unittype === 5) {
+        // An IDR cannot be decoded without SPS/PPS; after a reconnect sps is
+        // cleared and repopulated by the resent codec config (#80). If the
+        // keyframe somehow arrives first, drop it rather than crash on
+        // appendByteArray(undefined, …) — a later keyframe recovers the stream.
+        if (!sps) {
+            return;
+        }
         let data = appendByteArray(sps, dat);
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
@@ -363,12 +389,25 @@ function noPong() {
         console.log('Server is shutting down, ignoring no pong');
         return;
     }
-    self.postMessage({error: "no pong"});
+    // Transient drop: reconnect the WebSocket in place. Never reload the page —
+    // it is hosted remotely and a reload hangs in a no-coverage zone.
+    console.warn('No data from phone (pong watchdog) — forcing in-place reconnect');
+    forceReconnect();
 }
 
 function heartbeat() {
     // 🚨 NOUVEAU: Ne pas envoyer de ping si le serveur est en shutdown
     if (isServerShuttingDown) {
+        return;
+    }
+
+    // Dead control channel: the phone replies to every PING with a PONG sentinel
+    // (unittype 31). lastPongAt is updated only by that sentinel, never by video
+    // frames, so a half-open channel masked by trickling buffered video is still
+    // caught here — independently of video flow.
+    if (lastPongAt !== 0 && (Date.now() - lastPongAt) > PONG_TIMEOUT) {
+        console.warn('No PONG from phone for ' + (Date.now() - lastPongAt) + 'ms — forcing in-place reconnect');
+        forceReconnect();
         return;
     }
 
@@ -379,7 +418,7 @@ function heartbeat() {
                     socket.sendObject({action: "START"});
                 } catch (e) {
                     self.postMessage({error: e});
-                    startSocket();
+                    forceReconnect();
                 }
             }
         }
@@ -449,19 +488,20 @@ function handleVideoMessage(dat){
     let unittype = (dat[4] & 0x1f);
     if (unittype === 31)
     {
-        /*if (pongtimer !== null)
-            clearTimeout(pongtimer);
-
-        pongtimer=setTimeout(noPong,3000);*/
+        // Server PONG sentinel — proof the control channel is alive. Tracked
+        // separately from video so heartbeat() can detect a half-open channel.
+        lastPongAt = Date.now();
         return;
     }
     if (unittype === 1 || unittype === 5) {
         videoMagic(dat);
 
-        // Notify the main thread on first video frame only
-        if (!firstVideoFrameReceived) {
+        // Dismiss the waiting overlay only on a real IDR keyframe (unittype 5),
+        // never on a P-frame: a P-frame with no preceding keyframe decodes to a
+        // green/corrupt image that must not be shown to the user as "ready".
+        if (unittype === 5 && !firstVideoFrameReceived) {
             firstVideoFrameReceived = true;
-            console.log("First video frame received (unittype:", unittype, "), notifying main thread");
+            console.log("First IDR keyframe decoded, notifying main thread");
 
             // Send progress update and videoFrameReceived notification
             self.postMessage({
@@ -493,7 +533,108 @@ function resetReconnectionState() {
     console.log('🔄 Reconnection state reset');
 }
 
+/**
+ * Re-queries the phone's local HTTP discovery endpoint to learn the current
+ * WebSocket port. The phone re-randomises that port on every service start, so
+ * the port captured at INIT goes stale after a phone-side restart. Uses
+ * reconnect=true so the query is side-effect-free (no resolution change pushed
+ * to Android Auto). Returns the last known port unchanged if every probe fails.
+ */
+async function rediscoverPort() {
+    for (let i = 0; i < DISCOVERY_PORT_COUNT; i++) {
+        const discoveryPort = DISCOVERY_PORT_BASE + i;
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 3000);
+            const url = `https://taada.top:${discoveryPort}/getsocketport?w=${width}&h=${height}&webcodec=true&reconnect=true`;
+            const response = await fetch(url, {method: 'get', signal: controller.signal});
+            clearTimeout(timeout);
+            if (!response.ok) {
+                continue;
+            }
+            const json = JSON.parse(await response.text());
+            if (json && json.port) {
+                console.log(`Rediscovered WebSocket port ${json.port} via discovery port ${discoveryPort}`);
+                return json.port;
+            }
+        } catch (e) {
+            console.log(`Discovery port ${discoveryPort} failed: ${e.message}`);
+        }
+    }
+    console.warn('Port rediscovery failed on all ports, keeping last known port ' + port);
+    return port;
+}
+
+/**
+ * Resets per-session client state so a reconnect starts clean. Without this,
+ * stale module-level state leaks across a reconnect: the waiting/ready UI never
+ * reappears (firstVideoFrameReceived), the heartbeat staleness check mis-fires
+ * (lastheart), a dangling timer fires against the new socket (pongtimer), and
+ * pre-drop frames render after reconnect — leaking WebCodecs VideoFrames that
+ * are never closed.
+ */
+function resetStreamStateForReconnect() {
+    firstVideoFrameReceived = false;
+    lastheart = 0;
+    lastPongAt = 0;
+
+    if (pongtimer) {
+        clearTimeout(pongtimer);
+        pongtimer = null;
+    }
+
+    for (const frame of pendingFrames) {
+        if (frame && frame.close) {
+            try { frame.close(); } catch (e) { /* frame already closed */ }
+        }
+    }
+    pendingFrames = [];
+    underflow = true;
+
+    // Recreate the video decoder: one left wedged on a partial GOP from before
+    // the drop stays wedged after it. The server re-sends the codec config and
+    // forces a fresh IDR on reconnect, so a fresh decoder re-initialises cleanly.
+    // The Broadway fallback has no VideoDecoder to recreate — it re-syncs on the
+    // next SPS+IDR once pendingFrames and sps are cleared.
+    sps = undefined;
+    if (broadwayDecoder === null) {
+        if (decoder && decoder.state !== 'closed') {
+            try { decoder.close(); } catch (e) { /* already closed */ }
+        }
+        try {
+            createVideoDecoder();
+        } catch (e) {
+            switchToBroadway();
+        }
+    }
+}
+
+/**
+ * Triggers an in-place reconnect of the control WebSocket without reloading the
+ * page. Closing the socket fires its 'close' event — the single canonical entry
+ * into socketClose(), de-duped by the isReconnecting guard.
+ */
+function forceReconnect() {
+    if (isServerShuttingDown || forceReconnectPending || isReconnecting) {
+        return;
+    }
+    forceReconnectPending = true;
+    if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+        console.log('Forcing in-place reconnect: closing socket');
+        try { socket.close(); } catch (e) { /* ignore */ }
+    } else {
+        console.log('Forcing in-place reconnect: socket already closed');
+        socketClose({reason: 'forced reconnect'});
+    }
+}
+
 function startSocket() {
+    // Committing to a new socket: allow this socket's own failure to schedule a
+    // fresh reconnect. socketClose() re-asserts isReconnecting on failure; the
+    // 'open' handler below clears it for good on success.
+    isReconnecting = false;
+    forceReconnectPending = false;
+
     socket = new WebSocket(`wss://taada.top:${port}`);
     socket.sendObject = (obj) => {
         try {
@@ -506,6 +647,20 @@ function startSocket() {
     }
 
     socket.binaryType = "arraybuffer";
+
+    // Watchdog: a socket stuck in CONNECTING never fires 'open'. Close it so the
+    // 'close' event drives socketClose() into another backoff attempt instead of
+    // wedging isReconnecting=true forever.
+    if (connectTimeout) {
+        clearTimeout(connectTimeout);
+    }
+    connectTimeout = setTimeout(() => {
+        if (socket && socket.readyState === WebSocket.CONNECTING) {
+            console.warn('WebSocket connect timed out, closing to retry');
+            try { socket.close(); } catch (e) { /* ignore */ }
+        }
+    }, 10000);
+
     socket.addEventListener('open', () => {
         socket.binaryType = "arraybuffer";
 
@@ -518,6 +673,13 @@ function startSocket() {
             clearTimeout(reconnectionTimeout);
             reconnectionTimeout = null;
         }
+        if (connectTimeout) {
+            clearTimeout(connectTimeout);
+            connectTimeout = null;
+        }
+
+        // Baseline for the heartbeat dead-channel check until the first real PONG.
+        lastPongAt = Date.now();
 
         console.log('✅ WebSocket connected successfully');
 
@@ -544,7 +706,9 @@ function startSocket() {
 
         if (heart === 0) {
             heart = setInterval(heartbeat, 1000);
-            setInterval(updateFrameCounter, 1000)
+        }
+        if (frameCounterTimer === 0) {
+            frameCounterTimer = setInterval(updateFrameCounter, 1000);
         }
     });
 
@@ -562,76 +726,92 @@ function socketClose(event) {
         return;
     }
 
-    // 🚨 PROTECTION #2: Éviter les tentatives de reconnexion multiples simultanées
-    // Cette vérification empêche la boucle infinie quand 'error' ET 'close' se déclenchent
+    // 🚨 PROTECTION #2: Ignorer un événement provenant d'un socket périmé
+    // (un ancien socket pourrait émettre un 'close' tardif après reconnexion).
+    if (event && event.target && event.target !== socket) {
+        console.log('Ignoring close/error from a stale socket');
+        return;
+    }
+
+    // 🚨 PROTECTION #3: Éviter les cycles de reconnexion concurrents — 'error' et
+    // 'close' se déclenchent souvent ensemble; ce drapeau les dédoublonne.
     if (isReconnecting) {
         console.log('Reconnection already in progress, ignoring duplicate event');
         return;
     }
 
-    // 🚨 PROTECTION #3: Limiter le nombre de tentatives de reconnexion
-    if (reconnectionAttempt >= MAX_RECONNECTION_ATTEMPTS) {
-        console.error(`❌ Maximum reconnection attempts (${MAX_RECONNECTION_ATTEMPTS}) reached. Giving up.`);
-
-        // Notifier le thread principal de l'échec définitif
-        self.postMessage({
-            error: `Failed to reconnect after ${MAX_RECONNECTION_ATTEMPTS} attempts. Please restart the service.`,
-            connectionFailed: true
-        });
-
-        // Afficher un message d'erreur permanent
-        self.postMessage({
-            connectionLost: true,
-            reason: "Maximum reconnection attempts reached",
-            permanent: true
-        });
-
-        return;
-    }
-
     // Marquer qu'une reconnexion est en cours
     isReconnecting = true;
+    forceReconnectPending = false;
     reconnectionAttempt++;
 
-    // 🚨 AMÉLIORATION: Calculer le délai avec backoff exponentiel
-    // Formule: min(BASE_DELAY * 2^(attempt-1), MAX_DELAY)
-    // Exemple: 2s, 4s, 8s, 16s, 30s (plafonné)
+    // Stopper les timers immédiatement: pendant le backoff, un tick de heartbeat
+    // ou un pongtimer toucherait un socket mort (ou relancerait forceReconnect).
+    if (heart !== 0) {
+        clearInterval(heart);
+        heart = 0;
+    }
+    if (pongtimer) {
+        clearTimeout(pongtimer);
+        pongtimer = null;
+    }
+    if (connectTimeout) {
+        clearTimeout(connectTimeout);
+        connectTimeout = null;
+    }
+
+    // Backoff exponentiel plafonné à 30 s. La reconnexion n'abandonne JAMAIS: le
+    // lien Wi-Fi phone↔voiture finit toujours par revenir, et recharger la page
+    // hors-ligne la bloquerait. Au-delà du seuil, on ne change que le message.
     const exponentialDelay = Math.min(
         BASE_RECONNECTION_DELAY * Math.pow(2, reconnectionAttempt - 1),
         MAX_RECONNECTION_DELAY
     );
 
-    console.log(`🔄 Connection lost. Reconnection attempt ${reconnectionAttempt}/${MAX_RECONNECTION_ATTEMPTS} in ${exponentialDelay}ms`);
+    console.log(`🔄 Connection lost. Reconnection attempt ${reconnectionAttempt} in ${exponentialDelay}ms`);
 
     // 🚨 NOUVEAU: Notifier le thread principal de la perte de connexion
     self.postMessage({
         connectionLost: true,
-        reason: event.reason || "Connection closed",
+        reason: (event && event.reason) || "Connection closed",
         reconnectionAttempt: reconnectionAttempt,
-        maxAttempts: MAX_RECONNECTION_ATTEMPTS,
         nextRetryIn: exponentialDelay
     });
 
-    // Afficher un message informatif
+    // Afficher un message informatif (le texte change après le seuil souple).
     self.postMessage({
-        error: `Lost connection to phone, trying to reconnect (attempt ${reconnectionAttempt}/${MAX_RECONNECTION_ATTEMPTS})...`
+        error: reconnectionAttempt >= SOFT_RECONNECTION_THRESHOLD
+            ? `Still reconnecting to phone (attempt ${reconnectionAttempt})...`
+            : `Lost connection to phone, trying to reconnect (attempt ${reconnectionAttempt})...`
     });
 
-    // Attendre avant de reconnecter (backoff exponentiel)
-    reconnectionTimeout = setTimeout(() => {
+    // Attendre le backoff, re-découvrir le port, puis relancer le socket.
+    reconnectionTimeout = setTimeout(async () => {
         console.log(`🚀 Attempting reconnection #${reconnectionAttempt}`);
+
+        // Re-découvrir le port: le téléphone le re-randomise à chaque redémarrage
+        // du service, donc le port capturé à l'INIT est périmé.
+        port = await rediscoverPort();
+
+        // Le shutdown a pu arriver pendant l'await.
+        if (isServerShuttingDown) {
+            isReconnecting = false;
+            return;
+        }
+
+        // Repartir d'un état propre avant de rouvrir le socket.
+        resetStreamStateForReconnect();
 
         try {
             startSocket();
         } catch (error) {
             console.error('❌ Failed to start socket during reconnection:', error);
-            // Réinitialiser le flag et permettre une nouvelle tentative
-            isReconnecting = false;
-
-            // Tenter à nouveau si on n'a pas atteint la limite
-            if (reconnectionAttempt < MAX_RECONNECTION_ATTEMPTS) {
-                socketClose(event); // Relancer le processus
+            if (heart !== 0) {
+                clearInterval(heart);
+                heart = 0;
             }
+            isReconnecting = false;
+            socketClose({reason: 'reconnect setup failed'}); // Relancer le backoff
         }
     }, exponentialDelay);
 }
