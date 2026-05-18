@@ -534,11 +534,13 @@ function resetReconnectionState() {
 }
 
 /**
- * Re-queries the phone's local HTTP discovery endpoint to learn the current
- * WebSocket port. The phone re-randomises that port on every service start, so
- * the port captured at INIT goes stale after a phone-side restart. Uses
- * reconnect=true so the query is side-effect-free (no resolution change pushed
- * to Android Auto). Returns the last known port unchanged if every probe fails.
+ * Re-queries the phone's local HTTP discovery endpoint after a drop. The phone
+ * re-randomises the WebSocket port on every service start, and a settings
+ * change can alter the resolution while the page stays open, so both the port
+ * and the dimensions captured at INIT go stale. Uses reconnect=true so the
+ * query stays side-effect-free on the phone (no UpdateUiConfigRequest pushed to
+ * Android Auto). Returns the parsed discovery JSON, or null when every probe
+ * fails — the caller then keeps the last known port and dimensions.
  */
 async function rediscoverPort() {
     for (let i = 0; i < DISCOVERY_PORT_COUNT; i++) {
@@ -555,14 +557,69 @@ async function rediscoverPort() {
             const json = JSON.parse(await response.text());
             if (json && json.port) {
                 console.log(`Rediscovered WebSocket port ${json.port} via discovery port ${discoveryPort}`);
-                return json.port;
+                return json;
             }
         } catch (e) {
             console.log(`Discovery port ${discoveryPort} failed: ${e.message}`);
         }
     }
     console.warn('Port rediscovery failed on all ports, keeping last known port ' + port);
-    return port;
+    return null;
+}
+
+/**
+ * Applies the geometry learned from a reconnect-time discovery probe. The phone
+ * can change resolution while the page stays connected — a settings change
+ * restarts its service, which is exactly what triggers the reconnect — so the
+ * width/height/margins captured at INIT go stale. Re-deriving them here keeps
+ * the WebGL texture, the offscreen canvas and the decoder in sync with the
+ * phone; a stale width/height shears every decoded frame. The main thread is
+ * notified so it can re-apply the CSS letterbox sizing and touch-coordinate
+ * mapping it owns.
+ */
+function applyRediscoveredConfig(json) {
+    if (!json) {
+        return;
+    }
+
+    // Mirror main.js postWorkerMessages(): the resolution index maps to fixed
+    // decoder dimensions. Keep the two in lockstep.
+    let newWidth, newHeight;
+    if (json.resolution === 2) {
+        newWidth = 1920;
+        newHeight = 1080;
+    } else if (json.resolution === 1) {
+        newWidth = 1280;
+        newHeight = 720;
+    } else {
+        newWidth = 800;
+        newHeight = 480;
+    }
+
+    const dimensionsChanged = newWidth !== width || newHeight !== height;
+    width = newWidth;
+    height = newHeight;
+
+    if (dimensionsChanged && gl) {
+        // Only the worker can resize the canvas after transferControlToOffscreen.
+        // Assigning width/height reallocates (and clears) the drawing buffer, so
+        // do it only on a real change to avoid a black flash on a plain reconnect.
+        gl.canvas.width = width;
+        gl.canvas.height = height;
+        gl.viewport(0, 0, width, height);
+        console.log(`Reconnect: resized decoder/canvas to ${width}x${height}`);
+    }
+
+    // The main thread owns the CSS letterbox sizing and touch-coordinate
+    // mapping; hand it the fresh geometry so both survive the reconnect.
+    self.postMessage({
+        resolutionUpdate: {
+            width: width,
+            height: height,
+            widthMargin: json.widthMargin || 0,
+            heightMargin: json.heightMargin || 0
+        }
+    });
 }
 
 /**
@@ -789,14 +846,23 @@ function socketClose(event) {
     reconnectionTimeout = setTimeout(async () => {
         console.log(`🚀 Attempting reconnection #${reconnectionAttempt}`);
 
-        // Re-découvrir le port: le téléphone le re-randomise à chaque redémarrage
-        // du service, donc le port capturé à l'INIT est périmé.
-        port = await rediscoverPort();
+        // Re-découvrir le téléphone: il re-randomise le port à chaque
+        // redémarrage du service, et un changement de résolution (qui redémarre
+        // justement le service) périme les dimensions capturées à l'INIT.
+        const discovery = await rediscoverPort();
 
         // Le shutdown a pu arriver pendant l'await.
         if (isServerShuttingDown) {
             isReconnecting = false;
             return;
+        }
+
+        // Adopter le port et la géométrie fraîchement découverts. Si toutes les
+        // sondes ont échoué (discovery === null), on conserve les dernières
+        // valeurs connues et on retente quand même la connexion.
+        if (discovery) {
+            port = discovery.port;
+            applyRediscoveredConfig(discovery);
         }
 
         // Repartir d'un état propre avant de rouvrir le socket.

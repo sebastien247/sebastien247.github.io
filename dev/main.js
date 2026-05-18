@@ -633,6 +633,22 @@ function postWorkerMessages(json) {
             return;
         }
 
+        // 🚨 Reconnexion: le worker a re-découvert la résolution du téléphone
+        // après une coupure et a pu redimensionner le décodeur et le canvas.
+        // Ré-appliquer la géométrie gérée par le thread principal — le
+        // dimensionnement CSS (letterbox) et la conversion des coordonnées
+        // tactiles — pour qu'un changement de résolution survive à la coupure.
+        if (e.data.hasOwnProperty('resolutionUpdate')) {
+            const update = e.data.resolutionUpdate;
+            console.log(`Reconnect resolution update: ${update.width}x${update.height}, margins ${update.widthMargin}x${update.heightMargin}`);
+            width = update.width;
+            height = update.height;
+            widthMargin = update.widthMargin;
+            heightMargin = update.heightMargin;
+            updateCanvasSize();
+            return;
+        }
+
         if (e.data.hasOwnProperty('warning')) {
             warningElement.style.display="block";
             logElement.style.display="none";
