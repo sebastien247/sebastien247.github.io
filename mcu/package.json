@@ -1,0 +1,20 @@
+{
+  "name": "teslaa-server",
+  "version": "1.0.0",
+  "description": "Serveur HTTPS local pour TeslAA",
+  "main": "https-server-docker.js",
+  "scripts": {
+    "start": "node https-server-docker.js",
+    "generate-cert": "mkdir -p cert && openssl req -nodes -new -x509 -keyout cert/key.pem -out cert/cert.pem -days 365 -subj '/CN=localhost'",
+    "build:legacy": "babel main.js async_decoder.js binary_touch_protocol.js --out-dir legacy && node scripts/build-legacy-assets.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.25.0",
+    "@babel/core": "^7.26.0",
+    "@babel/preset-env": "^7.26.0"
+  }
+}

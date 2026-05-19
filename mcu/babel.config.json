@@ -1,0 +1,12 @@
+{
+  "sourceType": "script",
+  "presets": [
+    [
+      "@babel/preset-env",
+      {
+        "targets": { "safari": "8" },
+        "useBuiltIns": false
+      }
+    ]
+  ]
+}
