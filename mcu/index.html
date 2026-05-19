@@ -1,6 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script>
+    /* mcu1-legacy-redirect: the modern UI needs ES6+ (let, arrow functions,
+       async). Any browser that cannot parse it -- Tesla MCU1's QtCarBrowser,
+       old Safari, etc. -- is sent to the transpiled ES5 legacy bundle. Feature
+       detection, not UA sniffing, so it catches every such browser. Pure ES5,
+       a no-op on modern browsers; a static host cannot redirect server-side. */
+    (function () {
+        if (location.pathname.indexOf('legacy') !== -1) { return; }
+        try {
+            eval('let _t = async () => 0;');
+        } catch (e) {
+            if (e instanceof SyntaxError) {
+                location.replace('legacy/index.html');
+            }
+        }
+    })();
+    </script>
     <title>TaaDa | Tesla Android Auto - Driver Assistant</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
