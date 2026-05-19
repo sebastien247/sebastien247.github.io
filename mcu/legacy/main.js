@@ -705,18 +705,27 @@ function postWorkerMessages(json) {
       return;
     }
 
-    // Software-render mode: the worker shipped a decoded RGBA frame. Paint
-    // it with a cached ImageData, rebuilt only when the resolution changes.
+    // Software-render mode: the worker shipped a decoded RGBA frame. Size
+    // the 2D canvas to the real frame and paint it with a cached ImageData
+    // (rebuilt only when the resolution changes).
     if (e.data.hasOwnProperty('frameBuffer')) {
       if (softwareCtx) {
+        var frameBytes = new Uint8Array(e.data.frameBuffer);
         var fw = e.data.width,
           fh = e.data.height;
-        var frameBytes = new Uint8Array(e.data.frameBuffer);
-        if (frameBytes.length === fw * fh * 4) {
-          if (!swImageData || swImageData.width !== fw || swImageData.height !== fh) {
+        if (fw > 0 && fh > 0 && frameBytes.length >= fw * fh * 4) {
+          if (!swImageData || canvasElement.width !== fw || canvasElement.height !== fh) {
+            // main.js owns the canvas in software mode (it was never
+            // transferred), so resize its backing store here.
+            canvasElement.width = fw;
+            canvasElement.height = fh;
+            width = fw;
+            height = fh;
             swImageData = softwareCtx.createImageData(fw, fh);
+            updateCanvasSize();
+            console.log('Software render: canvas sized to ' + fw + 'x' + fh);
           }
-          swImageData.data.set(frameBytes);
+          swImageData.data.set(frameBytes.length === fw * fh * 4 ? frameBytes : frameBytes.subarray(0, fw * fh * 4));
           softwareCtx.putImageData(swImageData, 0, 0);
         }
       }

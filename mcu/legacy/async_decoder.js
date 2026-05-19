@@ -51,6 +51,12 @@ var positionLocation, texcoordLocation, positionBuffer, texcoordBuffer;
 // Broadway decodes here and RGBA frames are postMessage'd to the main thread.
 var softwareRender = false;
 
+// True decoded dimensions of the latest Broadway frame, reported by
+// onPictureDecoded. Software-render mode ships these (not the width/height
+// globals, which can lag a resolution change) so the 2D canvas is sized right.
+var broadwayWidth = 0,
+  broadwayHeight = 0;
+
 // ========== WebSocket Reconnection Management ==========
 var isReconnecting = false; // Flag pour éviter les tentatives de reconnexion multiples
 var reconnectionAttempt = 0; // Compteur de tentatives de reconnexion
@@ -137,12 +143,13 @@ function releaseTexture(gl, texture) {
 function drawImageToCanvas(image) {
   if (softwareRender) {
     // Broadway (built with {rgb:true}) hands back a fresh per-frame RGBA
-    // Uint8Array, so transferring its buffer is safe and zero-copy. The
-    // main thread paints it with putImageData.
+    // Uint8Array, so transferring its buffer is safe and zero-copy. Ship the
+    // real decoded dimensions — not the width/height globals, which can be a
+    // stale resolution — so the main thread sizes its 2D canvas correctly.
     self.postMessage({
       frameBuffer: image.buffer,
-      width: width,
-      height: height
+      width: broadwayWidth || width,
+      height: broadwayHeight || height
     }, [image.buffer]);
     return;
   }
@@ -182,7 +189,15 @@ function switchToBroadway() {
   broadwayDecoder = new Decoder({
     rgb: true
   });
-  broadwayDecoder.onPictureDecoded = function (buffer) {
+  broadwayDecoder.onPictureDecoded = function (buffer, decodedWidth, decodedHeight) {
+    // Broadway reports the true decoded frame size here — the only reliable
+    // source. The width/height globals can lag behind a resolution change.
+    if (decodedWidth) {
+      broadwayWidth = decodedWidth;
+    }
+    if (decodedHeight) {
+      broadwayHeight = decodedHeight;
+    }
     pendingFrames.push(buffer);
     if (underflow) {
       renderFrame();

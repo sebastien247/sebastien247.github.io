@@ -31,6 +31,10 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     step2TimeoutId = null,
     isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
 
+// Software-render mode (MCU1/QtCarBrowser): main.js keeps the canvas and paints
+// RGBA frames from the worker with a 2D context instead of transferring it.
+let softwareCtx = null, swImageData = null;
+
 canvasElement.style.display = "none";
 
 /**
@@ -441,6 +445,13 @@ function postWorkerMessages(json) {
 
         widthMargin = json.widthMargin;
         heightMargin = json.heightMargin;
+
+        // Software-render mode: main.js owns the canvas backing store, so resize
+        // it here (only the worker can resize a transferred OffscreenCanvas).
+        if (softwareCtx) {
+            canvasElement.width = width;
+            canvasElement.height = height;
+        }
         
         // Seul le worker peut mettre à jour le canvas après transferControlToOffscreen
         // Envoyer les deux messages séparément pour plus de clarté
@@ -512,12 +523,15 @@ function postWorkerMessages(json) {
         }
     }
 
-    if (appVersion < 53) {
-        alert("You need to run TaaDa 2.1.0 (build 53) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+    // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
+    if (appVersion < 65) {
+        alert("You need to run TaaDa build 65 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
         //return;
     }
 
     const forceBroadway = findGetParameter("broadway") === "1";
+    // ?software=1 forces the MCU1 software-render path on any browser (testing).
+    const forceSoftware = findGetParameter("software") === "1";
 
 
     canvasElement.width = width;
@@ -526,14 +540,27 @@ function postWorkerMessages(json) {
     // Appliquer la transformation d'échelle au conteneur
     //canvasElement.style.transform = "scale(" + zoom + ")";
 
-    // Transfert du contrôle au worker
-    offscreen = canvasElement.transferControlToOffscreen();
-    
-    // Initialiser le worker avec le canvas offscreen
-    demuxDecodeWorker.postMessage(
-        {canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height}, 
-        [offscreen]
-    );
+    // OffscreenCanvas + transferControlToOffscreen drive the modern WebGL path.
+    // MCU1/QtCarBrowser has neither — fall back to software render: main.js keeps
+    // the canvas and paints RGBA frames the worker decodes with Broadway.
+    const canSoftwareOffscreen = typeof canvasElement.transferControlToOffscreen === 'function'
+        && typeof OffscreenCanvas !== 'undefined';
+
+    if (canSoftwareOffscreen && !forceSoftware) {
+        // Modern path — unchanged: transfer the canvas to the worker.
+        offscreen = canvasElement.transferControlToOffscreen();
+        demuxDecodeWorker.postMessage(
+            {canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height},
+            [offscreen]
+        );
+    } else {
+        // Software-render path (MCU1): no canvas transfer — main.js keeps the
+        // canvas and a 2D context, and paints frames the worker ships back.
+        softwareCtx = canvasElement.getContext('2d');
+        demuxDecodeWorker.postMessage(
+            {port: port, action: 'INIT', appVersion: appVersion, broadway: true, softwareRender: true, width: width, height: height}
+        );
+    }
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
@@ -593,6 +620,36 @@ function postWorkerMessages(json) {
             return;
         }
 
+        // Software-render mode: the worker shipped a decoded RGBA frame. Size
+        // the 2D canvas to the real frame and paint it with a cached ImageData
+        // (rebuilt only when the resolution changes).
+        if (e.data.hasOwnProperty('frameBuffer')) {
+            if (softwareCtx) {
+                const frameBytes = new Uint8Array(e.data.frameBuffer);
+                const fw = e.data.width, fh = e.data.height;
+                if (fw > 0 && fh > 0 && frameBytes.length >= fw * fh * 4) {
+                    if (!swImageData || canvasElement.width !== fw || canvasElement.height !== fh) {
+                        // main.js owns the canvas in software mode (it was never
+                        // transferred), so resize its backing store here.
+                        canvasElement.width = fw;
+                        canvasElement.height = fh;
+                        width = fw;
+                        height = fh;
+                        swImageData = softwareCtx.createImageData(fw, fh);
+                        updateCanvasSize();
+                        console.log('Software render: canvas sized to ' + fw + 'x' + fh);
+                    }
+                    swImageData.data.set(
+                        frameBytes.length === fw * fh * 4
+                            ? frameBytes
+                            : frameBytes.subarray(0, fw * fh * 4)
+                    );
+                    softwareCtx.putImageData(swImageData, 0, 0);
+                }
+            }
+            return;
+        }
+
         if (e.data.hasOwnProperty('error')) {
             console.error('Socket error received:', e.data.error);
             forcedRefreshCounter++;
@@ -645,6 +702,12 @@ function postWorkerMessages(json) {
             height = update.height;
             widthMargin = update.widthMargin;
             heightMargin = update.heightMargin;
+            // Software-render mode: main.js owns the canvas, so resize its
+            // backing store here (the worker can't — it was never transferred).
+            if (softwareCtx) {
+                canvasElement.width = width;
+                canvasElement.height = height;
+            }
             updateCanvasSize();
             return;
         }
@@ -694,15 +757,23 @@ function postWorkerMessages(json) {
 
     });
 
-    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        demuxDecodeWorker.postMessage({action: "NIGHT", value: true});
-    } else {
-        demuxDecodeWorker.postMessage({action: "NIGHT", value: false});
-    }
+    // Resolve the dark-mode query once. MediaQueryList.addEventListener did not
+    // exist before Safari 14 (MCU1/QtCarBrowser is WebKit 601/534) — calling it
+    // unguarded there throws and aborts startup, so feature-detect it.
+    const darkModeQuery = window.matchMedia
+        ? window.matchMedia('(prefers-color-scheme: dark)')
+        : null;
 
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
-        demuxDecodeWorker.postMessage({action: "NIGHT", value: event.matches});
+    demuxDecodeWorker.postMessage({
+        action: "NIGHT",
+        value: !!(darkModeQuery && darkModeQuery.matches)
     });
+
+    if (darkModeQuery && darkModeQuery.addEventListener) {
+        darkModeQuery.addEventListener('change', event => {
+            demuxDecodeWorker.postMessage({action: "NIGHT", value: event.matches});
+        });
+    }
 
     //setInterval(function(){navigator.geolocation.getCurrentPosition(handlepossition);},500);
 }
