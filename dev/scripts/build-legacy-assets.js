@@ -74,7 +74,7 @@ var html = fs.readFileSync(htmlPath, 'utf8');
 // Strip the MCU1 client-side redirect <script> first — before the other
 // <script> strips below. The legacy page IS the redirect target, and removing
 // it first keeps the inline-Firebase regex anchored to the right <script> tag.
-html = html.replace(/[ \t]*<script>[\s\S]*?QtCarBrowser[\s\S]*?<\/script>\r?\n?/i, '');
+html = html.replace(/[ \t]*<script>[\s\S]*?mcu1-legacy-redirect[\s\S]*?<\/script>\r?\n?/i, '');
 
 // Strip the feedback stylesheet link.
 html = html.replace(/[ \t]*<link[^>]*feedback\.css[^>]*>\r?\n?/i, '');

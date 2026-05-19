@@ -2,15 +2,19 @@
 <html lang="en">
 <head>
     <script>
-    /* MCU1 / QtCarBrowser cannot run this page (2015 WebKit, no ES6). Redirect
-       it to the transpiled legacy bundle before anything else loads. Pure ES5;
-       a no-op on every modern browser. A static host (GitHub Pages) cannot do
-       this server-side, so it must happen here. */
+    /* mcu1-legacy-redirect: the modern UI needs ES6+ (let, arrow functions,
+       async). Any browser that cannot parse it -- Tesla MCU1's QtCarBrowser,
+       old Safari, etc. -- is sent to the transpiled ES5 legacy bundle. Feature
+       detection, not UA sniffing, so it catches every such browser. Pure ES5,
+       a no-op on modern browsers; a static host cannot redirect server-side. */
     (function () {
-        var ua = navigator.userAgent || '';
-        if (/QtCarBrowser/i.test(ua) && !/Chrom(e|ium)/i.test(ua) &&
-            location.pathname.indexOf('legacy') === -1) {
-            location.replace('legacy/index.html');
+        if (location.pathname.indexOf('legacy') !== -1) { return; }
+        try {
+            eval('let _t = async () => 0;');
+        } catch (e) {
+            if (e instanceof SyntaxError) {
+                location.replace('legacy/index.html');
+            }
         }
     })();
     </script>
