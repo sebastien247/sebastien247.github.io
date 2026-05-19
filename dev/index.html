@@ -1,6 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script>
+    /* MCU1 / QtCarBrowser cannot run this page (2015 WebKit, no ES6). Redirect
+       it to the transpiled legacy bundle before anything else loads. Pure ES5;
+       a no-op on every modern browser. A static host (GitHub Pages) cannot do
+       this server-side, so it must happen here. */
+    (function () {
+        var ua = navigator.userAgent || '';
+        if (/QtCarBrowser/i.test(ua) && !/Chrom(e|ium)/i.test(ua) &&
+            location.pathname.indexOf('legacy') === -1) {
+            location.replace('legacy/index.html');
+        }
+    })();
+    </script>
     <title>TaaDa | Tesla Android Auto - Driver Assistant</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
