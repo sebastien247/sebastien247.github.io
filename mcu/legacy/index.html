@@ -31,6 +31,16 @@
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', render);
         }
+        // MCU1's QtCarBrowser crashes the page ~1 second after an alert()
+        // opens — the embedded browser's watchdog appears to kill the tab on
+        // long-blocking JS. Convert alert() to a non-blocking trace so the
+        // build-65 warning (and any other) cannot freeze the thread.
+        try {
+            window.alert = function (msg) {
+                try { console.warn('[alert]', msg); } catch (_e) {}
+                try { window._mcu1Trace('[alert blocked] ' + msg); } catch (_e) {}
+            };
+        } catch (_e) {}
         window._mcu1Trace('1. Page loaded');
     })();
     </script>
