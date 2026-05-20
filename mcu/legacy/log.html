@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TaaDa MCU1 — log</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+html, body { margin: 0; padding: 0; background: #000; color: #0f0; }
+body { padding: 8px; font: 13px/1.4 monospace; }
+h1 { color: #fff; font-size: 14px; margin: 0 0 8px 0; padding: 0; }
+.sub { color: #888; font-size: 11px; margin-bottom: 8px; }
+pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 6px;
+      background: rgba(0,255,0,0.04); border: 1px solid #050; }
+.err { color: #f55; }
+.info { color: #aaa; font-style: italic; }
+.meta { color: #777; font-size: 11px; margin-top: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>TaaDa MCU1 — diagnostic log (read-only)</h1>
+<div class="sub">Reads localStorage["mcu1-trace"] only. No worker, no decoder, no fetch, no alert. Cannot crash.</div>
+<pre id="log">(initializing...)</pre>
+<div class="meta" id="meta"></div>
+<script>
+/* Pure ES5. Reads the trace the legacy bundle wrote to localStorage on its
+   previous run. Useful when the legacy bundle crashes the browser before
+   its on-page overlay can be photographed. */
+(function () {
+    var pre = document.getElementById('log');
+    var meta = document.getElementById('meta');
+    function show(txt, cls) {
+        pre.textContent = txt;
+        if (cls) { pre.className = cls; }
+    }
+    var log;
+    try {
+        log = localStorage.getItem('mcu1-trace');
+    } catch (e) {
+        show('!! localStorage is not accessible: ' + (e && e.message ? e.message : String(e)), 'err');
+        return;
+    }
+    if (log === null) {
+        show(
+            '(no "mcu1-trace" key in localStorage)\n\n' +
+            'localStorage itself works, but nothing was written.\n' +
+            'Either the legacy bundle never reached its first _mcu1Trace\n' +
+            'call, or localStorage is per-page on this browser.',
+            'info'
+        );
+    } else if (log === '') {
+        show('(empty string stored)', 'info');
+    } else {
+        show(log);
+    }
+    var info = 'now:      ' + new Date().toString() + '\n';
+    info += 'log size: ' + (log == null ? '(null)' : log.length + ' chars') + '\n';
+    info += 'UA:       ' + (navigator.userAgent || '?');
+    meta.textContent = info;
+    window.scrollTo(0, document.body.scrollHeight);
+})();
+</script>
+</body>
+</html>
