@@ -185,10 +185,12 @@ function createShader(gl, type, source) {
 }
 function switchToBroadway() {
   console.log("Switching to broadway decoder");
+  try { self.postMessage({ trace: '10. switchToBroadway: calling new Decoder({rgb:true})' }); } catch (_te) {}
   decoder = null;
   broadwayDecoder = new Decoder({
     rgb: true
   });
+  try { self.postMessage({ trace: '11. switchToBroadway: Decoder constructor returned' }); } catch (_te) {}
   broadwayDecoder.onPictureDecoded = function (buffer, decodedWidth, decodedHeight) {
     // Broadway reports the true decoded frame size here — the only reliable
     // source. The width/height globals can lag behind a resolution change.
@@ -232,7 +234,9 @@ function initCanvas(canvas, forceBroadway) {
   // Software-render mode: no OffscreenCanvas was transferred and there is no
   // WebGL context to build. width/height came from the INIT message.
   if (softwareRender) {
+    try { self.postMessage({ trace: '9. initCanvas: software branch, calling switchToBroadway' }); } catch (_te) {}
     switchToBroadway();
+    try { self.postMessage({ trace: '12. switchToBroadway returned, calling startSocket' }); } catch (_te) {}
     startSocket();
     return;
   }
@@ -802,7 +806,9 @@ function startSocket() {
   // 'open' handler below clears it for good on success.
   isReconnecting = false;
   forceReconnectPending = false;
+  try { self.postMessage({ trace: '13. startSocket: new WebSocket(wss://taada.top:' + port + ')' }); } catch (_te) {}
   socket = new WebSocket("wss://taada.top:".concat(port));
+  try { self.postMessage({ trace: '14. WebSocket constructor returned' }); } catch (_te) {}
   socket.sendObject = function (obj) {
     try {
       socket.send(JSON.stringify(obj));
@@ -829,6 +835,7 @@ function startSocket() {
     }
   }, 10000);
   socket.addEventListener('open', function () {
+    try { self.postMessage({ trace: '15. WebSocket OPEN' }); } catch (_te) {}
     socket.binaryType = "arraybuffer";
 
     // 🎉 Connexion réussie! Réinitialiser les compteurs de reconnexion
@@ -1130,6 +1137,7 @@ self.addEventListener('message', /*#__PURE__*/function () {
             _context2.n = 3;
             break;
           }
+          try { self.postMessage({ trace: '8. Worker INIT received' }); } catch (_te) {}
           port = message.data.port;
           appVersion = parseInt(message.data.appVersion);
           useBroadway = message.data.broadway; // Software-render mode (MCU1): no canvas is transferred, so capture the

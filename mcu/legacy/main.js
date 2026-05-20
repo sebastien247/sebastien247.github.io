@@ -410,6 +410,7 @@ function _checkPhone() {
       while (1) switch (_context5.p = _context5.n) {
         case 0:
           console.log('Starting server discovery...');
+          if (window._mcu1Trace) window._mcu1Trace('2. Discovery starting');
 
           // Step 1/3: Server Discovery
           updateConnectionProgress(1, '1/3 - Discovering server...');
@@ -524,6 +525,7 @@ function updateCanvasSize() {
   }
 }
 function postWorkerMessages(json) {
+  if (window._mcu1Trace) window._mcu1Trace('3. Phone responded port=' + json.port + ' res=' + json.resolution + ' build=' + json.buildversion);
   if (json.hasOwnProperty("resolutionChanged")) {
     console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
 
@@ -611,9 +613,11 @@ function postWorkerMessages(json) {
     alert("You need to run TaaDa build 65 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
     //return;
   }
+  if (window._mcu1Trace) window._mcu1Trace('4. Build check done (build ' + appVersion + '), reading params');
   var forceBroadway = findGetParameter("broadway") === "1";
   // ?software=1 forces the MCU1 software-render path on any browser (testing).
   var forceSoftware = findGetParameter("software") === "1";
+  if (window._mcu1Trace) window._mcu1Trace('5. Sizing canvas to ' + width + 'x' + height + ', canSwOffscreen=' + (typeof canvasElement.transferControlToOffscreen === 'function' && typeof OffscreenCanvas !== 'undefined'));
   canvasElement.width = width;
   canvasElement.height = height;
 
@@ -639,7 +643,9 @@ function postWorkerMessages(json) {
   } else {
     // Software-render path (MCU1): no canvas transfer — main.js keeps the
     // canvas and a 2D context, and paints frames the worker ships back.
+    if (window._mcu1Trace) window._mcu1Trace('6a. Software branch: calling getContext(2d)');
     softwareCtx = canvasElement.getContext('2d');
+    if (window._mcu1Trace) window._mcu1Trace('6b. 2D context ' + (softwareCtx ? 'OK' : 'NULL') + ', posting INIT');
     demuxDecodeWorker.postMessage({
       port: port,
       action: 'INIT',
@@ -649,6 +655,7 @@ function postWorkerMessages(json) {
       width: width,
       height: height
     });
+    if (window._mcu1Trace) window._mcu1Trace('7. INIT postMessage returned');
   }
   if (!usebt)
     //If useBT is disabled start 2 websockets for PCM audio and create audio context
@@ -679,6 +686,11 @@ function postWorkerMessages(json) {
     }
   }
   demuxDecodeWorker.addEventListener("message", function (e) {
+    // Diagnostic trace from the worker.
+    if (e.data && e.data.hasOwnProperty('trace')) {
+      if (window._mcu1Trace) window._mcu1Trace('[worker] ' + e.data.trace);
+      return;
+    }
     // 🚨 NOUVEAU: Gérer le shutdown du serveur EN PREMIER (priorité maximale)
     if (e.data.hasOwnProperty('serverShutdown')) {
       console.warn('Server shutdown detected:', e.data.reason);
