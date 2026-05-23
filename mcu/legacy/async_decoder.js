@@ -39,7 +39,9 @@ var pendingFrames = [],
   // Watchdog handle for a WebSocket stuck in CONNECTING
   isServerShuttingDown = false,
   // 🚨 Flag pour indiquer que le serveur s'arrête
-  firstVideoFrameReceived = false; // Flag to track first video frame
+  firstVideoFrameReceived = false,
+  // Flag to track first video frame
+  firstFrameDecoded = false; // Flag to fire trace 17 once per session (reset in resetStreamStateForReconnect)
 
 var texturePool = [];
 
@@ -192,6 +194,10 @@ function switchToBroadway() {
   });
   try { self.postMessage({ trace: '11. switchToBroadway: Decoder constructor returned' }); } catch (_te) {}
   broadwayDecoder.onPictureDecoded = function (buffer, decodedWidth, decodedHeight) {
+    if (!firstFrameDecoded) {
+      firstFrameDecoded = true;
+      try { self.postMessage({ trace: '17. First frame decoded (w=' + decodedWidth + ' h=' + decodedHeight + ')' }); } catch (_te) {}
+    }
     // Broadway reports the true decoded frame size here — the only reliable
     // source. The width/height globals can lag behind a resolution change.
     if (decodedWidth) {
@@ -539,6 +545,7 @@ function handleVideoMessage(dat) {
     // green/corrupt image that must not be shown to the user as "ready".
     if (unittype === 5 && !firstVideoFrameReceived) {
       firstVideoFrameReceived = true;
+      try { self.postMessage({ trace: '16. First IDR received (len=' + dat.length + ')' }); } catch (_te) {}
       console.log("First IDR keyframe decoded, notifying main thread");
 
       // Send progress update and videoFrameReceived notification
@@ -733,6 +740,7 @@ function applyRediscoveredConfig(json) {
  */
 function resetStreamStateForReconnect() {
   firstVideoFrameReceived = false;
+  firstFrameDecoded = false;
   lastheart = 0;
   lastPongAt = 0;
   if (pongtimer) {

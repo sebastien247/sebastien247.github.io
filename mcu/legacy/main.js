@@ -611,7 +611,7 @@ function postWorkerMessages(json) {
 
   // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
   if (appVersion < 65) {
-    //alert("You need to run TaaDa build 65 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+    alert("You need to run TaaDa build 65 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
     //return;
   }
   if (window._mcu1Trace) window._mcu1Trace('4. Build check done (build ' + appVersion + '), reading params');
@@ -740,6 +740,10 @@ function postWorkerMessages(json) {
           }
           swImageData.data.set(frameBytes.length === fw * fh * 4 ? frameBytes : frameBytes.subarray(0, fw * fh * 4));
           softwareCtx.putImageData(swImageData, 0, 0);
+          if (!window._mcu1FirstPaintTraced) {
+            window._mcu1FirstPaintTraced = true;
+            if (window._mcu1Trace) window._mcu1Trace('18. First frame painted (' + fw + 'x' + fh + ')');
+          }
         }
       }
       return;
