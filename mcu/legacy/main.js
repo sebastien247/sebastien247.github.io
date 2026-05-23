@@ -364,7 +364,8 @@ function _tryPort() {
     return _regenerator().w(function (_context4) {
       while (1) switch (_context4.n) {
         case 0:
-          urlToFetch = "https://taada.top:".concat(port, "/getsocketport?w=").concat(window.innerWidth, "&h=").concat(window.innerHeight, "&webcodec=").concat(supportedWebCodec);
+          // MCU1: force resolution 0 (800x480) — viewport-sized frames overflow Tesla's per-tab memory budget and trigger the resource watchdog ("Navigateur fermé pour préserver les ressources").
+          urlToFetch = "https://taada.top:".concat(port, "/getsocketport?w=800&h=480&webcodec=").concat(supportedWebCodec);
           console.log("Trying port ".concat(port, "..."));
           return _context4.a(2, new Promise(function (resolve, reject) {
             var timeout = setTimeout(function () {
@@ -610,7 +611,7 @@ function postWorkerMessages(json) {
 
   // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
   if (appVersion < 65) {
-    //alert("You need to run TaaDa build 65 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+    alert("You need to run TaaDa build 65 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
     //return;
   }
   if (window._mcu1Trace) window._mcu1Trace('4. Build check done (build ' + appVersion + '), reading params');
