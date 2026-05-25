@@ -41,6 +41,13 @@
                 try { window._mcu1Trace('[alert blocked] ' + msg); } catch (_e) {}
             };
         } catch (_e) {}
+        // MCU1 diagnostic: periodic paint counter (every 5 s). Trace 18 only
+        // fires on the first paint — this proves whether subsequent frames
+        // keep being painted or the pipeline stalls at frame 1.
+        window._mcu1PaintCount = 0;
+        setInterval(function () {
+            try { window._mcu1Trace('~5s main: paints=' + window._mcu1PaintCount); } catch (_e) {}
+        }, 5000);
         window._mcu1Trace('1. Page loaded');
     })();
     </script>

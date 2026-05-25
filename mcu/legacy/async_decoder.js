@@ -43,6 +43,21 @@ var pendingFrames = [],
   // Flag to track first video frame
   firstFrameDecoded = false; // Flag to fire trace 17 once per session (reset in resetStreamStateForReconnect)
 
+// MCU1 diagnostic counters — periodic 5 s trace shows whether frames keep
+// flowing past the first one. Reset only when the worker itself reloads.
+var _diagMsgCount = 0, _diagIdrCount = 0, _diagPFrameCount = 0, _diagDecodedCount = 0, _diagTickStarted = false;
+
+// MCU1 diagnostic: one-shot-per-action trace when socket.sendObject swallows
+// a throw. The wrapper at startSocket already posts {error} to main, but that
+// only flashes the warning UI for 5 s — it never lands in log.html, so the
+// tester's photo of log.html cannot reveal a silent ACK/PING failure.
+var _diagSendThrew = {};
+
+// MCU1 transfer-postMessage recovery: if WebKit 601 rejects the transfer list
+// arg, fall back to a structured-clone copy so frames keep reaching main.
+// Slower (1.5 MB/frame copy at 800x480 RGBA, but only when transfer is broken).
+var _transferAllowed = true, _diagTransferThrew = false, _diagCopyThrew = false;
+
 var texturePool = [];
 
 // WebGL handles populated by initCanvas — declared explicitly so the
@@ -148,11 +163,33 @@ function drawImageToCanvas(image) {
     // Uint8Array, so transferring its buffer is safe and zero-copy. Ship the
     // real decoded dimensions — not the width/height globals, which can be a
     // stale resolution — so the main thread sizes its 2D canvas correctly.
-    self.postMessage({
+    var payload = {
       frameBuffer: image.buffer,
       width: broadwayWidth || width,
       height: broadwayHeight || height
-    }, [image.buffer]);
+    };
+    if (_transferAllowed) {
+      try {
+        self.postMessage(payload, [image.buffer]);
+        return;
+      } catch (e) {
+        // WebKit 601 (MCU1) may reject the transfer list — flip permanently to
+        // copy mode so we do not throw on every frame.
+        _transferAllowed = false;
+        if (!_diagTransferThrew) {
+          _diagTransferThrew = true;
+          try { self.postMessage({ trace: 'transfer postMessage threw, switching to copy: ' + (e && e.message ? e.message : e) }); } catch (_te) {}
+        }
+      }
+    }
+    try {
+      self.postMessage(payload);
+    } catch (e2) {
+      if (!_diagCopyThrew) {
+        _diagCopyThrew = true;
+        try { self.postMessage({ trace: 'copy postMessage threw (1st): ' + (e2 && e2.message ? e2.message : e2) }); } catch (_te) {}
+      }
+    }
     return;
   }
   var texture = getTexture(gl);
@@ -194,6 +231,7 @@ function switchToBroadway() {
   });
   try { self.postMessage({ trace: '11. switchToBroadway: Decoder constructor returned' }); } catch (_te) {}
   broadwayDecoder.onPictureDecoded = function (buffer, decodedWidth, decodedHeight) {
+    _diagDecodedCount++;
     if (!firstFrameDecoded) {
       firstFrameDecoded = true;
       try { self.postMessage({ trace: '17. First frame decoded (w=' + decodedWidth + ' h=' + decodedHeight + ')' }); } catch (_te) {}
@@ -537,6 +575,9 @@ function handleVideoMessage(dat) {
     lastPongAt = Date.now();
     return;
   }
+  _diagMsgCount++;
+  if (unittype === 1) { _diagPFrameCount++; }
+  else if (unittype === 5) { _diagIdrCount++; }
   if (unittype === 1 || unittype === 5) {
     videoMagic(dat);
 
@@ -821,6 +862,11 @@ function startSocket() {
     try {
       socket.send(JSON.stringify(obj));
     } catch (e) {
+      var act = obj && obj.action ? obj.action : 'unknown';
+      if (!_diagSendThrew[act]) {
+        _diagSendThrew[act] = true;
+        try { self.postMessage({ trace: 'sendObject threw (action=' + act + ', 1st): ' + (e && e.message ? e.message : e) }); } catch (_te) {}
+      }
       self.postMessage({
         error: e
       });
@@ -1146,6 +1192,12 @@ self.addEventListener('message', /*#__PURE__*/function () {
             break;
           }
           try { self.postMessage({ trace: '8. Worker INIT received' }); } catch (_te) {}
+          if (!_diagTickStarted) {
+            _diagTickStarted = true;
+            setInterval(function () {
+              try { self.postMessage({ trace: '~5s worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length }); } catch (_te) {}
+            }, 5000);
+          }
           port = message.data.port;
           appVersion = parseInt(message.data.appVersion);
           useBroadway = message.data.broadway; // Software-render mode (MCU1): no canvas is transferred, so capture the

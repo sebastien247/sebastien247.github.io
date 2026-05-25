@@ -740,6 +740,7 @@ function postWorkerMessages(json) {
           }
           swImageData.data.set(frameBytes.length === fw * fh * 4 ? frameBytes : frameBytes.subarray(0, fw * fh * 4));
           softwareCtx.putImageData(swImageData, 0, 0);
+          window._mcu1PaintCount = (window._mcu1PaintCount || 0) + 1;
           if (!window._mcu1FirstPaintTraced) {
             window._mcu1FirstPaintTraced = true;
             if (window._mcu1Trace) window._mcu1Trace('18. First frame painted (' + fw + 'x' + fh + ')');
