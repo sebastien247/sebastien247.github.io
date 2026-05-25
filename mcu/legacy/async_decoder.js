@@ -1195,7 +1195,7 @@ self.addEventListener('message', /*#__PURE__*/function () {
           if (!_diagTickStarted) {
             _diagTickStarted = true;
             setInterval(function () {
-              try { self.postMessage({ trace: '~5s worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length }); } catch (_te) {}
+              try { self.postMessage({ trace: '~5s worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') }); } catch (_te) {}
             }, 5000);
           }
           port = message.data.port;

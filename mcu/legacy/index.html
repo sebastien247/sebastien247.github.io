@@ -41,12 +41,19 @@
                 try { window._mcu1Trace('[alert blocked] ' + msg); } catch (_e) {}
             };
         } catch (_e) {}
-        // MCU1 diagnostic: periodic paint counter (every 5 s). Trace 18 only
-        // fires on the first paint — this proves whether subsequent frames
-        // keep being painted or the pipeline stalls at frame 1.
+        // MCU1 diagnostic: periodic status line (every 5 s). Bundles paint
+        // count, last painted dimensions, phone build, and resolution code
+        // into one line so a photo of any portion of log.html surfaces the
+        // build/res — they would otherwise only appear once on trace 3.
         window._mcu1PaintCount = 0;
         setInterval(function () {
-            try { window._mcu1Trace('~5s main: paints=' + window._mcu1PaintCount); } catch (_e) {}
+            try {
+                var w = window._mcu1PaintW || 0;
+                var h = window._mcu1PaintH || 0;
+                var b = window._mcu1Build === undefined ? '?' : window._mcu1Build;
+                var r = window._mcu1Res === undefined ? '?' : window._mcu1Res;
+                window._mcu1Trace('~5s main: paints=' + window._mcu1PaintCount + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b);
+            } catch (_e) {}
         }, 5000);
         window._mcu1Trace('1. Page loaded');
     })();

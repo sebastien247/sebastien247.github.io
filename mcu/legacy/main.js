@@ -527,6 +527,11 @@ function updateCanvasSize() {
 }
 function postWorkerMessages(json) {
   if (window._mcu1Trace) window._mcu1Trace('3. Phone responded port=' + json.port + ' res=' + json.resolution + ' build=' + json.buildversion);
+  // Make the phone's reported build + resolution accessible to the periodic
+  // ~5s status trace in index.html, so a photo of any portion of log.html
+  // shows them without needing the trace 3 line to be on screen.
+  window._mcu1Build = json.buildversion;
+  window._mcu1Res = json.resolution;
   if (json.hasOwnProperty("resolutionChanged")) {
     console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
 
@@ -741,6 +746,8 @@ function postWorkerMessages(json) {
           swImageData.data.set(frameBytes.length === fw * fh * 4 ? frameBytes : frameBytes.subarray(0, fw * fh * 4));
           softwareCtx.putImageData(swImageData, 0, 0);
           window._mcu1PaintCount = (window._mcu1PaintCount || 0) + 1;
+          window._mcu1PaintW = fw;
+          window._mcu1PaintH = fh;
           if (!window._mcu1FirstPaintTraced) {
             window._mcu1FirstPaintTraced = true;
             if (window._mcu1Trace) window._mcu1Trace('18. First frame painted (' + fw + 'x' + fh + ')');
