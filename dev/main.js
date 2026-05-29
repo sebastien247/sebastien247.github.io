@@ -1109,7 +1109,10 @@ const DEBUG_LOG_MAX = 400;                       // hard cap on stored entries (
 const debugPanelEnabled = /[?&]debug(=|&|$)/.test(location.search);
 let debugLogs = loadDebugLogs();
 let debugPanelBody = null;
-let debugPanelCollapsed = true;                  // start as a tiny pill, never full-screen
+// Open by default under ?debug: the whole point is for the tester to SEE the
+// logs and photograph the Tesla screen (no devtools in the car). The "—" button
+// minimises it to a small pill to free Android Auto when needed.
+let debugPanelCollapsed = false;
 
 function loadDebugLogs() {
     try {
@@ -1178,7 +1181,7 @@ function ensureDebugPanel() {
     panel.id = 'taada-debug-panel';
     panel.style.cssText = [
         'position:fixed', 'left:8px', 'bottom:8px', 'z-index:2147483646',
-        'width:min(46vw,460px)', 'max-height:42vh', 'display:flex', 'flex-direction:column',
+        'width:440px', 'max-width:46vw', 'max-height:42vh', 'display:flex', 'flex-direction:column',
         'background:rgba(0,0,0,0.82)', 'color:#9fe3a0', 'font:11px/1.35 monospace',
         'border:1px solid rgba(159,227,160,0.4)', 'border-radius:6px', 'overflow:hidden'
     ].join(';');
