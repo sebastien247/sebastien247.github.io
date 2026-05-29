@@ -31,10 +31,6 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     step2TimeoutId = null,
     isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
 
-// Software-render mode (MCU1/QtCarBrowser): main.js keeps the canvas and paints
-// RGBA frames from the worker with a 2D context instead of transferring it.
-let softwareCtx = null, swImageData = null;
-
 canvasElement.style.display = "none";
 
 /**
@@ -445,13 +441,6 @@ function postWorkerMessages(json) {
 
         widthMargin = json.widthMargin;
         heightMargin = json.heightMargin;
-
-        // Software-render mode: main.js owns the canvas backing store, so resize
-        // it here (only the worker can resize a transferred OffscreenCanvas).
-        if (softwareCtx) {
-            canvasElement.width = width;
-            canvasElement.height = height;
-        }
         
         // Seul le worker peut mettre à jour le canvas après transferControlToOffscreen
         // Envoyer les deux messages séparément pour plus de clarté
@@ -530,8 +519,6 @@ function postWorkerMessages(json) {
     }
 
     const forceBroadway = findGetParameter("broadway") === "1";
-    // ?software=1 forces the MCU1 software-render path on any browser (testing).
-    const forceSoftware = findGetParameter("software") === "1";
 
 
     canvasElement.width = width;
@@ -540,27 +527,14 @@ function postWorkerMessages(json) {
     // Appliquer la transformation d'échelle au conteneur
     //canvasElement.style.transform = "scale(" + zoom + ")";
 
-    // OffscreenCanvas + transferControlToOffscreen drive the modern WebGL path.
-    // MCU1/QtCarBrowser has neither — fall back to software render: main.js keeps
-    // the canvas and paints RGBA frames the worker decodes with Broadway.
-    const canSoftwareOffscreen = typeof canvasElement.transferControlToOffscreen === 'function'
-        && typeof OffscreenCanvas !== 'undefined';
-
-    if (canSoftwareOffscreen && !forceSoftware) {
-        // Modern path — unchanged: transfer the canvas to the worker.
-        offscreen = canvasElement.transferControlToOffscreen();
-        demuxDecodeWorker.postMessage(
-            {canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height},
-            [offscreen]
-        );
-    } else {
-        // Software-render path (MCU1): no canvas transfer — main.js keeps the
-        // canvas and a 2D context, and paints frames the worker ships back.
-        softwareCtx = canvasElement.getContext('2d');
-        demuxDecodeWorker.postMessage(
-            {port: port, action: 'INIT', appVersion: appVersion, broadway: true, softwareRender: true, width: width, height: height}
-        );
-    }
+    // Transfert du contrôle au worker
+    offscreen = canvasElement.transferControlToOffscreen();
+    
+    // Initialiser le worker avec le canvas offscreen
+    demuxDecodeWorker.postMessage(
+        {canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height}, 
+        [offscreen]
+    );
 
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
@@ -620,36 +594,6 @@ function postWorkerMessages(json) {
             return;
         }
 
-        // Software-render mode: the worker shipped a decoded RGBA frame. Size
-        // the 2D canvas to the real frame and paint it with a cached ImageData
-        // (rebuilt only when the resolution changes).
-        if (e.data.hasOwnProperty('frameBuffer')) {
-            if (softwareCtx) {
-                const frameBytes = new Uint8Array(e.data.frameBuffer);
-                const fw = e.data.width, fh = e.data.height;
-                if (fw > 0 && fh > 0 && frameBytes.length >= fw * fh * 4) {
-                    if (!swImageData || canvasElement.width !== fw || canvasElement.height !== fh) {
-                        // main.js owns the canvas in software mode (it was never
-                        // transferred), so resize its backing store here.
-                        canvasElement.width = fw;
-                        canvasElement.height = fh;
-                        width = fw;
-                        height = fh;
-                        swImageData = softwareCtx.createImageData(fw, fh);
-                        updateCanvasSize();
-                        console.log('Software render: canvas sized to ' + fw + 'x' + fh);
-                    }
-                    swImageData.data.set(
-                        frameBytes.length === fw * fh * 4
-                            ? frameBytes
-                            : frameBytes.subarray(0, fw * fh * 4)
-                    );
-                    softwareCtx.putImageData(swImageData, 0, 0);
-                }
-            }
-            return;
-        }
-
         if (e.data.hasOwnProperty('error')) {
             console.error('Socket error received:', e.data.error);
             forcedRefreshCounter++;
@@ -702,12 +646,6 @@ function postWorkerMessages(json) {
             height = update.height;
             widthMargin = update.widthMargin;
             heightMargin = update.heightMargin;
-            // Software-render mode: main.js owns the canvas, so resize its
-            // backing store here (the worker can't — it was never transferred).
-            if (softwareCtx) {
-                canvasElement.width = width;
-                canvasElement.height = height;
-            }
             updateCanvasSize();
             return;
         }
@@ -757,23 +695,15 @@ function postWorkerMessages(json) {
 
     });
 
-    // Resolve the dark-mode query once. MediaQueryList.addEventListener did not
-    // exist before Safari 14 (MCU1/QtCarBrowser is WebKit 601/534) — calling it
-    // unguarded there throws and aborts startup, so feature-detect it.
-    const darkModeQuery = window.matchMedia
-        ? window.matchMedia('(prefers-color-scheme: dark)')
-        : null;
-
-    demuxDecodeWorker.postMessage({
-        action: "NIGHT",
-        value: !!(darkModeQuery && darkModeQuery.matches)
-    });
-
-    if (darkModeQuery && darkModeQuery.addEventListener) {
-        darkModeQuery.addEventListener('change', event => {
-            demuxDecodeWorker.postMessage({action: "NIGHT", value: event.matches});
-        });
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        demuxDecodeWorker.postMessage({action: "NIGHT", value: true});
+    } else {
+        demuxDecodeWorker.postMessage({action: "NIGHT", value: false});
     }
+
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+        demuxDecodeWorker.postMessage({action: "NIGHT", value: event.matches});
+    });
 
     //setInterval(function(){navigator.geolocation.getCurrentPosition(handlepossition);},500);
 }
@@ -1163,4 +1093,207 @@ function startAudio(){
         ttsPCMSocket.send(JSON.stringify({action:"ACK"}));
         ttsPCM.feed(data);
     });
+}
+
+// ===================== Debug log panel (?debug) =====================
+// Connection / reconnection diagnostics are relayed from the worker (which has
+// no localStorage) and persisted HERE so they survive a page refresh. Logs are
+// ALWAYS recorded — even without ?debug — because the events are rare (open,
+// close, reconnect, shutdown) and cost a few KB at most. ?debug only controls
+// whether the on-screen panel is shown, so a tester who hit the bug can simply
+// reload with ?debug to read what happened. The panel is capped and collapsible
+// so it never covers Android Auto, and it swallows its own touches so a tap on
+// it is never injected into the stream.
+const DEBUG_LOG_KEY = 'taada_debug_logs';
+const DEBUG_LOG_MAX = 400;                       // hard cap on stored entries (~50 KB)
+const debugPanelEnabled = /[?&]debug(=|&|$)/.test(location.search);
+let debugLogs = loadDebugLogs();
+let debugPanelBody = null;
+let debugPanelCollapsed = true;                  // start as a tiny pill, never full-screen
+
+function loadDebugLogs() {
+    try {
+        const raw = localStorage.getItem(DEBUG_LOG_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function persistDebugLogs() {
+    try {
+        if (debugLogs.length > DEBUG_LOG_MAX) {
+            debugLogs = debugLogs.slice(debugLogs.length - DEBUG_LOG_MAX);
+        }
+        localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLogs));
+    } catch (e) {
+        // Quota / private-mode failure: shed the oldest half and retry once, then
+        // give up — diagnostics must never break playback.
+        try {
+            debugLogs = debugLogs.slice(Math.floor(debugLogs.length / 2));
+            localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLogs));
+        } catch (e2) { /* give up silently */ }
+    }
+}
+
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+function pad3(n) { return (n < 10 ? '00' : (n < 100 ? '0' : '')) + n; }
+function formatTs(ts) {
+    const d = new Date(ts);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) + '.' + pad3(d.getMilliseconds());
+}
+
+function appendDebugLog(entry) {
+    if (!entry || !entry.msg) return;
+    const e = { ts: entry.ts || Date.now(), msg: String(entry.msg) };
+    debugLogs.push(e);
+    persistDebugLogs();
+    if (debugPanelEnabled && debugPanelBody) {
+        renderDebugLine(e);
+    }
+    updateDebugPillCount();
+}
+
+function renderDebugLine(e) {
+    const line = document.createElement('div');
+    line.textContent = formatTs(e.ts) + '  ' + e.msg;
+    line.style.cssText = 'padding:1px 0;border-bottom:1px solid rgba(255,255,255,0.06);white-space:pre-wrap;word-break:break-word;';
+    debugPanelBody.appendChild(line);
+    debugPanelBody.scrollTop = debugPanelBody.scrollHeight;   // follow the latest
+}
+
+function makeDebugBtn(label, onClick) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'flex:0 0 auto;background:rgba(255,255,255,0.14);color:#fff;border:0;border-radius:4px;padding:3px 8px;margin-left:4px;font:11px monospace;cursor:pointer;';
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(); });
+    return b;
+}
+
+function ensureDebugPanel() {
+    if (!debugPanelEnabled || document.getElementById('taada-debug-panel')) return;
+
+    const panel = document.createElement('div');
+    panel.id = 'taada-debug-panel';
+    panel.style.cssText = [
+        'position:fixed', 'left:8px', 'bottom:8px', 'z-index:2147483646',
+        'width:min(46vw,460px)', 'max-height:42vh', 'display:flex', 'flex-direction:column',
+        'background:rgba(0,0,0,0.82)', 'color:#9fe3a0', 'font:11px/1.35 monospace',
+        'border:1px solid rgba(159,227,160,0.4)', 'border-radius:6px', 'overflow:hidden'
+    ].join(';');
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;padding:4px 6px;background:rgba(255,255,255,0.08);flex:0 0 auto;';
+    const title = document.createElement('span');
+    title.textContent = 'TaaDa logs';
+    title.style.cssText = 'flex:1 1 auto;font-weight:bold;color:#fff;';
+    header.appendChild(title);
+    header.appendChild(makeDebugBtn('Copy', copyDebugLogs));
+    header.appendChild(makeDebugBtn('Clear', clearDebugLogs));
+    header.appendChild(makeDebugBtn('—', toggleDebugPanel));
+
+    debugPanelBody = document.createElement('div');
+    debugPanelBody.style.cssText = 'flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:4px 6px;-webkit-overflow-scrolling:touch;';
+
+    panel.appendChild(header);
+    panel.appendChild(debugPanelBody);
+
+    const pill = document.createElement('button');
+    pill.id = 'taada-debug-pill';
+    pill.style.cssText = [
+        'position:fixed', 'left:8px', 'bottom:8px', 'z-index:2147483646',
+        'background:rgba(0,0,0,0.78)', 'color:#9fe3a0', 'font:11px/1 monospace',
+        'border:1px solid rgba(159,227,160,0.5)', 'border-radius:14px', 'padding:6px 10px'
+    ].join(';');
+    pill.addEventListener('click', toggleDebugPanel);
+
+    // Touch isolation: a tap on the panel or pill must NOT bubble to the body's
+    // stream touch handlers (which would inject it into Android Auto). passive
+    // so the panel body can still scroll on touch.
+    [panel, pill].forEach(el => {
+        ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach(t =>
+            el.addEventListener(t, ev => ev.stopPropagation(), { passive: true }));
+    });
+
+    document.body.appendChild(panel);
+    document.body.appendChild(pill);
+
+    debugLogs.forEach(renderDebugLine);   // replay persisted history
+    applyDebugCollapsedState();
+}
+
+function applyDebugCollapsedState() {
+    const panel = document.getElementById('taada-debug-panel');
+    const pill = document.getElementById('taada-debug-pill');
+    if (!panel || !pill) return;
+    panel.style.display = debugPanelCollapsed ? 'none' : 'flex';
+    pill.style.display = debugPanelCollapsed ? 'block' : 'none';
+    if (!debugPanelCollapsed && debugPanelBody) {
+        debugPanelBody.scrollTop = debugPanelBody.scrollHeight;
+    }
+    updateDebugPillCount();
+}
+
+function toggleDebugPanel() {
+    debugPanelCollapsed = !debugPanelCollapsed;
+    applyDebugCollapsedState();
+}
+
+function updateDebugPillCount() {
+    const pill = document.getElementById('taada-debug-pill');
+    if (pill) pill.textContent = '🐞 ' + debugLogs.length;
+}
+
+function clearDebugLogs() {
+    debugLogs = [];
+    try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* ignore */ }
+    if (debugPanelBody) debugPanelBody.innerHTML = '';
+    updateDebugPillCount();
+}
+
+function copyDebugLogs() {
+    const text = debugLogs.map(e => formatTs(e.ts) + '  ' + e.msg).join('\n');
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => fallbackCopyDebug(text));
+        } else {
+            fallbackCopyDebug(text);
+        }
+    } catch (e) {
+        fallbackCopyDebug(text);
+    }
+}
+
+function fallbackCopyDebug(text) {
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+    } catch (e) { /* ignore — user can still screenshot the panel */ }
+}
+
+// Dedicated worker listener so connection logs are captured even before the main
+// message handler is wired in postWorkerMessages(). A Worker can have several
+// message listeners; both fire.
+demuxDecodeWorker.addEventListener('message', (e) => {
+    if (e && e.data && e.data.hasOwnProperty('debugLog')) {
+        appendDebugLog(e.data.debugLog);
+    }
+});
+
+// Session marker (separates one drive/session from the next in the saved log),
+// then show the panel if ?debug is present.
+appendDebugLog({ ts: Date.now(), msg: '=== page loaded (' + (debugPanelEnabled ? 'debug panel ON' : 'logging only') + ') ===' });
+if (debugPanelEnabled) {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', ensureDebugPanel);
+    } else {
+        ensureDebugPanel();
+    }
 }
