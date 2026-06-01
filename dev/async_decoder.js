@@ -56,7 +56,7 @@ const PONG_TIMEOUT = 6000; //12000;   // No PONG sentinel for this long ⇒ dead
 // (the WebView was backgrounded during a phone call), NOT the channel dying. The
 // data/PONG gap is sleep time, so we re-prime the live socket instead of forcing
 // a false reconnect. Must exceed normal heartbeat jitter (~1-2s).
-const SUSPEND_THRESHOLD = 3000;
+const SUSPEND_THRESHOLD = 2000;
 
 // The phone re-randomises the WebSocket port on every service start; the stable
 // HTTP discovery endpoint is served on this fixed port range.
