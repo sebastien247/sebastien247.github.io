@@ -16,6 +16,7 @@ let pendingFrames = [],
     lastheart = 0, pongtimer, frameRate,
     lastPongAt = 0, // Timestamp of the last server PONG sentinel (unittype 31)
     lastFrameAt = 0, // Timestamp of the last decoded video frame (unittype 1/5)
+    lastHeartbeatAt = 0, // Wall-clock of the last heartbeat() tick — detects Worker suspension (WebView backgrounded during a call)
     connectTimeout = null, // Watchdog handle for a WebSocket stuck in CONNECTING
     isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
     firstVideoFrameReceived = false; // Flag to track first video frame
@@ -43,7 +44,19 @@ let forceReconnectPending = false; // True between forceReconnect() and socketCl
 const SOFT_RECONNECTION_THRESHOLD = 5; // Attempts after which only the UI message changes — reconnection never stops
 const BASE_RECONNECTION_DELAY = 2000; // Délai de base en ms (2 secondes)
 const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
-const PONG_TIMEOUT = 6000; // No server PONG for this long ⇒ dead control channel
+// Liveness watchdog budgets. Tuned for a MOVING car: the phone↔car Wi-Fi
+// micro-stalls for a few seconds on handovers / interference, and that is NOT a
+// real disconnect — force-closing the socket on a 3 s blip produced a
+// reconnect loop in the field. We now ride out short stalls and only declare
+// the channel dead after a mobile-appropriate delay. Trade-off: a genuine drop
+// takes this long to be noticed, but the in-place reconnect is fast once fired.
+const NO_DATA_TIMEOUT = 3000; //8000; // No binary data at all (video OR PONG) for this long ⇒ reconnect (was 3000)
+const PONG_TIMEOUT = 6000; //12000;   // No PONG sentinel for this long ⇒ dead control channel (was 6000)
+// If heartbeat() hasn't ticked for this long, the Worker was suspended/throttled
+// (the WebView was backgrounded during a phone call), NOT the channel dying. The
+// data/PONG gap is sleep time, so we re-prime the live socket instead of forcing
+// a false reconnect. Must exceed normal heartbeat jitter (~1-2s).
+const SUSPEND_THRESHOLD = 3000;
 
 // The phone re-randomises the WebSocket port on every service start; the stable
 // HTTP discovery endpoint is served on this fixed port range.
@@ -398,17 +411,63 @@ function headerMagic(dat) {
 
 // ========== Socket and Message Handling ==========
 
+/**
+ * True when this Worker was suspended/throttled — the heartbeat interval stopped
+ * ticking for longer than normal jitter. Happens when the Tesla backgrounds the
+ * WebView during a phone call: timers freeze, so the PONG/data gap that piles up
+ * is sleep time, not a dead channel. The socket is usually still OPEN on resume.
+ */
+function workerWasSuspended() {
+    return lastHeartbeatAt !== 0 && (Date.now() - lastHeartbeatAt) > SUSPEND_THRESHOLD;
+}
+
+/**
+ * Recover from a Worker suspension WITHOUT the false reconnect. If the socket is
+ * still OPEN, re-baseline the watchdogs and re-prime the stream (the phone's
+ * dead-man timer turned video off while we slept) so video resumes on the SAME
+ * socket. Only if the socket actually died do we fall back to a real reconnect.
+ */
+function resumeAfterSuspend(source) {
+    const now = Date.now();
+    const drift = now - lastHeartbeatAt;
+    lastHeartbeatAt = now;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        debugLog('resumed after ' + drift + 'ms (' + source + ', backgrounded during a call?) — socket OPEN, re-prime not reconnect');
+        // Fresh baselines so the dead-channel checks don't fire on the sleep gap.
+        lastPongAt = now;
+        lastheart = now;
+        if (pongtimer) { clearTimeout(pongtimer); }
+        pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
+        try {
+            // The phone's 3s video-off dead-man timer fired while we slept; START
+            // re-enables video, REQUEST_KEYFRAME pulls a fresh IDR fast.
+            socket.sendObject({action: "START"});
+            socket.sendObject({action: "PING"});
+            socket.sendObject({action: "REQUEST_KEYFRAME"});
+        } catch (e) { /* next heartbeat tick retries */ }
+    } else {
+        debugLog('resumed after ' + drift + 'ms (' + source + ') — socket rs=' + (socket ? socket.readyState : -1) + ', reconnecting');
+        forceReconnect('resumeAfterSuspend drift=' + drift + 'ms rs=' + (socket ? socket.readyState : -1));
+    }
+}
+
 function noPong() {
     // 🚨 NOUVEAU: Ne pas envoyer d'erreur si le serveur est en shutdown
     if (isServerShuttingDown) {
         console.log('Server is shutting down, ignoring no pong');
         return;
     }
+    // The data gap may just be a suspended Worker (call in the foreground), not a
+    // dead channel — re-prime the live socket instead of reconnecting.
+    if (workerWasSuspended()) {
+        resumeAfterSuspend('noPong');
+        return;
+    }
     // Transient drop: reconnect the WebSocket in place. Never reload the page —
     // it is hosted remotely and a reload hangs in a no-coverage zone.
     const sinceLastPong = lastPongAt ? (Date.now() - lastPongAt) : -1;
     console.warn('No data from phone (pong watchdog) — forcing in-place reconnect');
-    forceReconnect('noData3s sinceLastPong=' + sinceLastPong + 'ms rs=' + (socket ? socket.readyState : -1));
+    forceReconnect('noData(' + NO_DATA_TIMEOUT + 'ms) sinceLastPong=' + sinceLastPong + 'ms rs=' + (socket ? socket.readyState : -1));
 }
 
 function heartbeat() {
@@ -416,6 +475,16 @@ function heartbeat() {
     if (isServerShuttingDown) {
         return;
     }
+
+    // Worker-suspension guard: if this tick fires long after the previous one, the
+    // Worker was frozen (WebView backgrounded during a phone call). The PONG gap
+    // below would be sleep time, not a dead channel — re-prime the live socket
+    // instead of force-reconnecting it. This is the #1 field cause of the loop.
+    if (workerWasSuspended()) {
+        resumeAfterSuspend('heartbeat');
+        return;
+    }
+    lastHeartbeatAt = Date.now();
 
     // Dead control channel: the phone replies to every PING with a PONG sentinel
     // (unittype 31). lastPongAt is updated only by that sentinel, never by video
@@ -501,7 +570,7 @@ function handleVideoMessage(dat){
     // 🚨 AMÉLIORATION: Réinitialiser le watchdog sur TOUT paquet vidéo reçu
     // Cela prouve que la connexion est active même si le PING/PONG spécifique saute
     if (pongtimer !== null) clearTimeout(pongtimer);
-    pongtimer = setTimeout(noPong, 3000);
+    pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
 
     let unittype = (dat[4] & 0x1f);
     if (unittype === 31)
@@ -761,8 +830,10 @@ function startSocket() {
             connectTimeout = null;
         }
 
-        // Baseline for the heartbeat dead-channel check until the first real PONG.
+        // Baseline the watchdogs until the first real PONG / heartbeat tick, so a
+        // slow (backoff) reconnect is not mistaken for a Worker suspension.
         lastPongAt = Date.now();
+        lastHeartbeatAt = Date.now();
 
         console.log('✅ WebSocket connected successfully');
         debugLog('WS open (port ' + port + ')');
