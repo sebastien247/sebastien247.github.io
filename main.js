@@ -214,6 +214,7 @@ function updateConnectionProgress(step, message) {
             troubleshootEl.style.display = 'none';
         }
     }
+
 }
 
 /**
@@ -511,8 +512,9 @@ function postWorkerMessages(json) {
         }
     }
 
-    if (appVersion < 53) {
-        alert("You need to run TaaDa 2.1.0 (build 53) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+    // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
+    if (appVersion < 66) {
+        alert("You need to run TaaDa 2.6.0 (build 66) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
         //return;
     }
 
@@ -537,8 +539,7 @@ function postWorkerMessages(json) {
     if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
     {
         usebt = json.usebt;
-        document.getElementById("muteicon").style.display="block";
-
+        //document.getElementById("muteicon").style.display="block";
     }
 
     // Show the waiting message after socket port is retrieved
@@ -597,31 +598,17 @@ function postWorkerMessages(json) {
             console.error('Socket error received:', e.data.error);
             forcedRefreshCounter++;
 
-            // Only reload if error contains critical information
-            // Show warning instead for most errors
-            if (typeof e.data.error === 'string' &&
-                (e.data.error.includes("no pong") ||
-                e.data.error === "Reconnecting...")) {
-
-                warningElement.style.display = "block";
-                logElement.style.display = "none";
-                warningElement.innerText = "Connection issue detected: " + e.data.error;
-
-                // Use a delayed reload to allow logging to appear
-                setTimeout(function() {
-                    console.log("Reloading page due to connection error");
-                    reloadWhenOnline('Connection error: ' + e.data.error);
-                }, 2000);
-            } else {
-                // For less critical errors, just show a warning
-                warningElement.style.display = "block";
-                logElement.style.display = "none";
-                warningElement.innerText = "Error detected: " + e.data.error;
-                setTimeout(function() {
-                    warningElement.style.display = "none";
-                    logElement.style.display = "block";
-                }, 5000);
-            }
+            // Transient connection errors recover via the worker's in-place
+            // WebSocket reconnect — never reload the page. The page is hosted
+            // remotely (app.taada.top), so a reload hangs in a no-coverage zone.
+            // serverShutdown stays the only legitimate reload path.
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = "Error detected: " + e.data.error;
+            setTimeout(function() {
+                warningElement.style.display = "none";
+                logElement.style.display = "block";
+            }, 5000);
             return;
         }
 
@@ -637,17 +624,29 @@ function postWorkerMessages(json) {
             // 🚨 Ne pas afficher l'overlay si on est déjà en attente de reload
             // (notre fonction reloadWhenOnline gère déjà l'affichage)
             if (!isWaitingForReload) {
-                // 🚨 Afficher l'overlay d'erreur permanent
+                // Keep the overlay visible until the stream is confirmed live
+                // again (hidden by videoFrameReceived). No timed auto-hide:
+                // reconnection backoff can outlast any fixed delay, so hiding on
+                // a timer flickers the overlay and masks a still-down connection.
                 showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
-
-                // Cacher l'overlay après 5 secondes si la reconnexion réussit
-                setTimeout(() => {
-                    if (!isServerShuttingDown && !isWaitingForReload) {
-                        hideErrorOverlay();
-                    }
-                }, 5000);
             }
 
+            return;
+        }
+
+        // 🚨 Reconnexion: le worker a re-découvert la résolution du téléphone
+        // après une coupure et a pu redimensionner le décodeur et le canvas.
+        // Ré-appliquer la géométrie gérée par le thread principal — le
+        // dimensionnement CSS (letterbox) et la conversion des coordonnées
+        // tactiles — pour qu'un changement de résolution survive à la coupure.
+        if (e.data.hasOwnProperty('resolutionUpdate')) {
+            const update = e.data.resolutionUpdate;
+            console.log(`Reconnect resolution update: ${update.width}x${update.height}, margins ${update.widthMargin}x${update.heightMargin}`);
+            width = update.width;
+            height = update.height;
+            widthMargin = update.widthMargin;
+            heightMargin = update.heightMargin;
+            updateCanvasSize();
             return;
         }
 
@@ -661,6 +660,7 @@ function postWorkerMessages(json) {
             },2000);
         }
 
+        // Handle AA status updates from worker
         // Handle connection progress updates from worker
         if (e.data.hasOwnProperty('connectionProgress')) {
             const progress = e.data.connectionProgress;
@@ -671,6 +671,9 @@ function postWorkerMessages(json) {
         if (e.data.hasOwnProperty('videoFrameReceived')) {
             console.log("Video frame received message received!", e.data);
             videoFrameReceived = true;
+
+            // Stream is live again — clear any reconnecting overlay.
+            hideErrorOverlay();
 
             // Update to step 3/3 - Stream ready
             updateConnectionProgress(3, '3/3 - Stream ready!');
@@ -766,6 +769,9 @@ function convertTouchListToCoords(touchList) {
  * Initialise l'audio au premier contact tactile si nécessaire
  */
 function initializeAudioOnFirstTouch() {
+    // TEMPORAIREMENT DESACTIVE : Empêche l'avertissement "Vidéo bridée" sur le navigateur Tesla (2026.2.6.1) dû à la détection de l'AudioContext
+    return;
+
     if (!audiostart && !usebt) {
         mediaPCM = new PCMPlayer({
             encoding: '16bitInt',
@@ -1087,4 +1093,210 @@ function startAudio(){
         ttsPCMSocket.send(JSON.stringify({action:"ACK"}));
         ttsPCM.feed(data);
     });
+}
+
+// ===================== Debug log panel (?debug) =====================
+// Connection / reconnection diagnostics are relayed from the worker (which has
+// no localStorage) and persisted HERE so they survive a page refresh. Logs are
+// ALWAYS recorded — even without ?debug — because the events are rare (open,
+// close, reconnect, shutdown) and cost a few KB at most. ?debug only controls
+// whether the on-screen panel is shown, so a tester who hit the bug can simply
+// reload with ?debug to read what happened. The panel is capped and collapsible
+// so it never covers Android Auto, and it swallows its own touches so a tap on
+// it is never injected into the stream.
+const DEBUG_LOG_KEY = 'taada_debug_logs';
+const DEBUG_LOG_MAX = 400;                       // hard cap on stored entries (~50 KB)
+const debugPanelEnabled = /[?&]debug(=|&|$)/.test(location.search);
+let debugLogs = loadDebugLogs();
+let debugPanelBody = null;
+// Open by default under ?debug: the whole point is for the tester to SEE the
+// logs and photograph the Tesla screen (no devtools in the car). The "—" button
+// minimises it to a small pill to free Android Auto when needed.
+let debugPanelCollapsed = false;
+
+function loadDebugLogs() {
+    try {
+        const raw = localStorage.getItem(DEBUG_LOG_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function persistDebugLogs() {
+    try {
+        if (debugLogs.length > DEBUG_LOG_MAX) {
+            debugLogs = debugLogs.slice(debugLogs.length - DEBUG_LOG_MAX);
+        }
+        localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLogs));
+    } catch (e) {
+        // Quota / private-mode failure: shed the oldest half and retry once, then
+        // give up — diagnostics must never break playback.
+        try {
+            debugLogs = debugLogs.slice(Math.floor(debugLogs.length / 2));
+            localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLogs));
+        } catch (e2) { /* give up silently */ }
+    }
+}
+
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+function pad3(n) { return (n < 10 ? '00' : (n < 100 ? '0' : '')) + n; }
+function formatTs(ts) {
+    const d = new Date(ts);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) + '.' + pad3(d.getMilliseconds());
+}
+
+function appendDebugLog(entry) {
+    if (!entry || !entry.msg) return;
+    const e = { ts: entry.ts || Date.now(), msg: String(entry.msg) };
+    debugLogs.push(e);
+    persistDebugLogs();
+    if (debugPanelEnabled && debugPanelBody) {
+        renderDebugLine(e);
+    }
+    updateDebugPillCount();
+}
+
+function renderDebugLine(e) {
+    const line = document.createElement('div');
+    line.textContent = formatTs(e.ts) + '  ' + e.msg;
+    line.style.cssText = 'padding:1px 0;border-bottom:1px solid rgba(255,255,255,0.06);white-space:pre-wrap;word-break:break-word;';
+    debugPanelBody.appendChild(line);
+    debugPanelBody.scrollTop = debugPanelBody.scrollHeight;   // follow the latest
+}
+
+function makeDebugBtn(label, onClick) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'flex:0 0 auto;background:rgba(255,255,255,0.14);color:#fff;border:0;border-radius:4px;padding:3px 8px;margin-left:4px;font:11px monospace;cursor:pointer;';
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(); });
+    return b;
+}
+
+function ensureDebugPanel() {
+    if (!debugPanelEnabled || document.getElementById('taada-debug-panel')) return;
+
+    const panel = document.createElement('div');
+    panel.id = 'taada-debug-panel';
+    panel.style.cssText = [
+        'position:fixed', 'left:8px', 'bottom:8px', 'z-index:2147483646',
+        'width:440px', 'max-width:46vw', 'max-height:42vh', 'display:flex', 'flex-direction:column',
+        'background:rgba(0,0,0,0.82)', 'color:#9fe3a0', 'font:11px/1.35 monospace',
+        'border:1px solid rgba(159,227,160,0.4)', 'border-radius:6px', 'overflow:hidden'
+    ].join(';');
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;padding:4px 6px;background:rgba(255,255,255,0.08);flex:0 0 auto;';
+    const title = document.createElement('span');
+    title.textContent = 'TaaDa logs';
+    title.style.cssText = 'flex:1 1 auto;font-weight:bold;color:#fff;';
+    header.appendChild(title);
+    header.appendChild(makeDebugBtn('Copy', copyDebugLogs));
+    header.appendChild(makeDebugBtn('Clear', clearDebugLogs));
+    header.appendChild(makeDebugBtn('—', toggleDebugPanel));
+
+    debugPanelBody = document.createElement('div');
+    debugPanelBody.style.cssText = 'flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:4px 6px;-webkit-overflow-scrolling:touch;';
+
+    panel.appendChild(header);
+    panel.appendChild(debugPanelBody);
+
+    const pill = document.createElement('button');
+    pill.id = 'taada-debug-pill';
+    pill.style.cssText = [
+        'position:fixed', 'left:8px', 'bottom:8px', 'z-index:2147483646',
+        'background:rgba(0,0,0,0.78)', 'color:#9fe3a0', 'font:11px/1 monospace',
+        'border:1px solid rgba(159,227,160,0.5)', 'border-radius:14px', 'padding:6px 10px'
+    ].join(';');
+    pill.addEventListener('click', toggleDebugPanel);
+
+    // Touch isolation: a tap on the panel or pill must NOT bubble to the body's
+    // stream touch handlers (which would inject it into Android Auto). passive
+    // so the panel body can still scroll on touch.
+    [panel, pill].forEach(el => {
+        ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach(t =>
+            el.addEventListener(t, ev => ev.stopPropagation(), { passive: true }));
+    });
+
+    document.body.appendChild(panel);
+    document.body.appendChild(pill);
+
+    debugLogs.forEach(renderDebugLine);   // replay persisted history
+    applyDebugCollapsedState();
+}
+
+function applyDebugCollapsedState() {
+    const panel = document.getElementById('taada-debug-panel');
+    const pill = document.getElementById('taada-debug-pill');
+    if (!panel || !pill) return;
+    panel.style.display = debugPanelCollapsed ? 'none' : 'flex';
+    pill.style.display = debugPanelCollapsed ? 'block' : 'none';
+    if (!debugPanelCollapsed && debugPanelBody) {
+        debugPanelBody.scrollTop = debugPanelBody.scrollHeight;
+    }
+    updateDebugPillCount();
+}
+
+function toggleDebugPanel() {
+    debugPanelCollapsed = !debugPanelCollapsed;
+    applyDebugCollapsedState();
+}
+
+function updateDebugPillCount() {
+    const pill = document.getElementById('taada-debug-pill');
+    if (pill) pill.textContent = '🐞 ' + debugLogs.length;
+}
+
+function clearDebugLogs() {
+    debugLogs = [];
+    try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* ignore */ }
+    if (debugPanelBody) debugPanelBody.innerHTML = '';
+    updateDebugPillCount();
+}
+
+function copyDebugLogs() {
+    const text = debugLogs.map(e => formatTs(e.ts) + '  ' + e.msg).join('\n');
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => fallbackCopyDebug(text));
+        } else {
+            fallbackCopyDebug(text);
+        }
+    } catch (e) {
+        fallbackCopyDebug(text);
+    }
+}
+
+function fallbackCopyDebug(text) {
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+    } catch (e) { /* ignore — user can still screenshot the panel */ }
+}
+
+// Dedicated worker listener so connection logs are captured even before the main
+// message handler is wired in postWorkerMessages(). A Worker can have several
+// message listeners; both fire.
+demuxDecodeWorker.addEventListener('message', (e) => {
+    if (e && e.data && e.data.hasOwnProperty('debugLog')) {
+        appendDebugLog(e.data.debugLog);
+    }
+});
+
+// Session marker (separates one drive/session from the next in the saved log),
+// then show the panel if ?debug is present.
+appendDebugLog({ ts: Date.now(), msg: '=== page loaded (' + (debugPanelEnabled ? 'debug panel ON' : 'logging only') + ') ===' });
+if (debugPanelEnabled) {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', ensureDebugPanel);
+    } else {
+        ensureDebugPanel();
+    }
 }
