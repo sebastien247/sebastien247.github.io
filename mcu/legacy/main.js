@@ -42,6 +42,10 @@ var zoom = Math.max(1, window.innerHeight / 1080),
 // RGBA frames from the worker with a 2D context instead of transferring it.
 var softwareCtx = null,
   swImageData = null;
+// MJPEG mode (MCU1): the worker forwards pre-decoded JPEG frames; main.js paints
+// them with a native Image() via JpegRenderer instead of Broadway RGBA.
+var mjpegEnabled = false,
+  jpegRenderer = null;
 canvasElement.style.display = "none";
 
 /**
@@ -365,7 +369,8 @@ function _tryPort() {
       while (1) switch (_context4.n) {
         case 0:
           // MCU1: force resolution 0 (800x480) — viewport-sized frames overflow Tesla's per-tab memory budget and trigger the resource watchdog ("Navigateur fermé pour préserver les ressources").
-          urlToFetch = "https://taada.top:".concat(port, "/getsocketport?w=800&h=480&webcodec=").concat(supportedWebCodec);
+          // codec=mjpeg asks the phone to send pre-decoded JPEG frames instead of H.264; an older build ignores it and we fall back to Broadway.
+          urlToFetch = "https://taada.top:".concat(port, "/getsocketport?w=800&h=480&webcodec=").concat(supportedWebCodec, "&codec=mjpeg");
           console.log("Trying port ".concat(port, "..."));
           return _context4.a(2, new Promise(function (resolve, reject) {
             var timeout = setTimeout(function () {
@@ -532,6 +537,8 @@ function postWorkerMessages(json) {
   // shows them without needing the trace 3 line to be on screen.
   window._mcu1Build = json.buildversion;
   window._mcu1Res = json.resolution;
+  mjpegEnabled = (json.codec === 'mjpeg');
+  if (window._mcu1Trace) window._mcu1Trace('3b. codec=' + (json.codec || 'h264') + ' -> mjpeg=' + mjpegEnabled);
   if (json.hasOwnProperty("resolutionChanged")) {
     console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
 
@@ -658,6 +665,7 @@ function postWorkerMessages(json) {
       appVersion: appVersion,
       broadway: true,
       softwareRender: true,
+      mjpeg: mjpegEnabled,
       width: width,
       height: height
     });
@@ -720,6 +728,31 @@ function postWorkerMessages(json) {
     // 🚨 NOUVEAU: Ignorer tous les autres messages si le serveur est en shutdown
     if (isServerShuttingDown) {
       console.log('Server is shutting down, ignoring message:', e.data);
+      return;
+    }
+
+    // MJPEG mode: the worker shipped a complete JPEG frame. Size the canvas to
+    // the negotiated dimensions on first use, then paint via the native decoder.
+    if (e.data.hasOwnProperty('jpegFrame')) {
+      if (softwareCtx) {
+        if (!jpegRenderer) {
+          if (width > 0 && height > 0) {
+            canvasElement.width = width;
+            canvasElement.height = height;
+            updateCanvasSize();
+          }
+          jpegRenderer = new JpegRenderer(canvasElement, function (fw, fh) {
+            window._mcu1PaintCount = (window._mcu1PaintCount || 0) + 1;
+            window._mcu1PaintW = fw;
+            window._mcu1PaintH = fh;
+            if (!window._mcu1FirstPaintTraced) {
+              window._mcu1FirstPaintTraced = true;
+              if (window._mcu1Trace) window._mcu1Trace('18. First JPEG frame painted (' + fw + 'x' + fh + ')');
+            }
+          });
+        }
+        jpegRenderer.paint(new Uint8Array(e.data.jpegFrame));
+      }
       return;
     }
 
@@ -969,6 +1002,15 @@ function handleTouchStart(event) {
     return activeTouches.set(touch.id, touch);
   });
   var allTouches = convertTouchListToCoords(event.touches);
+  // MCU1 diagnostic: prove the browser captured the touch + show the
+  // canvas-relative coordinate (a tap on the log overlay would still fire
+  // but might land off-canvas — visible here).
+  window._mcu1TouchCount = (window._mcu1TouchCount || 0) + 1;
+  if (window._mcu1Trace && !window._mcu1FirstTouchTraced) {
+    window._mcu1FirstTouchTraced = true;
+    var _t0 = newTouches[0] || { x: -1, y: -1 };
+    window._mcu1Trace('first touch captured (kind=DOWN x=' + _t0.x + ' y=' + _t0.y + ' n=' + newTouches.length + ')');
+  }
 
   // DEBUG: Logs détaillés pour comprendre le problème
   //console.log('[MULTITOUCH_DOWN] event.changedTouches.length:', event.changedTouches.length);
@@ -998,6 +1040,7 @@ bodyElement.addEventListener('touchstart', handleTouchStart, {
  */
 function handleTouchEnd(event) {
   event.preventDefault();
+  window._mcu1TouchCount = (window._mcu1TouchCount || 0) + 1;
 
   // CRITIQUE: Annuler tout MULTITOUCH_MOVE en attente pour éviter le bug "sticky touch"
   // Si un touchmove a programmé un requestAnimationFrame qui n'a pas encore été exécuté,
@@ -1079,6 +1122,12 @@ bodyElement.addEventListener('touchmove', function (event) {
     touches: convertTouchListToCoords(event.touches),
     timestamp: performance.now()
   };
+  window._mcu1TouchCount = (window._mcu1TouchCount || 0) + 1;
+  if (window._mcu1Trace && !window._mcu1FirstMoveTraced) {
+    window._mcu1FirstMoveTraced = true;
+    var _tm0 = latestTouchData.touches[0] || { x: -1, y: -1 };
+    window._mcu1Trace('first touchmove captured (x=' + _tm0.x + ' y=' + _tm0.y + ' n=' + latestTouchData.touches.length + ')');
+  }
 
   // Si une mise à jour n'est pas déjà en attente, en programmer une
   if (!touchMovePending) {

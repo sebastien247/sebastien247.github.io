@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MCU1 MJPEG render test</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <style>
+    html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+    #out { display: block; width: 100%; height: auto; }
+    #stats {
+      position: fixed; top: 8px; left: 8px;
+      color: #0f0; font: bold 28px monospace;
+      background: rgba(0,0,0,0.6); padding: 6px 12px; border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="out" width="800" height="480"></canvas>
+  <div id="stats">preparing…</div>
+  <script src="jpeg-renderer.js"></script>
+  <script>
+  (function () {
+    var out = document.getElementById('out');
+    var statsEl = document.getElementById('stats');
+
+    var painted = 0, paintedThisSec = 0, shown = 0;
+    var renderer = new JpegRenderer(out, function () { painted++; paintedThisSec++; });
+
+    // Convert a canvas to JPEG bytes with ONLY WebKit-601-safe APIs:
+    // toDataURL + atob. NOT toBlob (absent on old WebKit) and not FileReader.
+    function canvasToJpegBytes(c) {
+      var dataUrl = c.toDataURL('image/jpeg', 0.6);
+      var base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
+      var bin = atob(base64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    }
+
+    // Pre-encode N distinct frames ONCE so the playback loop measures pure
+    // DECODE cost on the MCU1 — in production the phone does the encoding, the
+    // MCU1 only decodes. Frames differ so nothing is cached.
+    var FRAMES = 30;
+    var pre = [];
+    var gen = document.createElement('canvas');
+    gen.width = 800; gen.height = 480;
+    var gctx = gen.getContext('2d');
+
+    function buildFrame(n) {
+      gctx.fillStyle = '#102030';
+      gctx.fillRect(0, 0, 800, 480);
+      gctx.fillStyle = '#0af';
+      gctx.fillRect((n * 26) % 800, 0, 90, 480);
+      gctx.fillStyle = '#fff';
+      gctx.font = '48px monospace';
+      gctx.fillText('frame ' + n, 40, 240);
+      return canvasToJpegBytes(gen);
+    }
+
+    var built = 0;
+    function buildNext() {
+      try {
+        pre.push(buildFrame(built));
+        built++;
+        statsEl.textContent = 'preparing… ' + built + '/' + FRAMES;
+        if (built < FRAMES) { setTimeout(buildNext, 0); return; }
+        start();
+      } catch (e) {
+        statsEl.style.color = '#f55';
+        statsEl.textContent = 'ENCODE ERROR: ' + (e && e.message ? e.message : e);
+      }
+    }
+
+    function start() {
+      setInterval(function () {
+        try {
+          renderer.paint(pre[shown % FRAMES]);
+          shown++;
+        } catch (e) {
+          statsEl.style.color = '#f55';
+          statsEl.textContent = 'PAINT ERROR: ' + (e && e.message ? e.message : e);
+        }
+      }, 50); // push ~20 fps; renderer coalesces if decode can't keep up
+      setInterval(function () {
+        var fps = paintedThisSec; paintedThisSec = 0;
+        statsEl.textContent = 'JPEG decode: ' + fps + ' fps   (total painted=' + painted + ')';
+      }, 1000);
+    }
+
+    buildNext();
+  })();
+  </script>
+</body>
+</html>

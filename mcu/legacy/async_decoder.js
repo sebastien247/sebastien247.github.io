@@ -47,6 +47,10 @@ var pendingFrames = [],
 // flowing past the first one. Reset only when the worker itself reloads.
 var _diagMsgCount = 0, _diagIdrCount = 0, _diagPFrameCount = 0, _diagDecodedCount = 0, _diagTickStarted = false;
 
+// MJPEG mode (MCU1): when true, the worker never builds Broadway and forwards
+// each JPEG binary frame to the main thread for native Image() decode.
+var mjpegMode = false;
+
 // MCU1 diagnostic: one-shot-per-action trace when socket.sendObject swallows
 // a throw. The wrapper at startSocket already posts {error} to main, but that
 // only flashes the warning UI for 5 s — it never lands in log.html, so the
@@ -57,6 +61,10 @@ var _diagSendThrew = {};
 // arg, fall back to a structured-clone copy so frames keep reaching main.
 // Slower (1.5 MB/frame copy at 800x480 RGBA, but only when transfer is broken).
 var _transferAllowed = true, _diagTransferThrew = false, _diagCopyThrew = false;
+
+// MCU1 touch dispatch diagnostic: count binary touches sent vs dropped because
+// the socket was not OPEN, plus one-shot traces of the first of each.
+var _diagTouchSent = 0, _diagTouchDropped = 0, _diagFirstTouchSentTraced = false, _diagFirstTouchDroppedTraced = false;
 
 var texturePool = [];
 
@@ -278,9 +286,13 @@ function initCanvas(canvas, forceBroadway) {
   // Software-render mode: no OffscreenCanvas was transferred and there is no
   // WebGL context to build. width/height came from the INIT message.
   if (softwareRender) {
-    try { self.postMessage({ trace: '9. initCanvas: software branch, calling switchToBroadway' }); } catch (_te) {}
-    switchToBroadway();
-    try { self.postMessage({ trace: '12. switchToBroadway returned, calling startSocket' }); } catch (_te) {}
+    if (mjpegMode) {
+      try { self.postMessage({ trace: '9m. initCanvas: MJPEG mode, skipping Broadway' }); } catch (_te) {}
+    } else {
+      try { self.postMessage({ trace: '9. initCanvas: software branch, calling switchToBroadway' }); } catch (_te) {}
+      switchToBroadway();
+      try { self.postMessage({ trace: '12. switchToBroadway returned, calling startSocket' }); } catch (_te) {}
+    }
     startSocket();
     return;
   }
@@ -568,6 +580,25 @@ function handleVideoMessage(dat) {
   // Cela prouve que la connexion est active même si le PING/PONG spécifique saute
   if (pongtimer !== null) clearTimeout(pongtimer);
   pongtimer = setTimeout(noPong, 3000);
+  // MJPEG mode: a binary message starting with FF D8 is a complete JPEG frame.
+  // Forward it to the main thread (transfer, falling back to copy) for native
+  // Image() decode — Broadway is never involved. Checked before the unittype
+  // logic so a JPEG byte that equals the PONG sentinel is not misclassified.
+  if (mjpegMode && dat.length >= 2 && dat[0] === 0xFF && dat[1] === 0xD8) {
+    _diagMsgCount++;
+    if (!firstVideoFrameReceived) {
+      firstVideoFrameReceived = true;
+      try { self.postMessage({ trace: '16. First JPEG frame received (len=' + dat.length + ')' }); } catch (_te) {}
+      self.postMessage({ connectionProgress: { step: 3, message: '3/3 - First frame received!' } });
+      self.postMessage({ videoFrameReceived: true });
+    }
+    try {
+      self.postMessage({ jpegFrame: dat.buffer }, [dat.buffer]);
+    } catch (e) {
+      self.postMessage({ jpegFrame: dat.buffer });
+    }
+    return;
+  }
   var unittype = dat[4] & 0x1f;
   if (unittype === 31) {
     // Server PONG sentinel — proof the control channel is alive. Tracked
@@ -1158,6 +1189,11 @@ function messageHandler(message) {
 
         // Envoyer directement le buffer binaire
         socket.send(binaryData);
+        _diagTouchSent++;
+        if (!_diagFirstTouchSentTraced) {
+          _diagFirstTouchSentTraced = true;
+          try { self.postMessage({ trace: 'first touch sent (action=' + action + ' bytes=' + binaryData.byteLength + ' touches=' + touches.length + ')' }); } catch (_te) {}
+        }
 
         // Log pour debug (contrôlé par BINARY_TOUCH_DEBUG)
         if (BINARY_TOUCH_DEBUG) {
@@ -1179,6 +1215,18 @@ function messageHandler(message) {
       // Autres messages: envoyer en JSON comme avant
       socket.sendObject(message.data);
     }
+  } else {
+    // Socket not OPEN — silently dropped before. Surface drops of MULTITOUCH
+    // events specifically, so a tester complaining "touches do nothing" can
+    // be diagnosed: drops here vs. landing-but-no-visible-effect (rendering lag).
+    var _act = message.data && message.data.action;
+    if (_act === 'MULTITOUCH_DOWN' || _act === 'MULTITOUCH_MOVE' || _act === 'MULTITOUCH_UP' || _act === 'MULTITOUCH_CANCEL') {
+      _diagTouchDropped++;
+      if (!_diagFirstTouchDroppedTraced) {
+        _diagFirstTouchDroppedTraced = true;
+        try { self.postMessage({ trace: 'first touch dropped (socket state=' + (socket ? socket.readyState : 'null') + ' action=' + _act + ')' }); } catch (_te) {}
+      }
+    }
   }
 }
 self.addEventListener('message', /*#__PURE__*/function () {
@@ -1195,7 +1243,7 @@ self.addEventListener('message', /*#__PURE__*/function () {
           if (!_diagTickStarted) {
             _diagTickStarted = true;
             setInterval(function () {
-              try { self.postMessage({ trace: '~5s worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') }); } catch (_te) {}
+              try { self.postMessage({ trace: '~5s worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') }); } catch (_te) {}
             }, 5000);
           }
           port = message.data.port;
@@ -1203,6 +1251,7 @@ self.addEventListener('message', /*#__PURE__*/function () {
           useBroadway = message.data.broadway; // Software-render mode (MCU1): no canvas is transferred, so capture the
           // decoder geometry from the INIT message and skip the WebCodecs probe.
           softwareRender = !!message.data.softwareRender;
+          mjpegMode = !!message.data.mjpeg;
           if (softwareRender) {
             width = message.data.width;
             height = message.data.height;

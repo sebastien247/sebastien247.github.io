@@ -52,7 +52,8 @@
                 var h = window._mcu1PaintH || 0;
                 var b = window._mcu1Build === undefined ? '?' : window._mcu1Build;
                 var r = window._mcu1Res === undefined ? '?' : window._mcu1Res;
-                window._mcu1Trace('~5s main: paints=' + window._mcu1PaintCount + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b);
+                var tc = window._mcu1TouchCount || 0;
+                window._mcu1Trace('~5s main: paints=' + window._mcu1PaintCount + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b + ' touch=' + tc);
             } catch (_e) {}
         }, 5000);
         window._mcu1Trace('1. Page loaded');
@@ -173,6 +174,7 @@
 </body>
 <!-- <script src="pcm-player.min.js"></script> -->
 <script src="polyfills.js"></script>
+<script src="jpeg-renderer.js"></script>
 <script src="main.js"></script>
 
 </html>
