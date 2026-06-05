@@ -2,168 +2,152 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>MCU1 render-method benchmark</title>
+  <title>MCU1 render-method benchmark v2</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
   <style>
     html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
-    #cv, #im { display: none; width: 100%; height: auto; }
+    #cv, #imA, #imB, #bg { display: none; width: 100%; height: auto; }
+    #bg { width: 480px; height: 270px; background-size: cover; background-repeat: no-repeat; }
     #stats {
       position: fixed; top: 8px; left: 8px;
       color: #0f0; font-family: monospace; font-weight: bold;
-      background: rgba(0,0,0,0.78); padding: 8px 14px; border-radius: 4px;
+      background: rgba(0,0,0,0.8); padding: 8px 14px; border-radius: 4px;
       line-height: 1.4;
     }
   </style>
 </head>
 <body>
   <canvas id="cv" width="480" height="270"></canvas>
-  <img id="im" width="480" height="270" />
+  <img id="imA" width="480" height="270" />
+  <img id="imB" width="480" height="270" />
+  <div id="bg"></div>
   <div id="stats">preparing…</div>
   <script>
   (function () {
-    var cv = document.getElementById('cv');
-    var ctx = cv.getContext('2d');
-    var imEl = document.getElementById('im');
-    var statsEl = document.getElementById('stats');
-    var W = 480, H = 270, FRAMES = 12;
+    var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+    var imA = document.getElementById('imA'), imB = document.getElementById('imB');
+    var bg = document.getElementById('bg'), statsEl = document.getElementById('stats');
+    var W = 480, H = 270, FRAMES = 30; // many distinct frames -> defeat data-URI cache
 
-    var preBytes = [], preData = [];
-    var gen = document.createElement('canvas');
-    gen.width = W; gen.height = H;
+    var jpgData = [], jpgBytes = [], webpData = [], webpOk = false;
+    var gen = document.createElement('canvas'); gen.width = W; gen.height = H;
     var gctx = gen.getContext('2d');
 
-    function dataUrlToBytes(dataUrl) {
-      var b64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
-      var bin = atob(b64);
-      var bytes = new Uint8Array(bin.length);
-      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      return bytes;
+    function dataUrlToBytes(d) {
+      var b64 = d.substring(d.indexOf(',') + 1), bin = atob(b64), a = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+      return a;
     }
     function buildFrame(n) {
+      // Each frame's content differs (text fN + moving bars) so its encoded
+      // bytes / data URI are unique — an identical-data-URI cache can't cheat.
       gctx.fillStyle = '#102030'; gctx.fillRect(0, 0, W, H);
-      gctx.fillStyle = '#0af'; gctx.fillRect((n * (W / FRAMES)) % W, 0, Math.round(W / 9), H);
+      gctx.fillStyle = '#0af'; gctx.fillRect((n * 13) % W, 0, Math.round(W / 9), H);
+      gctx.fillStyle = '#1a3a5a'; gctx.fillRect((n * 7) % W, H - 44, 64, 44);
       gctx.fillStyle = '#fff'; gctx.font = Math.round(H / 6) + 'px monospace';
       gctx.fillText('f' + n, 20, Math.round(H / 2));
-      var dataUrl = gen.toDataURL('image/jpeg', 0.6);
-      preData.push(dataUrl);
-      preBytes.push(dataUrlToBytes(dataUrl));
+      var j = gen.toDataURL('image/jpeg', 0.6);
+      jpgData.push(j); jpgBytes.push(dataUrlToBytes(j));
+      var w = gen.toDataURL('image/webp', 0.6);
+      if (w.indexOf('data:image/webp') === 0) { webpOk = true; webpData.push(w); }
+      else { webpData.push(j); }
     }
 
-    // refresh-rate meter
-    var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
-              function (cb) { return setTimeout(cb, 16); };
+    var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame || function (cb) { return setTimeout(cb, 16); };
     var rafCount = 0;
     (function loop() { rafCount++; raf(loop); })();
 
-    var idx = 0, shown = 0, runGen = 0, curUrl = null;
-
-    function show(el) {
-      cv.style.display = (el === 'cv') ? 'block' : 'none';
-      imEl.style.display = (el === 'im') ? 'block' : 'none';
-    }
+    var idx = 0, shown = 0, runGen = 0, curUrl = null, visAB = 0;
     function freeUrl() { if (curUrl) { try { URL.revokeObjectURL(curUrl); } catch (e) {} curUrl = null; } }
+    function showOnly(el) {
+      cv.style.display = el === 'cv' ? 'block' : 'none';
+      imA.style.display = (el === 'imA' || el === 'dbl') ? 'block' : 'none';
+      imB.style.display = 'none';
+      bg.style.display = el === 'bg' ? 'block' : 'none';
+    }
 
-    // Method A: decode via Image (off-DOM) then ctx.drawImage onto a visible canvas.
     function loopCanvas(g) {
       if (g !== runGen) return;
-      var url; try { url = URL.createObjectURL(new Blob([preBytes[(idx++) % FRAMES]], { type: 'image/jpeg' })); } catch (e) { return; }
+      var url; try { url = URL.createObjectURL(new Blob([jpgBytes[(idx++) % FRAMES]], { type: 'image/jpeg' })); } catch (e) { return; }
       var im = new Image();
-      im.onload = function () {
-        if (g !== runGen) { try { URL.revokeObjectURL(url); } catch (e) {} return; }
-        try { ctx.drawImage(im, 0, 0, W, H); } catch (e) {}
-        shown++;
-        try { URL.revokeObjectURL(url); } catch (e) {}
-        loopCanvas(g);
-      };
+      im.onload = function () { if (g !== runGen) { try { URL.revokeObjectURL(url); } catch (e) {} return; } try { ctx.drawImage(im, 0, 0, W, H); } catch (e) {} shown++; try { URL.revokeObjectURL(url); } catch (e) {} loopCanvas(g); };
       im.onerror = function () { try { URL.revokeObjectURL(url); } catch (e) {} if (g === runGen) loopCanvas(g); };
       im.src = url;
     }
-
-    // Method B: assign a blob URL straight to a visible <img> (native decode+paint).
-    function loopImgBlob(g) {
+    function loopImgData(arr, g) {
       if (g !== runGen) return;
-      var url; try { url = URL.createObjectURL(new Blob([preBytes[(idx++) % FRAMES]], { type: 'image/jpeg' })); } catch (e) { return; }
-      imEl.onload = function () {
-        if (g !== runGen) { try { URL.revokeObjectURL(url); } catch (e) {} return; }
-        shown++;
-        freeUrl(); curUrl = url; // keep current, free previous on next swap
-        loopImgBlob(g);
-      };
-      imEl.onerror = function () { try { URL.revokeObjectURL(url); } catch (e) {} if (g === runGen) loopImgBlob(g); };
-      imEl.src = url;
+      imA.onload = function () { if (g !== runGen) return; shown++; loopImgData(arr, g); };
+      imA.onerror = function () { if (g === runGen) loopImgData(arr, g); };
+      imA.src = arr[(idx++) % FRAMES];
     }
-
-    // Method C: assign a data URI straight to a visible <img>.
-    function loopImgData(g) {
+    function loopCss(g) {
       if (g !== runGen) return;
-      imEl.onload = function () {
-        if (g !== runGen) return;
-        shown++;
-        loopImgData(g);
-      };
-      imEl.onerror = function () { if (g === runGen) loopImgData(g); };
-      imEl.src = preData[(idx++) % FRAMES];
+      // preload (decode) then assign as background, count when the decode lands
+      var im = new Image();
+      var u = jpgData[(idx) % FRAMES];
+      im.onload = function () { if (g !== runGen) return; bg.style.backgroundImage = 'url(' + u + ')'; idx++; shown++; loopCss(g); };
+      im.onerror = function () { idx++; if (g === runGen) loopCss(g); };
+      im.src = u;
+    }
+    function loopDbl(g) {
+      if (g !== runGen) return;
+      var hidden = visAB === 0 ? imB : imA, visible = visAB === 0 ? imA : imB;
+      hidden.onload = function () { if (g !== runGen) return; visible.style.display = 'none'; hidden.style.display = 'block'; visAB = 1 - visAB; shown++; loopDbl(g); };
+      hidden.onerror = function () { if (g === runGen) loopDbl(g); };
+      hidden.src = jpgData[(idx++) % FRAMES];
     }
 
     var PHASES = [
-      { name: 'idle',       fn: null,         el: 'cv', secs: 4 },
-      { name: 'canvas2d',   fn: loopCanvas,   el: 'cv', secs: 6 },
-      { name: 'img-blob',   fn: loopImgBlob,  el: 'im', secs: 6 },
-      { name: 'img-data',   fn: loopImgData,  el: 'im', secs: 6 }
+      { name: 'idle',     el: 'cv',  start: null, secs: 4 },
+      { name: 'canvas2d', el: 'cv',  start: function (g) { loopCanvas(g); }, secs: 5 },
+      { name: 'img-data', el: 'imA', start: function (g) { loopImgData(jpgData, g); }, secs: 5 },
+      { name: 'img-webp', el: 'imA', start: function (g) { loopImgData(webpData, g); }, secs: 5 },
+      { name: 'css-bg',   el: 'bg',  start: function (g) { loopCss(g); }, secs: 5 },
+      { name: 'dbl-img',  el: 'dbl', start: function (g) { visAB = 0; imA.style.display = 'block'; imB.style.display = 'none'; loopDbl(g); }, secs: 5 }
     ];
     var results = {}, phaseIdx = -1, phase = null, phaseSec = 0, done = false;
     var shownSum = 0, rafSum = 0, nSamp = 0, idleRaf = 0;
 
     function render() {
-      var html;
-      if (done) html = '<div style="font-size:30px;color:#0ff">DONE &mdash; PHOTO</div>';
-      else html = '<div style="font-size:22px;color:#ff0">running ' + (phase ? phase.name : '') + '… ' + phaseSec + '/' + (phase ? phase.secs : 0) + 's</div>';
-      html += '<div style="font-size:24px;margin-top:6px">idle refresh: ' + idleRaf + '/s</div>';
-      html += '<div style="font-size:20px;margin-top:6px">';
+      var html = done ? '<div style="font-size:28px;color:#0ff">DONE &mdash; PHOTO</div>'
+                      : '<div style="font-size:20px;color:#ff0">running ' + (phase ? phase.name : '') + '… ' + phaseSec + '/' + (phase ? phase.secs : 0) + 's</div>';
+      html += '<div style="font-size:22px;margin-top:5px">idle refresh: ' + idleRaf + '/s' + (webpOk ? '' : ' (webp enc n/a)') + '</div>';
+      html += '<div style="font-size:19px;margin-top:5px">';
       for (var i = 1; i < PHASES.length; i++) {
-        var n = PHASES[i].name;
-        var r = results[n];
-        // Visible fps = min(method throughput, repaint rate): you cannot see
-        // more frames than the browser repaints, however fast the method loads.
+        var n = PHASES[i].name, r = results[n];
         html += n + ': ' + (r ? ('~' + r.vis + ' vis (load ' + r.shown + ', rAF ' + r.raf + ')') : '…') + '<br>';
       }
       html += '</div>';
       statsEl.innerHTML = html;
     }
-
     function startPhase() {
       phaseIdx++;
       if (phaseIdx >= PHASES.length) { done = true; runGen++; render(); return; }
       phase = PHASES[phaseIdx];
       runGen++; freeUrl(); idx = 0; shown = 0;
-      show(phase.el);
-      if (phase.fn) phase.fn(runGen);
+      showOnly(phase.el);
+      if (phase.start) phase.start(runGen);
       phaseSec = 0; shownSum = 0; rafSum = 0; nSamp = 0;
     }
-
     function buildAll(cb) {
-      statsEl.innerHTML = 'preparing…';
       var b = 0;
       (function bn() {
-        try { buildFrame(b); b++; if (b < FRAMES) { setTimeout(bn, 0); return; } cb(); }
+        try { buildFrame(b); b++; statsEl.innerHTML = 'preparing… ' + b + '/' + FRAMES; if (b < FRAMES) { setTimeout(bn, 0); return; } cb(); }
         catch (e) { statsEl.style.color = '#f55'; statsEl.innerHTML = 'ENCODE ERR: ' + (e && e.message ? e.message : e); }
       })();
     }
-
     buildAll(function () {
       startPhase();
       setInterval(function () {
         if (done) return;
-        var raf1s = rafCount; rafCount = 0;
-        var sh1s = shown; shown = 0;
+        var raf1 = rafCount; rafCount = 0; var sh1 = shown; shown = 0;
         phaseSec++;
-        if (phaseSec > 1) { rafSum += raf1s; shownSum += sh1s; nSamp++; }
-        if (phase && phase.name === 'idle') idleRaf = nSamp ? Math.round(rafSum / nSamp) : raf1s;
+        if (phaseSec > 1) { rafSum += raf1; shownSum += sh1; nSamp++; }
+        if (phase && phase.name === 'idle') idleRaf = nSamp ? Math.round(rafSum / nSamp) : raf1;
         render();
         if (phase && phaseSec >= phase.secs) {
           if (phase.name !== 'idle') {
-            var sh = nSamp ? Math.round(shownSum / nSamp) : 0;
-            var rf = nSamp ? Math.round(rafSum / nSamp) : 0;
+            var sh = nSamp ? Math.round(shownSum / nSamp) : 0, rf = nSamp ? Math.round(rafSum / nSamp) : 0;
             results[phase.name] = { shown: sh, raf: rf, vis: Math.min(sh, rf) };
           }
           startPhase();
