@@ -46,6 +46,17 @@ var softwareCtx = null,
 // them with a native Image() via JpegRenderer instead of Broadway RGBA.
 var mjpegEnabled = false,
   jpegRenderer = null;
+// MCU1 mjpeg/css-bg renders only on the software branch — a browser WITH
+// OffscreenCanvas takes the WebCodec path and ignores JPEG. Ask the phone for
+// codec=mjpeg only when we will actually take that branch; otherwise a modern
+// browser flips the phone to JPEG, then ignores it, and stalls at step 2.
+// ?mjpeg=1 forces the whole path (discovery + software branch + css-bg) so the
+// Phase-2 Android side can be tested on a modern phone without a real MCU1.
+var mjpegForced = findGetParameter("mjpeg") === "1",
+  canDriveOffscreen = typeof canvasElement.transferControlToOffscreen === 'function' && typeof OffscreenCanvas !== 'undefined',
+  requestMjpeg = mjpegForced || !canDriveOffscreen;
+// Expose the negotiation decision for the on-device diagnostic panel (photo-friendly).
+window._mcu1Mjpeg = { forced: mjpegForced, request: requestMjpeg, canOffscreen: canDriveOffscreen };
 canvasElement.style.display = "none";
 
 /**
@@ -370,7 +381,8 @@ function _tryPort() {
         case 0:
           // MCU1: force resolution 0 (800x480) — viewport-sized frames overflow Tesla's per-tab memory budget and trigger the resource watchdog ("Navigateur fermé pour préserver les ressources").
           // codec=mjpeg asks the phone to send pre-decoded JPEG frames instead of H.264; an older build ignores it and we fall back to Broadway.
-          urlToFetch = "https://taada.top:".concat(port, "/getsocketport?w=800&h=480&webcodec=").concat(supportedWebCodec, "&codec=mjpeg");
+          // Only request it when we'll take the software/css-bg branch (no OffscreenCanvas) or when ?mjpeg=1 forces it — a modern browser that requests mjpeg but runs the WebCodec path stalls at step 2 (phone sends JPEG, bundle expects H.264).
+          urlToFetch = "https://taada.top:".concat(port, "/getsocketport?w=800&h=480&webcodec=").concat(supportedWebCodec) + (requestMjpeg ? "&codec=mjpeg" : "");
           console.log("Trying port ".concat(port, "..."));
           return _context4.a(2, new Promise(function (resolve, reject) {
             var timeout = setTimeout(function () {
@@ -641,7 +653,9 @@ function postWorkerMessages(json) {
   // MCU1/QtCarBrowser has neither — fall back to software render: main.js keeps
   // the canvas and paints RGBA frames the worker decodes with Broadway.
   var canSoftwareOffscreen = typeof canvasElement.transferControlToOffscreen === 'function' && typeof OffscreenCanvas !== 'undefined';
-  if (canSoftwareOffscreen && !forceSoftware) {
+  // ?mjpeg=1 forces the software branch too, so codec=mjpeg + css-bg can be
+  // exercised on a modern browser (which would otherwise take the WebCodec path).
+  if (canSoftwareOffscreen && !forceSoftware && !mjpegForced) {
     // Modern path — unchanged: transfer the canvas to the worker.
     offscreen = canvasElement.transferControlToOffscreen();
     demuxDecodeWorker.postMessage({
