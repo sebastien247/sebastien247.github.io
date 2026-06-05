@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>MCU1 MJPEG decode benchmark</title>
+  <title>MCU1 decode pipeline diagnostic</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
   <style>
     html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
@@ -10,8 +10,8 @@
     #stats {
       position: fixed; top: 8px; left: 8px;
       color: #0f0; font-family: monospace; font-weight: bold;
-      background: rgba(0,0,0,0.65); padding: 8px 14px; border-radius: 4px;
-      line-height: 1.3;
+      background: rgba(0,0,0,0.78); padding: 8px 14px; border-radius: 4px;
+      line-height: 1.4;
     }
   </style>
 </head>
@@ -22,21 +22,16 @@
   <script>
   (function () {
     var out = document.getElementById('out');
+    var ctx = out.getContext('2d');
     var statsEl = document.getElementById('stats');
+    var W = 480, H = 270, FRAMES = 12;
 
-    // Resolutions to benchmark, smallest first (fastest, best first impression).
-    var RESOS = [[480, 270], [640, 360], [800, 480]];
-    var FRAMES = 12;            // distinct pre-encoded frames per resolution
-    var SECONDS_PER_RESO = 10;  // measurement window per resolution
-
-    var painted = 0, paintedThisSec = 0, curFps = 0, shown = 0;
-    var W = 0, H = 0, pre = [], results = {};
-    var renderer = new JpegRenderer(out, function () { painted++; paintedThisSec++; });
-
+    var pre = [];
     var gen = document.createElement('canvas');
+    gen.width = W; gen.height = H;
     var gctx = gen.getContext('2d');
 
-    // WebKit-601-safe JPEG encode: toDataURL + atob (NOT toBlob/FileReader).
+    // WebKit-601-safe JPEG encode (toDataURL + atob).
     function canvasToJpegBytes(c) {
       var dataUrl = c.toDataURL('image/jpeg', 0.6);
       var base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
@@ -45,69 +40,108 @@
       for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       return bytes;
     }
-
     function buildFrame(n) {
       gctx.fillStyle = '#102030'; gctx.fillRect(0, 0, W, H);
       gctx.fillStyle = '#0af'; gctx.fillRect((n * (W / FRAMES)) % W, 0, Math.round(W / 9), H);
-      gctx.fillStyle = '#fff'; gctx.font = Math.round(H / 7) + 'px monospace';
-      gctx.fillText('frame ' + n, 24, Math.round(H / 2));
+      gctx.fillStyle = '#fff'; gctx.font = Math.round(H / 6) + 'px monospace';
+      gctx.fillText('f' + n, 20, Math.round(H / 2));
       return canvasToJpegBytes(gen);
     }
 
+    // Display refresh: how many times/sec the browser repaints. Measured at rest
+    // (idle phase) it is the browser's hard ceiling for any animation.
+    var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
+              function (cb) { return setTimeout(cb, 16); };
+    var rafCount = 0, rafFps = 0;
+    (function loop() { rafCount++; raf(loop); })();
+
+    // Decode pool with a generation token (no leak — old chains stop on bump).
+    var seqIdx = 0, completed = 0, poolGen = 0;
+    function launch(doDraw, g) {
+      if (g !== poolGen) return;
+      var bytes = pre[(seqIdx++) % FRAMES];
+      var url;
+      try { url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' })); }
+      catch (e) { return; }
+      var img = new Image();
+      img.onload = function () {
+        if (g !== poolGen) { try { URL.revokeObjectURL(url); } catch (e) {} return; }
+        if (doDraw) { try { ctx.drawImage(img, 0, 0, W, H); } catch (e) {} }
+        completed++;
+        try { URL.revokeObjectURL(url); } catch (e) {}
+        launch(doDraw, g);
+      };
+      img.onerror = function () { try { URL.revokeObjectURL(url); } catch (e) {} if (g === poolGen) setTimeout(function () { launch(doDraw, g); }, 30); };
+      img.src = url;
+    }
+    function startPool(conc, doDraw) { poolGen++; completed = 0; var g = poolGen; for (var i = 0; i < conc; i++) launch(doDraw, g); }
+    function stopPool() { poolGen++; }
+
+    // Sequential phases; each averages its window (first second skipped). Ends on
+    // a frozen "DONE" recap so a single photo captures everything.
+    var PHASES = [
+      { name: 'idle',        conc: 0, draw: false, secs: 4 },
+      { name: 'seq+draw',    conc: 1, draw: true,  secs: 6 },
+      { name: 'par6+draw',   conc: 6, draw: true,  secs: 6 },
+      { name: 'par6 NODRAW', conc: 6, draw: false, secs: 6 }
+    ];
+    var results = {}, phaseIdx = -1, phase = null, phaseSec = 0, done = false;
+    var rafSum = 0, rafN = 0, decSum = 0, decN = 0, idleRaf = 0;
+
     function render() {
-      var html = '<div style="font-size:30px">NOW ' + W + 'x' + H + ' &rarr; ' + curFps + ' fps</div>';
-      html += '<div style="font-size:22px;margin-top:8px">';
-      for (var i = 0; i < RESOS.length; i++) {
-        var key = RESOS[i][0] + 'x' + RESOS[i][1];
-        html += key + ': ' + (results[key] !== undefined ? results[key] + ' fps' : '…') + '<br>';
+      var html;
+      if (done) html = '<div style="font-size:30px;color:#0ff">DONE &mdash; PHOTO</div>';
+      else html = '<div style="font-size:22px;color:#ff0">running ' + (phase ? phase.name : '') + '… ' + phaseSec + '/' + (phase ? phase.secs : 0) + 's</div>';
+      html += '<div style="font-size:24px;margin-top:6px">idle refresh: ' + idleRaf + '/s</div>';
+      html += '<div style="font-size:20px;margin-top:6px">';
+      for (var i = 1; i < PHASES.length; i++) {
+        var n = PHASES[i].name;
+        var r = results[n];
+        html += n + ': ' + (r ? (r.fps + ' fps (rAF ' + r.raf + ')') : '…') + '<br>';
       }
       html += '</div>';
       statsEl.innerHTML = html;
     }
 
-    var playTimer = null, fpsTimer = null, switchTimer = null;
-    var resoIdx = -1;
+    function startPhase() {
+      phaseIdx++;
+      if (phaseIdx >= PHASES.length) { done = true; stopPool(); render(); return; }
+      phase = PHASES[phaseIdx];
+      stopPool();
+      if (phase.conc > 0) startPool(phase.conc, phase.draw);
+      phaseSec = 0; rafSum = 0; rafN = 0; decSum = 0; decN = 0;
+    }
 
-    function nextReso() {
-      resoIdx = (resoIdx + 1) % RESOS.length;
-      W = RESOS[resoIdx][0]; H = RESOS[resoIdx][1];
-      out.width = W; out.height = H;
-      gen.width = W; gen.height = H;
-      pre = []; shown = 0; curFps = 0;
-      statsEl.style.color = '#ff0';
-      statsEl.innerHTML = 'preparing ' + W + 'x' + H + '…';
-      var built = 0;
-      (function buildNext() {
-        try {
-          pre.push(buildFrame(built)); built++;
-          if (built < FRAMES) { setTimeout(buildNext, 0); return; }
-          playReso();
-        } catch (e) {
-          statsEl.style.color = '#f55';
-          statsEl.innerHTML = 'ENCODE ERROR: ' + (e && e.message ? e.message : e);
-        }
+    function buildAll(cb) {
+      statsEl.innerHTML = 'preparing…';
+      var b = 0;
+      (function bn() {
+        try { pre.push(buildFrame(b)); b++; if (b < FRAMES) { setTimeout(bn, 0); return; } cb(); }
+        catch (e) { statsEl.style.color = '#f55'; statsEl.innerHTML = 'ENCODE ERR: ' + (e && e.message ? e.message : e); }
       })();
     }
 
-    function playReso() {
-      statsEl.style.color = '#0f0';
-      paintedThisSec = 0;
-      playTimer = setInterval(function () {
-        try { renderer.paint(pre[shown % FRAMES]); shown++; }
-        catch (e) { statsEl.style.color = '#f55'; statsEl.innerHTML = 'PAINT ERROR: ' + (e && e.message ? e.message : e); }
-      }, 40); // push ~25 fps; renderer coalesces if decode is slower
-      fpsTimer = setInterval(function () {
-        curFps = paintedThisSec; paintedThisSec = 0;
-        results[W + 'x' + H] = curFps;
+    buildAll(function () {
+      startPhase();
+      setInterval(function () {
+        if (done) return;
+        rafFps = rafCount; rafCount = 0;
+        var dec = completed; completed = 0;
+        phaseSec++;
+        if (phaseSec > 1) { // skip transient first second
+          rafSum += rafFps; rafN++;
+          decSum += dec; decN++;
+        }
+        if (phase && phase.name === 'idle') idleRaf = rafN ? Math.round(rafSum / rafN) : rafFps;
         render();
+        if (phase && phaseSec >= phase.secs) {
+          if (phase.name !== 'idle') {
+            results[phase.name] = { fps: decN ? Math.round(decSum / decN) : 0, raf: rafN ? Math.round(rafSum / rafN) : 0 };
+          }
+          startPhase();
+        }
       }, 1000);
-      switchTimer = setTimeout(function () {
-        clearInterval(playTimer); clearInterval(fpsTimer);
-        nextReso();
-      }, SECONDS_PER_RESO * 1000);
-    }
-
-    nextReso();
+    });
   })();
   </script>
 </body>
