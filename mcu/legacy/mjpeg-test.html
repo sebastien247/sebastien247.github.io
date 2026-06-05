@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>MCU1 decode pipeline diagnostic</title>
+  <title>MCU1 decode// + rAF-paced paint test</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
   <style>
     html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
@@ -31,7 +31,6 @@
     gen.width = W; gen.height = H;
     var gctx = gen.getContext('2d');
 
-    // WebKit-601-safe JPEG encode (toDataURL + atob).
     function canvasToJpegBytes(c) {
       var dataUrl = c.toDataURL('image/jpeg', 0.6);
       var base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
@@ -48,45 +47,62 @@
       return canvasToJpegBytes(gen);
     }
 
-    // Display refresh: how many times/sec the browser repaints. Measured at rest
-    // (idle phase) it is the browser's hard ceiling for any animation.
-    var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
-              function (cb) { return setTimeout(cb, 16); };
-    var rafCount = 0, rafFps = 0;
-    (function loop() { rafCount++; raf(loop); })();
+    // Real renderer architecture under test: frames arrive at a fixed input rate
+    // (like the phone over the socket), up to K decode in parallel, and the rAF
+    // loop paints only the freshest decoded image once per repaint. Input is
+    // CADENCED (not a tight loop) so it never starves the rAF.
+    var K = 0, active = 0, pending = null, poolGen = 0;
+    var latest = null, latestVer = 0, drawnVer = 0;
+    var completed = 0, displayed = 0, fed = 0, seqIdx = 0;
 
-    // Decode pool with a generation token (no leak — old chains stop on bump).
-    var seqIdx = 0, completed = 0, poolGen = 0;
-    function launch(doDraw, g) {
-      if (g !== poolGen) return;
-      var bytes = pre[(seqIdx++) % FRAMES];
-      var url;
+    function pump() {
+      while (active < K && pending) { var b = pending; pending = null; decodeOne(b); }
+    }
+    function feed(bytes) { pending = bytes; fed++; pump(); }
+    function decodeOne(bytes) {
+      var g = poolGen, url;
       try { url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' })); }
       catch (e) { return; }
+      active++;
       var img = new Image();
-      img.onload = function () {
-        if (g !== poolGen) { try { URL.revokeObjectURL(url); } catch (e) {} return; }
-        if (doDraw) { try { ctx.drawImage(img, 0, 0, W, H); } catch (e) {} }
-        completed++;
+      function finish(ok) {
         try { URL.revokeObjectURL(url); } catch (e) {}
-        launch(doDraw, g);
-      };
-      img.onerror = function () { try { URL.revokeObjectURL(url); } catch (e) {} if (g === poolGen) setTimeout(function () { launch(doDraw, g); }, 30); };
+        active--;
+        if (g !== poolGen) return; // stale generation — ignore
+        if (ok) { latest = img; latestVer++; completed++; }
+        pump();
+      }
+      img.onload = function () { finish(true); };
+      img.onerror = function () { finish(false); };
       img.src = url;
     }
-    function startPool(conc, doDraw) { poolGen++; completed = 0; var g = poolGen; for (var i = 0; i < conc; i++) launch(doDraw, g); }
-    function stopPool() { poolGen++; }
+    function setK(k) { poolGen++; K = k; pending = null; } // chains self-decrement active
 
-    // Sequential phases; each averages its window (first second skipped). Ends on
-    // a frozen "DONE" recap so a single photo captures everything.
+    // Cadenced input: ~50 frames/s offered (more than MCU1 can decode, so the
+    // pool always has fresh work; excess is dropped via the single pending slot).
+    setInterval(function () { if (pre.length) feed(pre[(seqIdx++) % FRAMES]); }, 20);
+
+    // rAF loop: measure repaint rate AND paint the freshest frame once/repaint.
+    var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
+              function (cb) { return setTimeout(cb, 16); };
+    var rafCount = 0;
+    (function loop() {
+      rafCount++;
+      if (latest && latestVer !== drawnVer) {
+        drawnVer = latestVer;
+        try { ctx.drawImage(latest, 0, 0, W, H); displayed++; } catch (e) {}
+      }
+      raf(loop);
+    })();
+
     var PHASES = [
-      { name: 'idle',        conc: 0, draw: false, secs: 4 },
-      { name: 'seq+draw',    conc: 1, draw: true,  secs: 6 },
-      { name: 'par6+draw',   conc: 6, draw: true,  secs: 6 },
-      { name: 'par6 NODRAW', conc: 6, draw: false, secs: 6 }
+      { name: 'idle', K: 0, secs: 4 },
+      { name: '//2',  K: 2, secs: 6 },
+      { name: '//4',  K: 4, secs: 6 },
+      { name: '//8',  K: 8, secs: 6 }
     ];
     var results = {}, phaseIdx = -1, phase = null, phaseSec = 0, done = false;
-    var rafSum = 0, rafN = 0, decSum = 0, decN = 0, idleRaf = 0;
+    var dispSum = 0, rafSum = 0, decSum = 0, nSamp = 0, idleRaf = 0;
 
     function render() {
       var html;
@@ -97,7 +113,7 @@
       for (var i = 1; i < PHASES.length; i++) {
         var n = PHASES[i].name;
         var r = results[n];
-        html += n + ': ' + (r ? (r.fps + ' fps (rAF ' + r.raf + ')') : '…') + '<br>';
+        html += 'decode' + n + ': ' + (r ? (r.disp + ' fps shown (rAF ' + r.raf + ', dec ' + r.dec + ')') : '…') + '<br>';
       }
       html += '</div>';
       statsEl.innerHTML = html;
@@ -105,11 +121,10 @@
 
     function startPhase() {
       phaseIdx++;
-      if (phaseIdx >= PHASES.length) { done = true; stopPool(); render(); return; }
+      if (phaseIdx >= PHASES.length) { done = true; setK(0); render(); return; }
       phase = PHASES[phaseIdx];
-      stopPool();
-      if (phase.conc > 0) startPool(phase.conc, phase.draw);
-      phaseSec = 0; rafSum = 0; rafN = 0; decSum = 0; decN = 0;
+      setK(phase.K);
+      phaseSec = 0; dispSum = 0; rafSum = 0; decSum = 0; nSamp = 0;
     }
 
     function buildAll(cb) {
@@ -125,18 +140,21 @@
       startPhase();
       setInterval(function () {
         if (done) return;
-        rafFps = rafCount; rafCount = 0;
-        var dec = completed; completed = 0;
+        var raf1s = rafCount; rafCount = 0;
+        var disp1s = displayed; displayed = 0;
+        var dec1s = completed; completed = 0;
+        fed = 0;
         phaseSec++;
-        if (phaseSec > 1) { // skip transient first second
-          rafSum += rafFps; rafN++;
-          decSum += dec; decN++;
-        }
-        if (phase && phase.name === 'idle') idleRaf = rafN ? Math.round(rafSum / rafN) : rafFps;
+        if (phaseSec > 1) { rafSum += raf1s; dispSum += disp1s; decSum += dec1s; nSamp++; }
+        if (phase && phase.name === 'idle') idleRaf = nSamp ? Math.round(rafSum / nSamp) : raf1s;
         render();
         if (phase && phaseSec >= phase.secs) {
           if (phase.name !== 'idle') {
-            results[phase.name] = { fps: decN ? Math.round(decSum / decN) : 0, raf: rafN ? Math.round(rafSum / rafN) : 0 };
+            results[phase.name] = {
+              disp: nSamp ? Math.round(dispSum / nSamp) : 0,
+              raf: nSamp ? Math.round(rafSum / nSamp) : 0,
+              dec: nSamp ? Math.round(decSum / nSamp) : 0
+            };
           }
           startPhase();
         }
