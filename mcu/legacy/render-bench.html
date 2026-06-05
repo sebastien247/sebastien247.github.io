@@ -2,11 +2,12 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>MCU1 render-method benchmark v2</title>
+  <title>MCU1 render-bench v3 (cache-free)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
   <style>
     html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
-    #cv, #imA, #imB, #bg { display: none; width: 100%; height: auto; }
+    #cv, #imA, #bg { display: none; }
+    #cv, #imA { width: 100%; height: auto; }
     #bg { width: 480px; height: 270px; background-size: cover; background-repeat: no-repeat; }
     #stats {
       position: fixed; top: 8px; left: 8px;
@@ -19,17 +20,17 @@
 <body>
   <canvas id="cv" width="480" height="270"></canvas>
   <img id="imA" width="480" height="270" />
-  <img id="imB" width="480" height="270" />
   <div id="bg"></div>
   <div id="stats">preparing…</div>
   <script>
   (function () {
     var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
-    var imA = document.getElementById('imA'), imB = document.getElementById('imB');
-    var bg = document.getElementById('bg'), statsEl = document.getElementById('stats');
-    var W = 480, H = 270, FRAMES = 30; // many distinct frames -> defeat data-URI cache
+    var imA = document.getElementById('imA'), bg = document.getElementById('bg');
+    var statsEl = document.getElementById('stats');
+    var W = 480, H = 270, FRAMES = 120; // enough unique frames that a measurement
+    // window (~4 s) never repeats one — defeats the decoded-image cache entirely.
 
-    var jpgData = [], jpgBytes = [], webpData = [], webpOk = false;
+    var jpgData = [], jpgBytes = [];
     var gen = document.createElement('canvas'); gen.width = W; gen.height = H;
     var gctx = gen.getContext('2d');
 
@@ -39,33 +40,28 @@
       return a;
     }
     function buildFrame(n) {
-      // Each frame's content differs (text fN + moving bars) so its encoded
-      // bytes / data URI are unique — an identical-data-URI cache can't cheat.
       gctx.fillStyle = '#102030'; gctx.fillRect(0, 0, W, H);
-      gctx.fillStyle = '#0af'; gctx.fillRect((n * 13) % W, 0, Math.round(W / 9), H);
-      gctx.fillStyle = '#1a3a5a'; gctx.fillRect((n * 7) % W, H - 44, 64, 44);
+      gctx.fillStyle = '#0af'; gctx.fillRect((n * 11) % W, 0, Math.round(W / 9), H);
+      gctx.fillStyle = '#1a3a5a'; gctx.fillRect((n * 17) % W, H - 44, 64, 44);
+      gctx.fillStyle = '#3a1a4a'; gctx.fillRect(0, (n * 7) % H, W, 18);
       gctx.fillStyle = '#fff'; gctx.font = Math.round(H / 6) + 'px monospace';
       gctx.fillText('f' + n, 20, Math.round(H / 2));
       var j = gen.toDataURL('image/jpeg', 0.6);
       jpgData.push(j); jpgBytes.push(dataUrlToBytes(j));
-      var w = gen.toDataURL('image/webp', 0.6);
-      if (w.indexOf('data:image/webp') === 0) { webpOk = true; webpData.push(w); }
-      else { webpData.push(j); }
     }
 
     var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame || function (cb) { return setTimeout(cb, 16); };
     var rafCount = 0;
     (function loop() { rafCount++; raf(loop); })();
 
-    var idx = 0, shown = 0, runGen = 0, curUrl = null, visAB = 0;
-    function freeUrl() { if (curUrl) { try { URL.revokeObjectURL(curUrl); } catch (e) {} curUrl = null; } }
+    var idx = 0, shown = 0, runGen = 0;
     function showOnly(el) {
       cv.style.display = el === 'cv' ? 'block' : 'none';
-      imA.style.display = (el === 'imA' || el === 'dbl') ? 'block' : 'none';
-      imB.style.display = 'none';
+      imA.style.display = el === 'imA' ? 'block' : 'none';
       bg.style.display = el === 'bg' ? 'block' : 'none';
     }
 
+    // canvas2d: blob URL -> Image decode -> drawImage (never cached, true decode)
     function loopCanvas(g) {
       if (g !== runGen) return;
       var url; try { url = URL.createObjectURL(new Blob([jpgBytes[(idx++) % FRAMES]], { type: 'image/jpeg' })); } catch (e) { return; }
@@ -74,36 +70,38 @@
       im.onerror = function () { try { URL.revokeObjectURL(url); } catch (e) {} if (g === runGen) loopCanvas(g); };
       im.src = url;
     }
-    function loopImgData(arr, g) {
+    // img-data: data URI straight into a visible <img>
+    function loopImgData(g) {
       if (g !== runGen) return;
-      imA.onload = function () { if (g !== runGen) return; shown++; loopImgData(arr, g); };
-      imA.onerror = function () { if (g === runGen) loopImgData(arr, g); };
-      imA.src = arr[(idx++) % FRAMES];
+      imA.onload = function () { if (g !== runGen) return; shown++; loopImgData(g); };
+      imA.onerror = function () { if (g === runGen) loopImgData(g); };
+      imA.src = jpgData[(idx++) % FRAMES];
     }
-    function loopCss(g) {
+    // css-bg (preload): decode via off-DOM Image (onload) then set as background
+    function loopCssPre(g) {
       if (g !== runGen) return;
-      // preload (decode) then assign as background, count when the decode lands
+      var u = jpgData[(idx++) % FRAMES];
       var im = new Image();
-      var u = jpgData[(idx) % FRAMES];
-      im.onload = function () { if (g !== runGen) return; bg.style.backgroundImage = 'url(' + u + ')'; idx++; shown++; loopCss(g); };
-      im.onerror = function () { idx++; if (g === runGen) loopCss(g); };
+      im.onload = function () { if (g !== runGen) return; bg.style.backgroundImage = 'url(' + u + ')'; shown++; loopCssPre(g); };
+      im.onerror = function () { if (g === runGen) loopCssPre(g); };
       im.src = u;
     }
-    function loopDbl(g) {
-      if (g !== runGen) return;
-      var hidden = visAB === 0 ? imB : imA, visible = visAB === 0 ? imA : imB;
-      hidden.onload = function () { if (g !== runGen) return; visible.style.display = 'none'; hidden.style.display = 'block'; visAB = 1 - visAB; shown++; loopDbl(g); };
-      hidden.onerror = function () { if (g === runGen) loopDbl(g); };
-      hidden.src = jpgData[(idx++) % FRAMES];
+    // css-direct: assign data URI to background with no preload, paced by rAF so we
+    // measure real composites (one bg change per repaint).
+    var cssDirectOn = false;
+    function tickCssDirect() {
+      if (!cssDirectOn) return;
+      bg.style.backgroundImage = 'url(' + jpgData[(idx++) % FRAMES] + ')';
+      shown++;
+      raf(tickCssDirect);
     }
 
     var PHASES = [
-      { name: 'idle',     el: 'cv',  start: null, secs: 4 },
-      { name: 'canvas2d', el: 'cv',  start: function (g) { loopCanvas(g); }, secs: 5 },
-      { name: 'img-data', el: 'imA', start: function (g) { loopImgData(jpgData, g); }, secs: 5 },
-      { name: 'img-webp', el: 'imA', start: function (g) { loopImgData(webpData, g); }, secs: 5 },
-      { name: 'css-bg',   el: 'bg',  start: function (g) { loopCss(g); }, secs: 5 },
-      { name: 'dbl-img',  el: 'dbl', start: function (g) { visAB = 0; imA.style.display = 'block'; imB.style.display = 'none'; loopDbl(g); }, secs: 5 }
+      { name: 'idle',       el: 'cv',  start: null, secs: 3 },
+      { name: 'canvas2d',   el: 'cv',  start: function (g) { loopCanvas(g); }, secs: 4 },
+      { name: 'img-data',   el: 'imA', start: function (g) { loopImgData(g); }, secs: 4 },
+      { name: 'css-preload', el: 'bg', start: function (g) { loopCssPre(g); }, secs: 4 },
+      { name: 'css-direct',  el: 'bg', start: function (g) { cssDirectOn = true; raf(tickCssDirect); }, secs: 4 }
     ];
     var results = {}, phaseIdx = -1, phase = null, phaseSec = 0, done = false;
     var shownSum = 0, rafSum = 0, nSamp = 0, idleRaf = 0;
@@ -111,7 +109,7 @@
     function render() {
       var html = done ? '<div style="font-size:28px;color:#0ff">DONE &mdash; PHOTO</div>'
                       : '<div style="font-size:20px;color:#ff0">running ' + (phase ? phase.name : '') + '… ' + phaseSec + '/' + (phase ? phase.secs : 0) + 's</div>';
-      html += '<div style="font-size:22px;margin-top:5px">idle refresh: ' + idleRaf + '/s' + (webpOk ? '' : ' (webp enc n/a)') + '</div>';
+      html += '<div style="font-size:22px;margin-top:5px">idle refresh: ' + idleRaf + '/s · ' + FRAMES + ' uniq</div>';
       html += '<div style="font-size:19px;margin-top:5px">';
       for (var i = 1; i < PHASES.length; i++) {
         var n = PHASES[i].name, r = results[n];
@@ -121,10 +119,11 @@
       statsEl.innerHTML = html;
     }
     function startPhase() {
+      cssDirectOn = false;
       phaseIdx++;
       if (phaseIdx >= PHASES.length) { done = true; runGen++; render(); return; }
       phase = PHASES[phaseIdx];
-      runGen++; freeUrl(); idx = 0; shown = 0;
+      runGen++; idx = 0; shown = 0;
       showOnly(phase.el);
       if (phase.start) phase.start(runGen);
       phaseSec = 0; shownSum = 0; rafSum = 0; nSamp = 0;
