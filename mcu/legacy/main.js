@@ -731,28 +731,24 @@ function postWorkerMessages(json) {
       return;
     }
 
-    // MJPEG mode: the worker shipped a complete JPEG frame. Size the canvas to
-    // the negotiated dimensions on first use, then paint via the native decoder.
-    if (e.data.hasOwnProperty('jpegFrame')) {
-      if (softwareCtx) {
-        if (!jpegRenderer) {
-          if (width > 0 && height > 0) {
-            canvasElement.width = width;
-            canvasElement.height = height;
-            updateCanvasSize();
-          }
-          jpegRenderer = new JpegRenderer(canvasElement, function (fw, fh) {
+    // MJPEG mode: the worker shipped a ready JPEG data URI. Paint it as the
+    // background-image of the #videobg div — ~24 fps on MCU1 vs ~6 for canvas.
+    if (e.data.hasOwnProperty('jpegDataUrl')) {
+      if (!jpegRenderer) {
+        var videobg = document.getElementById('videobg');
+        if (videobg) {
+          videobg.style.display = 'block';
+          canvasElement.style.display = 'none';
+          jpegRenderer = new JpegRenderer(videobg, function () {
             window._mcu1PaintCount = (window._mcu1PaintCount || 0) + 1;
-            window._mcu1PaintW = fw;
-            window._mcu1PaintH = fh;
             if (!window._mcu1FirstPaintTraced) {
               window._mcu1FirstPaintTraced = true;
-              if (window._mcu1Trace) window._mcu1Trace('18. First JPEG frame painted (' + fw + 'x' + fh + ')');
+              if (window._mcu1Trace) window._mcu1Trace('18. First JPEG frame painted (css-bg)');
             }
           });
         }
-        jpegRenderer.paint(new Uint8Array(e.data.jpegFrame));
       }
+      if (jpegRenderer) jpegRenderer.paint(e.data.jpegDataUrl);
       return;
     }
 

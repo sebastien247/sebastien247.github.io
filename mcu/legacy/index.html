@@ -71,6 +71,10 @@
 </head>
 
 <body id="body">
+    <!-- MCU1 MJPEG display surface: frames are painted by swapping this div's
+         background-image (far lighter than canvas drawImage on QtCarBrowser —
+         ~24 fps vs ~6). Shown only in MJPEG mode; canvas stays for Broadway. -->
+    <div id="videobg" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background-color:#000; background-repeat:no-repeat; background-position:center center; background-size:cover; z-index:0;"></div>
     <canvas></canvas>
 
     <!-- New waiting message that will be shown after socket port is retrieved -->

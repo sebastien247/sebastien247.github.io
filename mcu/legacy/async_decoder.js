@@ -47,9 +47,22 @@ var pendingFrames = [],
 // flowing past the first one. Reset only when the worker itself reloads.
 var _diagMsgCount = 0, _diagIdrCount = 0, _diagPFrameCount = 0, _diagDecodedCount = 0, _diagTickStarted = false;
 
-// MJPEG mode (MCU1): when true, the worker never builds Broadway and forwards
-// each JPEG binary frame to the main thread for native Image() decode.
+// MJPEG mode (MCU1): when true, the worker never builds Broadway. It converts
+// each JPEG frame to a data URI HERE (base64 off the main thread) and ships the
+// string to main.js, which paints it as a div's background-image (~24 fps on
+// MCU1 vs ~6 for canvas drawImage).
 var mjpegMode = false;
+
+// JPEG bytes -> "data:image/jpeg;base64,...". Chunked String.fromCharCode to
+// stay under the apply() argument-length limit on big frames. btoa exists in
+// Workers.
+function _jpegToDataUri(bytes) {
+  var CHUNK = 0x8000, parts = [], i;
+  for (i = 0; i < bytes.length; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK)));
+  }
+  return 'data:image/jpeg;base64,' + btoa(parts.join(''));
+}
 
 // MCU1 diagnostic: one-shot-per-action trace when socket.sendObject swallows
 // a throw. The wrapper at startSocket already posts {error} to main, but that
@@ -593,10 +606,8 @@ function handleVideoMessage(dat) {
       self.postMessage({ videoFrameReceived: true });
     }
     try {
-      self.postMessage({ jpegFrame: dat.buffer }, [dat.buffer]);
-    } catch (e) {
-      self.postMessage({ jpegFrame: dat.buffer });
-    }
+      self.postMessage({ jpegDataUrl: _jpegToDataUri(dat) });
+    } catch (e) {}
     return;
   }
   var unittype = dat[4] & 0x1f;
