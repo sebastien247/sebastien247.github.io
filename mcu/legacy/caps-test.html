@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MCU1 capabilities</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <style>
+    html, body { margin: 0; background: #000; color: #0f0; font-family: monospace; }
+    #out { padding: 6px 10px; font-size: 13px; line-height: 1.25; }
+    h2 { color: #0ff; font-size: 14px; margin: 7px 0 1px; }
+    .ok { color: #4f4; }
+    .no { color: #f66; }
+    .val { color: #ff0; }
+    .row { white-space: nowrap; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="out">testing…</div>
+  <script>
+  (function () {
+    var lines = [];
+    function h(t) { lines.push('<h2>' + t + '</h2>'); }
+    function row(label, text, cls) { lines.push('<div class="row">' + label + ': <span class="' + (cls || 'val') + '">' + text + '</span></div>'); }
+    function yesno(label, b) { row(label, b ? 'YES' : 'no', b ? 'ok' : 'no'); }
+    function has(o, p) { try { return typeof o[p] !== 'undefined' && o[p] !== null; } catch (e) { return false; } }
+
+    // ---- video element + codecs ----
+    h('VIDEO &lt;video&gt; canPlayType');
+    var v = document.createElement('video');
+    function cpt(label, type) {
+      var r = '';
+      try { r = v.canPlayType(type); } catch (e) { r = 'err'; }
+      row(label, r === '' ? 'NO' : r, r === '' ? 'no' : 'ok');
+    }
+    cpt('H264 mp4 (avc1)', 'video/mp4; codecs="avc1.42E01E"');
+    cpt('H264 mp4 generic', 'video/mp4');
+    cpt('HEVC/H265', 'video/mp4; codecs="hev1.1.6.L93.B0"');
+    cpt('WebM VP8', 'video/webm; codecs="vp8"');
+    cpt('WebM VP9', 'video/webm; codecs="vp9"');
+    cpt('Ogg Theora', 'video/ogg; codecs="theora"');
+    cpt('HLS m3u8', 'application/vnd.apple.mpegurl');
+    cpt('MJPEG video', 'video/x-motion-jpeg');
+
+    // ---- streaming APIs ----
+    h('STREAMING');
+    yesno('MediaSource (MSE)', has(window, 'MediaSource'));
+    yesno('ManagedMediaSource', has(window, 'ManagedMediaSource'));
+    yesno('WebCodecs VideoDecoder', has(window, 'VideoDecoder'));
+    yesno('WebRTC RTCPeerConnection', has(window, 'RTCPeerConnection') || has(window, 'webkitRTCPeerConnection'));
+    yesno('fetch', has(window, 'fetch'));
+    yesno('ReadableStream', has(window, 'ReadableStream'));
+
+    // ---- rendering ----
+    h('RENDERING');
+    // Each getContext must use a FRESH canvas — once a canvas has a 2d context,
+    // getContext('webgl') returns null on it, which would falsely report "no".
+    var c2d = document.createElement('canvas');
+    yesno('canvas 2d', !!c2d.getContext('2d'));
+    var cgl = document.createElement('canvas');
+    var gl = null; try { gl = cgl.getContext('webgl') || cgl.getContext('experimental-webgl'); } catch (e) {}
+    yesno('WebGL1', !!gl);
+    var cgl2 = document.createElement('canvas');
+    var gl2 = null; try { gl2 = cgl2.getContext('webgl2'); } catch (e) {}
+    yesno('WebGL2', !!gl2);
+    yesno('OffscreenCanvas', has(window, 'OffscreenCanvas'));
+    yesno('transferControlToOffscreen', typeof document.createElement('canvas').transferControlToOffscreen === 'function');
+    yesno('createImageBitmap', has(window, 'createImageBitmap'));
+    yesno('requestAnimationFrame', has(window, 'requestAnimationFrame') || has(window, 'webkitRequestAnimationFrame'));
+    if (gl) {
+      try {
+        var dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        if (dbg) row('GPU', gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '?', 'val');
+        row('GL max tex', gl.getParameter(gl.MAX_TEXTURE_SIZE), 'val');
+      } catch (e) {}
+    }
+
+    // ---- workers / wasm / misc ----
+    h('APIs');
+    yesno('WebSocket', has(window, 'WebSocket'));
+    yesno('Worker', has(window, 'Worker'));
+    yesno('Blob', has(window, 'Blob'));
+    yesno('URL.createObjectURL', has(window, 'URL') && !!window.URL.createObjectURL);
+    yesno('WebAssembly', has(window, 'WebAssembly'));
+    yesno('SharedArrayBuffer', has(window, 'SharedArrayBuffer'));
+
+    // ---- hardware ----
+    h('HARDWARE / ENV');
+    row('CPU cores', navigator.hardwareConcurrency || '?', 'val');
+    row('deviceMemory GB', navigator.deviceMemory || '?', 'val');
+    row('screen', screen.width + 'x' + screen.height + ' dpr' + (window.devicePixelRatio || 1), 'val');
+    row('UA', navigator.userAgent, 'val');
+
+    document.getElementById('out').innerHTML = lines.join('');
+
+    // ---- async image-format support (appended) ----
+    h('IMAGE FORMATS (async)');
+    document.getElementById('out').innerHTML = lines.join('');
+    function testImg(label, uri) {
+      var im = new Image();
+      im.onload = function () { append(label, im.width > 0 && im.height > 0 ? 'YES' : 'no(0px)', im.width > 0 ? 'ok' : 'no'); };
+      im.onerror = function () { append(label, 'no', 'no'); };
+      im.src = uri;
+    }
+    function append(label, text, cls) {
+      document.getElementById('out').innerHTML += '<div class="row">' + label + ': <span class="' + cls + '">' + text + '</span></div>';
+    }
+    testImg('WebP', 'data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==');
+    testImg('AVIF', 'data:image/avif;base64,AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADybWV0YQAAAAAAAAAoaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAGxpYmF2aWYAAAAADnBpdG0AAAAAAAEAAAAeaWxvYwAAAABEAAABAAEAAAABAAABGgAAAB0AAAAoaWluZgAAAAAAAQAAABppbmZlAgAAAAABAABhdjAxQ29sb3IAAAAAamlwcnAAAABLaXBjbwAAABRpc3BlAAAAAAAAAAEAAAABAAAAEHBpeGkAAAAAAwgICAAAAAxhdjFDgQ0MAAAAABNjb2xybmNseAACAAIABoAAAAAXaXBtYQAAAAAAAAABAAEEAQKDBAAAACVtZGF0EgAKCBgABogQEDQgMgkQAAAAB8dSLfI=');
+    testImg('PNG (sanity)', 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQAY3Y2wAAAAAElFTkSuQmCC');
+  })();
+  </script>
+</body>
+</html>
