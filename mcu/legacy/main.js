@@ -57,6 +57,35 @@ var mjpegForced = findGetParameter("mjpeg") === "1",
   requestMjpeg = mjpegForced || !canDriveOffscreen;
 // Expose the negotiation decision for the on-device diagnostic panel (photo-friendly).
 window._mcu1Mjpeg = { forced: mjpegForced, request: requestMjpeg, canOffscreen: canDriveOffscreen };
+
+// Dynamic fit: on a window resize (mjpeg path only), tell the phone the new window
+// size with a LIGHT discovery fetch so it recomputes the Android Auto insets + JPEG
+// crop for the new ratio. This does NOT reconnect the video socket (calling
+// checkPhone() would, and stalls on "waiting for stream"); the already-running
+// transcoder just adopts the new content rect and the css-bg renderer auto-refits
+// the new JPEG. Debounced. MCU1 has a fixed screen, so this fires mainly on desktop.
+if (requestMjpeg) {
+  var _mcu1FitTimer = null;
+  window.addEventListener("resize", function () {
+    clearTimeout(_mcu1FitTimer);
+    _mcu1FitTimer = setTimeout(function () {
+      try {
+        fetch("https://taada.top:" + DEFAULT_HTTPS_PORT + "/getsocketport?w=" +
+              window.innerWidth + "&h=" + window.innerHeight + "&webcodec=true&codec=mjpeg")
+          .then(function (r) { return r.text(); })
+          .then(function (txt) {
+            try {
+              var j = JSON.parse(txt);
+              if (j.hasOwnProperty("widthMargin")) widthMargin = j.widthMargin;
+              if (j.hasOwnProperty("heightMargin")) heightMargin = j.heightMargin;
+              if (typeof updateCanvasSize === "function") updateCanvasSize();
+            } catch (e) {}
+          })
+          .catch(function () {});
+      } catch (e) {}
+    }, 400);
+  });
+}
 canvasElement.style.display = "none";
 
 /**
@@ -382,7 +411,14 @@ function _tryPort() {
           // MCU1: force resolution 0 (800x480) — viewport-sized frames overflow Tesla's per-tab memory budget and trigger the resource watchdog ("Navigateur fermé pour préserver les ressources").
           // codec=mjpeg asks the phone to send pre-decoded JPEG frames instead of H.264; an older build ignores it and we fall back to Broadway.
           // Only request it when we'll take the software/css-bg branch (no OffscreenCanvas) or when ?mjpeg=1 forces it — a modern browser that requests mjpeg but runs the WebCodec path stalls at step 2 (phone sends JPEG, bundle expects H.264).
-          urlToFetch = "https://taada.top:".concat(port, "/getsocketport?w=800&h=480&webcodec=").concat(supportedWebCodec) + (requestMjpeg ? "&codec=mjpeg" : "");
+          // MJPEG: send the real window size as w/h. The phone uses it ONLY to inset
+          // Android Auto to the window ratio (letterbox margins) — the encoded frame
+          // stays the codec size (800x480, echoed back in the response), so Tesla's
+          // per-tab memory budget / resource watchdog is NOT hit. Non-mjpeg keeps the
+          // MCU1-safe 800x480.
+          var fitW = requestMjpeg ? window.innerWidth : 800;
+          var fitH = requestMjpeg ? window.innerHeight : 480;
+          urlToFetch = "https://taada.top:".concat(port, "/getsocketport?w=").concat(fitW, "&h=").concat(fitH, "&webcodec=").concat(supportedWebCodec) + (requestMjpeg ? "&codec=mjpeg" : "");
           console.log("Trying port ".concat(port, "..."));
           return _context4.a(2, new Promise(function (resolve, reject) {
             var timeout = setTimeout(function () {
