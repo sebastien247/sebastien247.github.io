@@ -698,7 +698,11 @@ function _rediscoverPort() {
                   timeout = setTimeout(function () {
                     return controller.abort();
                   }, 3000);
-                  url = "https://taada.top:".concat(discoveryPort, "/getsocketport?w=").concat(width, "&h=").concat(height, "&webcodec=true&reconnect=true");
+                  // Preserve codec=mjpeg across reconnects: the phone's HttpRequestHandler
+                  // calls setMjpegMode() on every discovery, so a rediscovery without this
+                  // flag silently flips the phone back to raw H.264 relay (browser then
+                  // falls back to Broadway/canvas instead of the JPEG/css-bg path).
+                  url = "https://taada.top:".concat(discoveryPort, "/getsocketport?w=").concat(width, "&h=").concat(height, "&webcodec=true&reconnect=true") + (mjpegMode ? "&codec=mjpeg" : "");
                   _context4.n = 2;
                   return fetch(url, {
                     method: 'get',
