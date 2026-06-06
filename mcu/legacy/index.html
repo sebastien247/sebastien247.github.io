@@ -12,9 +12,10 @@
             var prev = localStorage.getItem(KEY);
             if (prev) { buf = prev + '\n--- new session ---\n'; }
         } catch (e) {}
+        var DEBUG_OVERLAY = /[?&]debug\b/.test(location.search);
         function render() {
             var b = document.getElementById('mcu1-trace');
-            if (b) { b.textContent = buf; b.scrollTop = b.scrollHeight; }
+            if (b && DEBUG_OVERLAY) { b.style.display = 'block'; b.textContent = buf; b.scrollTop = b.scrollHeight; }
         }
         function save() {
             try { localStorage.setItem(KEY, buf); } catch (e) {}
@@ -74,7 +75,7 @@
     <!-- MCU1 MJPEG display surface: frames are painted by swapping this div's
          background-image (far lighter than canvas drawImage on QtCarBrowser —
          ~24 fps vs ~6). Shown only in MJPEG mode; canvas stays for Broadway. -->
-    <div id="videobg" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background-color:#000; background-repeat:no-repeat; background-position:center center; background-size:cover; z-index:0;"></div>
+    <div id="videobg" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background-color:#000; background-repeat:no-repeat; background-position:center center; background-size:contain; z-index:0;"></div>
     <canvas></canvas>
 
     <!-- New waiting message that will be shown after socket port is retrieved -->
@@ -174,7 +175,9 @@
         </div>
     </div>
     
-    <div id="mcu1-trace" style="position:fixed;bottom:0;left:0;right:0;max-height:38vh;min-height:80px;background:rgba(0,0,0,0.92);color:#0f0;font:12px/1.3 monospace;padding:4px 8px;overflow-y:auto;z-index:99999;white-space:pre-wrap;word-break:break-all;pointer-events:auto;"></div>
+    <!-- Diagnostic overlay: hidden by default so the real render is unobstructed.
+         Append ?debug to the URL to show it again (code kept on purpose). -->
+    <div id="mcu1-trace" style="display:none;position:fixed;bottom:0;left:0;right:0;max-height:38vh;min-height:80px;background:rgba(0,0,0,0.92);color:#0f0;font:12px/1.3 monospace;padding:4px 8px;overflow-y:auto;z-index:99999;white-space:pre-wrap;word-break:break-all;pointer-events:auto;"></div>
 </body>
 <!-- <script src="pcm-player.min.js"></script> -->
 <script src="polyfills.js"></script>
