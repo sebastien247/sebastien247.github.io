@@ -331,6 +331,33 @@ function updateConnectionProgress(step, message) {
  * @returns {{x: number, y: number}} The converted coordinates relative to the canvas
  */
 function convertToCanvasCoordinates(screenX, screenY) {
+  // MJPEG/css-bg path: the visible element is #videobg, NOT the canvas (which is
+  // display:none here, so canvasElement.getBoundingClientRect() is all-zero — that
+  // made the letterbox term below negative and offset every tap by half the image,
+  // so a top-left tap landed in the centre / bottom-right). The emitted JPEG is
+  // already cropped to the content rect (width-widthMargin x height-heightMargin)
+  // and the content sits at the AA frame's TOP-LEFT (insets are right/bottom), so
+  // map the tap straight into the content, accounting for any contain-letterbox.
+  if (mjpegEnabled) {
+    var vb = document.getElementById('videobg');
+    var r = vb ? vb.getBoundingClientRect() : null;
+    var cw = width - (widthMargin || 0);
+    var ch = height - (heightMargin || 0);
+    if (r && r.width > 0 && r.height > 0 && cw > 0 && ch > 0) {
+      var contentRatio = cw / ch;
+      var elRatio = r.width / r.height;
+      var dispW, dispH, offX, offY;
+      if (elRatio > contentRatio) {
+        dispH = r.height; dispW = dispH * contentRatio; offX = (r.width - dispW) / 2; offY = 0;
+      } else {
+        dispW = r.width; dispH = dispW / contentRatio; offX = 0; offY = (r.height - dispH) / 2;
+      }
+      var mpx = Math.max(0, Math.min(1, (screenX - r.left - offX) / dispW));
+      var mpy = Math.max(0, Math.min(1, (screenY - r.top - offY) / dispH));
+      return { x: Math.floor(mpx * cw), y: Math.floor(mpy * ch) };
+    }
+  }
+
   // Get the canvas's bounding rectangle, which includes any CSS transformations
   var canvasRect = canvasElement.getBoundingClientRect();
 
