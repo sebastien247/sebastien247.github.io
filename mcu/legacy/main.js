@@ -88,6 +88,13 @@ if (requestMjpeg) {
 }
 canvasElement.style.display = "none";
 
+// Brief reconnects must NOT black the screen: the last JPEG persists as #videobg's
+// CSS background, so a quick reconnect is far better shown as a ~1-2s frozen frame
+// than a black flash. Only show the dark "Reconnecting" overlay if the outage
+// outlasts OVERLAY_DELAY (a real, sustained drop). videoFrameReceived cancels it.
+var _overlayTimer = null;
+var OVERLAY_DELAY = 5000;
+
 /**
  * 🚨 NOUVEAU: Affiche un message d'erreur dans l'overlay permanent
  * @param {string} message - Le message à afficher
@@ -909,11 +916,17 @@ function postWorkerMessages(json) {
       // 🚨 Ne pas afficher l'overlay si on est déjà en attente de reload
       // (notre fonction reloadWhenOnline gère déjà l'affichage)
       if (!isWaitingForReload) {
-        // Keep the overlay visible until the stream is confirmed live
-        // again (hidden by videoFrameReceived). No timed auto-hide:
-        // reconnection backoff can outlast any fixed delay, so hiding on
-        // a timer flickers the overlay and masks a still-down connection.
-        showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
+        // Don't black the screen on a BRIEF reconnect (the common case while driving):
+        // the last JPEG persists under the overlay, so defer it — only show the dark
+        // overlay if still down after OVERLAY_DELAY. videoFrameReceived cancels it the
+        // instant the stream is back, so a quick reconnect never flashes black.
+        if (!_overlayTimer) {
+          var _lostReason = e.data.reason;
+          _overlayTimer = setTimeout(function () {
+            _overlayTimer = null;
+            showErrorOverlay("Connection lost: " + _lostReason + ". Reconnecting...");
+          }, OVERLAY_DELAY);
+        }
       }
       return;
     }
@@ -961,7 +974,9 @@ function postWorkerMessages(json) {
       console.log("Video frame received message received!", e.data);
       videoFrameReceived = true;
 
-      // Stream is live again — clear any reconnecting overlay.
+      // Stream is live again — cancel any pending overlay AND clear a shown one, so a
+      // quick reconnect never blacks the screen.
+      if (_overlayTimer) { clearTimeout(_overlayTimer); _overlayTimer = null; }
       hideErrorOverlay();
 
       // Update to step 3/3 - Stream ready

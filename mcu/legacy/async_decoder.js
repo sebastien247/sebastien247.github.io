@@ -111,6 +111,7 @@ var SOFT_RECONNECTION_THRESHOLD = 5; // Attempts after which only the UI message
 var BASE_RECONNECTION_DELAY = 2000; // Délai de base en ms (2 secondes)
 var MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
 var PONG_TIMEOUT = 6000; // No server PONG for this long ⇒ dead control channel
+var NO_VIDEO_TIMEOUT = 8000; // mjpeg: reconnect only after this long with NO video frame — tolerate brief gaps on a still-live socket (the video usually resumes on its own; reconnecting just black-flashes via the overlay)
 
 // The phone re-randomises the WebSocket port on every service start; the stable
 // HTTP discovery endpoint is served on this fixed port range.
@@ -511,7 +512,7 @@ function noPong() {
   // Transient drop: reconnect the WebSocket in place. Never reload the page —
   // it is hosted remotely and a reload hangs in a no-coverage zone.
   console.warn('No data from phone (pong watchdog) — forcing in-place reconnect');
-  try { self.postMessage({ trace: 'RECONNECT: noPong — 3s with NO video frame' }); } catch (_e) {}
+  try { self.postMessage({ trace: 'RECONNECT: noPong — ' + (NO_VIDEO_TIMEOUT / 1000) + 's with NO video frame' }); } catch (_e) {}
   forceReconnect();
 }
 function heartbeat() {
@@ -520,28 +521,23 @@ function heartbeat() {
     return;
   }
 
-  // Dead control channel detection. lastPongAt is updated only by the PONG sentinel
-  // (unittype 31), never by video — so for H.264 a half-open link masked by trickling
-  // BUFFERED video is caught here, and a stream that never started (lastPongAt is
-  // baselined at connect) is caught too.
+  // Dead-link detection via the PONG sentinel. For H.264 this catches a half-open link
+  // masked by trickling BUFFERED video, and a stream that never started.
   //
-  // MJPEG EXCEPTION: each JPEG is a complete REAL-TIME frame (no decode buffer to
-  // trickle from), so a freshly-arrived JPEG IS proof the link is alive. And by the
-  // time this 6s pong-timeout can fire, noPong (3s with NO video) has ALREADY
-  // reconnected any real video stall — so in mjpeg this only ever fires WHILE video
-  // is still flowing = a false positive that black-flashes a healthy stream (the
-  // reported flicker). Suppress it WHILE video is fresh; if video is ALSO stale, fall
-  // through and reconnect (preserves the never-started / half-open recovery).
+  // MJPEG: the PONG rides the B1 control channel, which on a real MCU1 lags badly
+  // (observed 6 s+), so it is an UNRELIABLE liveness signal. VIDEO is the real one
+  // (each JPEG is a complete real-time frame). So in mjpeg NEVER reconnect on the
+  // pong-timeout — the no-video watchdog (noPong, NO_VIDEO_TIMEOUT) is the SOLE reconnect
+  // trigger. Just trace the lag (throttled) for diagnosis.
   if (lastPongAt !== 0 && Date.now() - lastPongAt > PONG_TIMEOUT) {
-    var _videoFresh = mjpegMode && lastVideoAt !== 0 && (Date.now() - lastVideoAt < PONG_TIMEOUT);
-    if (_videoFresh) {
+    if (mjpegMode) {
       if (Date.now() - _lastPongLagTrace > 10000) {
         _lastPongLagTrace = Date.now();
-        try { self.postMessage({ trace: 'pong lag ' + (Date.now() - lastPongAt) + 'ms but video fresh (' + (Date.now() - lastVideoAt) + 'ms) — mjpeg streaming, NOT reconnecting' }); } catch (_e) {}
+        try { self.postMessage({ trace: 'pong lag ' + (Date.now() - lastPongAt) + 'ms (mjpeg: video=liveness, NOT reconnecting; last frame ' + (lastVideoAt ? (Date.now() - lastVideoAt) + 'ms ago' : 'never') + ')' }); } catch (_e) {}
       }
     } else {
       console.warn('No PONG from phone for ' + (Date.now() - lastPongAt) + 'ms — forcing in-place reconnect');
-      try { self.postMessage({ trace: 'RECONNECT: pong-timeout ' + (Date.now() - lastPongAt) + 'ms' + (mjpegMode ? ' (video also stale: ' + (lastVideoAt ? (Date.now() - lastVideoAt) + 'ms' : 'never') + ')' : '') }); } catch (_e) {}
+      try { self.postMessage({ trace: 'RECONNECT: pong-timeout ' + (Date.now() - lastPongAt) + 'ms' }); } catch (_e) {}
       forceReconnect();
       return;
     }
@@ -622,7 +618,7 @@ function handleVideoMessage(dat) {
   // 🚨 AMÉLIORATION: Réinitialiser le watchdog sur TOUT paquet vidéo reçu
   // Cela prouve que la connexion est active même si le PING/PONG spécifique saute
   if (pongtimer !== null) clearTimeout(pongtimer);
-  pongtimer = setTimeout(noPong, 3000);
+  pongtimer = setTimeout(noPong, NO_VIDEO_TIMEOUT);
   lastVideoAt = Date.now(); // mjpeg liveness: a fresh frame proves the link is alive
   // MJPEG mode: a binary message starting with FF D8 is a complete JPEG frame.
   // Forward it to the main thread (transfer, falling back to copy) for native
@@ -986,7 +982,7 @@ function handleControlMessage(event) {
   if ((dat[4] & 0x1f) === 31) {
     lastPongAt = Date.now();
     if (pongtimer !== null) clearTimeout(pongtimer);
-    pongtimer = setTimeout(noPong, 3000);
+    pongtimer = setTimeout(noPong, NO_VIDEO_TIMEOUT);
   }
 }
 
@@ -1094,6 +1090,11 @@ function startSocket() {
 
     // Baseline for the heartbeat dead-channel check until the first real PONG.
     lastPongAt = Date.now();
+    // Arm the no-video watchdog on connect too, so a stream that NEVER starts (no
+    // video, no pong) still reconnects after NO_VIDEO_TIMEOUT — in mjpeg the pong-
+    // timeout no longer covers this. The first video frame re-arms it.
+    if (pongtimer !== null) clearTimeout(pongtimer);
+    pongtimer = setTimeout(noPong, NO_VIDEO_TIMEOUT);
     console.log('✅ WebSocket connected successfully');
 
     // B1: bring up the dedicated control socket alongside the video socket on
