@@ -33,6 +33,11 @@ var pendingFrames = [],
   lastheart = 0,
   pongtimer,
   frameRate,
+  // B1 control channel: when the phone advertises controlChannelPort (build 66+),
+  // a SECOND WebSocket carries PING/PONG + binary touch so they don't queue behind
+  // bulk H.264 video. Both stay falsy/null on older phones => single-socket path.
+  controlChannelPort = null,
+  controlSocket = null,
   lastPongAt = 0,
   // Timestamp of the last server PONG sentinel (unittype 31)
   connectTimeout = null,
@@ -544,7 +549,9 @@ function heartbeat() {
   if (typeof frameRate !== 'undefined') {
     pingPayload.fps = frameRate;
   }
-  socket.sendObject(pingPayload);
+  // B1: PING rides the control socket when present so the PONG can come back
+  // without queueing behind video. Falls back to the video socket otherwise.
+  controlSendObject(pingPayload);
 }
 function handleMessage(event) {
   // 🚨 NOUVEAU: Vérifier si c'est un message texte (JSON) ou binaire
@@ -577,6 +584,9 @@ function handleMessage(event) {
           clearTimeout(pongtimer);
           pongtimer = null;
         }
+
+        // B1: tear down the control socket too (no-op on legacy path).
+        closeControlSocket();
         return;
       }
     } catch (e) {
@@ -895,6 +905,107 @@ function forceReconnect() {
     });
   }
 }
+// ========== B1 Control Channel (separate WebSocket for PING/PONG + touch) ======
+// When the phone advertises controlChannelPort (build 66+), low-latency control
+// traffic moves off the video socket so it can never be stuck behind a queued
+// H.264 frame (head-of-line blocking). EVERYTHING here is a no-op when
+// controlChannelPort is falsy: no second socket is opened and every send falls
+// back to the video socket, preserving the legacy single-socket behaviour.
+
+// True only when the dedicated control socket exists AND is OPEN.
+function controlChannelOpen() {
+  return controlSocket !== null && controlSocket.readyState === WebSocket.OPEN;
+}
+
+// Routes a control message onto the control socket when open, else the video
+// socket exactly as before. Used for the PING heartbeat and the touch fallback.
+function controlSendObject(obj) {
+  if (controlChannelOpen()) {
+    try {
+      controlSocket.send(JSON.stringify(obj));
+    } catch (e) {
+      // Control socket hiccupped — fall back to the video socket so the PING
+      // still goes out; the control socket's own 'close' will reopen it.
+      try { socket.sendObject(obj); } catch (e2) { self.postMessage({ error: e2 }); }
+    }
+  } else {
+    socket.sendObject(obj);
+  }
+}
+
+// Sends raw binary (touch) on the control socket if open, else the video socket.
+function controlSendBinary(binaryData) {
+  if (controlChannelOpen()) {
+    controlSocket.send(binaryData);
+  } else {
+    socket.send(binaryData);
+  }
+}
+
+// Handles a message on the CONTROL socket. The only payload the phone sends here
+// is the PONG sentinel (unittype 31): it re-baselines lastPongAt (the PONG_TIMEOUT
+// input the heartbeat reads) AND re-arms the no-data watchdog (pongtimer), exactly
+// as a video frame does in handleVideoMessage. This is what lets B1 ride out a
+// video head-of-line stall: while video is queued, the PONG keeps arriving here,
+// re-arms the watchdog, and we do NOT reconnect. A truly dead link stops the PONG
+// too, so the watchdog still fires then — no regression.
+function handleControlMessage(event) {
+  if (typeof event.data === 'string') {
+    return;
+  }
+  var dat = new Uint8Array(event.data);
+  if ((dat[4] & 0x1f) === 31) {
+    lastPongAt = Date.now();
+    if (pongtimer !== null) clearTimeout(pongtimer);
+    pongtimer = setTimeout(noPong, 3000);
+  }
+}
+
+// Opens (or reopens) the dedicated control socket on controlChannelPort, same wss
+// host as the video socket. No-op when controlChannelPort is falsy (old phone).
+function startControlSocket() {
+  if (!controlChannelPort) {
+    return; // Legacy single-socket path: nothing to do.
+  }
+  closeControlSocket();
+  controlSocket = new WebSocket("wss://taada.top:".concat(controlChannelPort));
+  controlSocket.binaryType = "arraybuffer";
+  controlSocket.addEventListener('open', function () {
+    controlSocket.binaryType = "arraybuffer";
+    try { self.postMessage({ trace: 'B1 control WS open (port ' + controlChannelPort + ')' }); } catch (_te) {}
+  });
+  controlSocket.addEventListener('message', function (event) {
+    handleControlMessage(event);
+  });
+  // If the control socket dies on its own (video socket still up), reopen it after
+  // a short delay. Until then controlSend* transparently fall back to the video
+  // socket, so PING/touch keep flowing and the video watchdog is never affected.
+  var reopenIfStale = function (ev) {
+    if (ev && ev.target !== controlSocket) {
+      return; // stale socket event after we already replaced it
+    }
+    if (isServerShuttingDown || isReconnecting || !controlChannelPort) {
+      return; // a full reconnect (or shutdown) will rebuild it via startSocket()
+    }
+    setTimeout(function () {
+      if (!isServerShuttingDown && !isReconnecting && controlChannelPort) {
+        startControlSocket();
+      }
+    }, BASE_RECONNECTION_DELAY);
+  };
+  controlSocket.addEventListener('close', reopenIfStale);
+  controlSocket.addEventListener('error', reopenIfStale);
+}
+
+// Closes and clears the control socket (silent — no reconnect side effects).
+function closeControlSocket() {
+  if (controlSocket) {
+    var old = controlSocket;
+    controlSocket = null; // null FIRST so reopenIfStale's stale-target guard fires
+    try { old.close(); } catch (e) { /* ignore */ }
+  }
+}
+
 function startSocket() {
   // Committing to a new socket: allow this socket's own failure to schedule a
   // fresh reconnect. socketClose() re-asserts isReconnecting on failure; the
@@ -955,6 +1066,10 @@ function startSocket() {
     // Baseline for the heartbeat dead-channel check until the first real PONG.
     lastPongAt = Date.now();
     console.log('✅ WebSocket connected successfully');
+
+    // B1: bring up the dedicated control socket alongside the video socket on
+    // (re)connect. No-op when controlChannelPort is falsy (legacy single-socket).
+    startControlSocket();
 
     // Notify main thread: Socket connected
     self.postMessage({
@@ -1042,6 +1157,10 @@ function socketClose(event) {
     connectTimeout = null;
   }
 
+  // B1: drop the control socket too; the video socket's reconnect drives the
+  // rebuild. closeControlSocket() is a no-op on the legacy single-socket path.
+  closeControlSocket();
+
   // Backoff exponentiel plafonné à 30 s. La reconnexion n'abandonne JAMAIS: le
   // lien Wi-Fi phone↔voiture finit toujours par revenir, et recharger la page
   // hors-ligne la bloquerait. Au-delà du seuil, on ne change que le message.
@@ -1088,6 +1207,10 @@ function socketClose(event) {
           // valeurs connues et on retente quand même la connexion.
           if (discovery) {
             port = discovery.port;
+            // B1: the phone re-randomises ALL ports on a service restart, so the
+            // control port can change too. Adopt the fresh one (null on old phone);
+            // startControlSocket() in the video 'open' handler picks it up.
+            controlChannelPort = discovery.controlChannelPort || null;
             applyRediscoveredConfig(discovery);
           }
 
@@ -1198,12 +1321,15 @@ function messageHandler(message) {
         // Vérifier que l'encodage a réussi
         if (!binaryData) {
           console.error('[BinaryTouch] Encoding failed - falling back to JSON');
-          socket.sendObject(message.data);
+          // B1: route on the control socket when present, else the video socket.
+          controlSendObject(message.data);
           return;
         }
 
         // Envoyer directement le buffer binaire
-        socket.send(binaryData);
+        // B1: touch rides the control socket when present so it isn't stuck behind
+        // queued video; falls back to the video socket otherwise.
+        controlSendBinary(binaryData);
         _diagTouchSent++;
         if (!_diagFirstTouchSentTraced) {
           _diagFirstTouchSentTraced = true;
@@ -1223,8 +1349,8 @@ function messageHandler(message) {
         }
       } catch (error) {
         console.error('[BinaryTouch] Encoding error:', error);
-        // Fallback to JSON si erreur
-        socket.sendObject(message.data);
+        // Fallback to JSON si erreur — B1: control socket when present.
+        controlSendObject(message.data);
       }
     } else {
       // Autres messages: envoyer en JSON comme avant
@@ -1275,6 +1401,7 @@ self.addEventListener('message', /*#__PURE__*/function () {
             }, 5000);
           }
           port = message.data.port;
+          controlChannelPort = message.data.controlChannelPort || null;
           appVersion = parseInt(message.data.appVersion);
           useBroadway = message.data.broadway; // Software-render mode (MCU1): no canvas is transferred, so capture the
           // decoder geometry from the INIT message and skip the WebCodecs probe.

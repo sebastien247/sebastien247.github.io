@@ -661,6 +661,10 @@ function postWorkerMessages(json) {
     usebt = json.usebt;
   }
   port = json.port;
+  // B1 control-channel discovery: a build-66+ phone advertises a SECOND WebSocket
+  // port for PING/PONG + touch so they don't queue behind bulk H.264 video.
+  // Null on older phones => the worker stays single-socket (legacy path).
+  var controlChannelPort = json.controlChannelPort || null;
   if (json.resolution === 2) {
     width = 1920;
     height = 1080;
@@ -724,6 +728,7 @@ function postWorkerMessages(json) {
     demuxDecodeWorker.postMessage({
       canvas: offscreen,
       port: port,
+      controlChannelPort: controlChannelPort,
       action: 'INIT',
       appVersion: appVersion,
       broadway: forceBroadway,
@@ -738,6 +743,7 @@ function postWorkerMessages(json) {
     if (window._mcu1Trace) window._mcu1Trace('6b. 2D context ' + (softwareCtx ? 'OK' : 'NULL') + ', posting INIT');
     demuxDecodeWorker.postMessage({
       port: port,
+      controlChannelPort: controlChannelPort,
       action: 'INIT',
       appVersion: appVersion,
       broadway: true,
