@@ -840,13 +840,19 @@ function postWorkerMessages(json) {
         if (videobg) {
           videobg.style.display = 'block';
           canvasElement.style.display = 'none';
-          jpegRenderer = new JpegRenderer(videobg, function () {
+          jpegRenderer = new JpegRenderer(videobg, function (pw, ph, loadMs) {
+            // v5 css-bg preload: onPaint fires once per frame ACTUALLY shown (post-decode,
+            // in the preload Image's onload). So paints ~= visible fps, swapMax = longest a
+            // single frame stayed up, and decMax/decSlow = the REAL decode latency of the
+            // displayed frames (loadMs). The preload sets the css background-image only once
+            // the frame is decoded, so #000 is never composited between frames (no flash).
             window._mcu1PaintCount = (window._mcu1PaintCount || 0) + 1;
-            // v3 instrumentation (css-bg path unchanged): swapMax = longest gap
-            // between two RAF background swaps. With css-bg this counts assignments,
-            // not composites, so it reveals whether the swap loop itself stalls; the
-            // decode-blank window is measured separately by the sampled Image() probe
-            // in the jpegDataUrl handler below.
+            if (pw) window._mcu1PaintW = pw;
+            if (ph) window._mcu1PaintH = ph;
+            if (loadMs != null) {
+              if (loadMs > (window._mcu1DecMax || 0)) window._mcu1DecMax = loadMs;
+              if (loadMs > 33) window._mcu1DecSlow = (window._mcu1DecSlow || 0) + 1;
+            }
             var _n = Date.now();
             if (window._mcu1LastSwapAt) {
               var _g = _n - window._mcu1LastSwapAt;
@@ -855,31 +861,15 @@ function postWorkerMessages(json) {
             window._mcu1LastSwapAt = _n;
             if (!window._mcu1FirstPaintTraced) {
               window._mcu1FirstPaintTraced = true;
-              if (window._mcu1Trace) window._mcu1Trace('18. First JPEG frame painted (css-bg)');
+              if (window._mcu1Trace) window._mcu1Trace('18. First JPEG frame painted (css-bg preload v5)');
             }
           });
         }
       }
       if (jpegRenderer) jpegRenderer.paint(e.data.jpegDataUrl);
-      // v3 decode-blank probe: sample 1 frame in 15 and decode it off to the side
-      // via Image(), timing onload. On WebKit 601 the css background-image swap
-      // blanks #videobg to its #000 backdrop for ~this long during each per-frame
-      // decode while driving (every frame differs). High decMax / decSlow => the
-      // decode is the bottleneck and the decode-blank hypothesis holds; near-zero =>
-      // the black is elsewhere and we must NOT touch the proven css-bg path. Sampled
-      // 1/15 to keep the extra-decode overhead ~7%. Pure diagnostic — the render path
-      // is unchanged from the bundle that benchmarked at ~24 fps.
-      window._mcu1DecN = (window._mcu1DecN || 0) + 1;
-      if ((window._mcu1DecN % 15) === 0 && typeof Image === 'function') {
-        var _dt0 = Date.now();
-        var _probe = new Image();
-        _probe.onload = function () {
-          var _dd = Date.now() - _dt0;
-          if (_dd > (window._mcu1DecMax || 0)) window._mcu1DecMax = _dd;
-          if (_dd > 33) window._mcu1DecSlow = (window._mcu1DecSlow || 0) + 1;
-        };
-        try { _probe.src = e.data.jpegDataUrl; } catch (_pe) {}
-      }
+      // (v4: decode latency is now measured directly by the double-buffer renderer's
+      // <img> onload — see decMax/decSlow in the onPaint callback above — so the old
+      // separate sampled Image() probe is gone.)
       return;
     }
 
