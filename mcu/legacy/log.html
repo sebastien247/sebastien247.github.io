@@ -19,6 +19,7 @@ pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 6px;
       font-size: 13px; }
 .summary b { color: #fff; }
 .summary .bad { color: #f55; }
+.summary .ok { color: #9f9; }
 </style>
 </head>
 <body>
@@ -81,9 +82,14 @@ pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 6px;
         }
         var lines = all.slice(start);
         var mainBeat = null, workerBeat = null, lastEvent = null, errs = [];
+        var connects = 0, b1open = false, lastReconnect = null, pongSuppressed = false;
         for (i = 0; i < lines.length; i++) {
             var ln = lines[i];
             if (!ln) continue;
+            if (ln.indexOf('startSocket: new WebSocket') !== -1) { connects++; }
+            if (ln.indexOf('B1 control WS open') !== -1) { b1open = true; }
+            if (ln.indexOf('RECONNECT') !== -1) { lastReconnect = ln; }
+            if (ln.indexOf('pong lag') !== -1 && ln.indexOf('NOT reconnecting') !== -1) { pongSuppressed = true; }
             if (ln.indexOf('~5s main:') !== -1) { mainBeat = ln; continue; }
             if (ln.indexOf('~5s worker:') !== -1) { workerBeat = ln; continue; }
             if (ln.indexOf('!!') !== -1 || ln.indexOf('[alert blocked]') !== -1 || ln.indexOf('threw') !== -1) { errs.push(ln); }
@@ -93,6 +99,11 @@ pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 6px;
         html += '<b>last step</b> : ' + (lastEvent ? esc(lastEvent) : '(none)') + '\n';
         html += '<b>main</b>      : ' + (mainBeat ? esc(mainBeat) : '(no heartbeat yet)') + '\n';
         html += '<b>worker</b>    : ' + (workerBeat ? esc(workerBeat) : '(no heartbeat yet)') + '\n';
+        var reconns = connects > 0 ? connects - 1 : 0;
+        html += '<b>reconnects</b>: ' + (reconns > 0 ? '<span class="bad">' + reconns + ' (' + connects + ' connects — the flicker)</span>' : '0') + '\n';
+        html += '<b>B1 chan</b>   : ' + (b1open ? 'OPEN (control socket up)' : 'not opened (build 65, or +3 port unreachable)') + '\n';
+        if (lastReconnect) { html += '<b>last reconn</b>: ' + esc(lastReconnect) + '\n'; }
+        if (pongSuppressed) { html += '<b>pong fix</b>  : <span class="ok">active</span> (mjpeg pong-lag suppressed, video=liveness)\n'; }
         if (errs.length) {
             html += '<b>errors</b>    : <span class="bad">' + errs.length + ' — ' + esc(errs[errs.length - 1]) + '</span>';
         } else {

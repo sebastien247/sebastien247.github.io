@@ -38,6 +38,8 @@ var pendingFrames = [],
   // bulk H.264 video. Both stay falsy/null on older phones => single-socket path.
   controlChannelPort = null,
   controlSocket = null,
+  lastVideoAt = 0,       // mjpeg liveness: timestamp of the last video frame received
+  _lastPongLagTrace = 0, // throttle for the mjpeg "pong lag (not reconnecting)" trace
   lastPongAt = 0,
   // Timestamp of the last server PONG sentinel (unittype 31)
   connectTimeout = null,
@@ -509,6 +511,7 @@ function noPong() {
   // Transient drop: reconnect the WebSocket in place. Never reload the page —
   // it is hosted remotely and a reload hangs in a no-coverage zone.
   console.warn('No data from phone (pong watchdog) — forcing in-place reconnect');
+  try { self.postMessage({ trace: 'RECONNECT: noPong — 3s with NO video frame' }); } catch (_e) {}
   forceReconnect();
 }
 function heartbeat() {
@@ -517,14 +520,31 @@ function heartbeat() {
     return;
   }
 
-  // Dead control channel: the phone replies to every PING with a PONG sentinel
-  // (unittype 31). lastPongAt is updated only by that sentinel, never by video
-  // frames, so a half-open channel masked by trickling buffered video is still
-  // caught here — independently of video flow.
+  // Dead control channel detection. lastPongAt is updated only by the PONG sentinel
+  // (unittype 31), never by video — so for H.264 a half-open link masked by trickling
+  // BUFFERED video is caught here, and a stream that never started (lastPongAt is
+  // baselined at connect) is caught too.
+  //
+  // MJPEG EXCEPTION: each JPEG is a complete REAL-TIME frame (no decode buffer to
+  // trickle from), so a freshly-arrived JPEG IS proof the link is alive. And by the
+  // time this 6s pong-timeout can fire, noPong (3s with NO video) has ALREADY
+  // reconnected any real video stall — so in mjpeg this only ever fires WHILE video
+  // is still flowing = a false positive that black-flashes a healthy stream (the
+  // reported flicker). Suppress it WHILE video is fresh; if video is ALSO stale, fall
+  // through and reconnect (preserves the never-started / half-open recovery).
   if (lastPongAt !== 0 && Date.now() - lastPongAt > PONG_TIMEOUT) {
-    console.warn('No PONG from phone for ' + (Date.now() - lastPongAt) + 'ms — forcing in-place reconnect');
-    forceReconnect();
-    return;
+    var _videoFresh = mjpegMode && lastVideoAt !== 0 && (Date.now() - lastVideoAt < PONG_TIMEOUT);
+    if (_videoFresh) {
+      if (Date.now() - _lastPongLagTrace > 10000) {
+        _lastPongLagTrace = Date.now();
+        try { self.postMessage({ trace: 'pong lag ' + (Date.now() - lastPongAt) + 'ms but video fresh (' + (Date.now() - lastVideoAt) + 'ms) — mjpeg streaming, NOT reconnecting' }); } catch (_e) {}
+      }
+    } else {
+      console.warn('No PONG from phone for ' + (Date.now() - lastPongAt) + 'ms — forcing in-place reconnect');
+      try { self.postMessage({ trace: 'RECONNECT: pong-timeout ' + (Date.now() - lastPongAt) + 'ms' + (mjpegMode ? ' (video also stale: ' + (lastVideoAt ? (Date.now() - lastVideoAt) + 'ms' : 'never') + ')' : '') }); } catch (_e) {}
+      forceReconnect();
+      return;
+    }
   }
   if (lastheart !== 0) {
     if (Date.now() - lastheart > 3000) {
@@ -603,6 +623,7 @@ function handleVideoMessage(dat) {
   // Cela prouve que la connexion est active même si le PING/PONG spécifique saute
   if (pongtimer !== null) clearTimeout(pongtimer);
   pongtimer = setTimeout(noPong, 3000);
+  lastVideoAt = Date.now(); // mjpeg liveness: a fresh frame proves the link is alive
   // MJPEG mode: a binary message starting with FF D8 is a complete JPEG frame.
   // Forward it to the main thread (transfer, falling back to copy) for native
   // Image() decode — Broadway is never involved. Checked before the unittype
@@ -840,6 +861,7 @@ function resetStreamStateForReconnect() {
   firstFrameDecoded = false;
   lastheart = 0;
   lastPongAt = 0;
+  lastVideoAt = 0; // force "video stale" until a real frame arrives post-reconnect
   if (pongtimer) {
     clearTimeout(pongtimer);
     pongtimer = null;
@@ -1136,6 +1158,11 @@ function socketClose(event) {
     console.log('Reconnection already in progress, ignoring duplicate event');
     return;
   }
+
+  // Diagnostic: was this reconnect our watchdog (forceReconnect, which already traced
+  // its reason above), or a REAL socket close/error from the peer/network?
+  // forceReconnectPending is true only on the watchdog path (it is cleared just below).
+  try { self.postMessage({ trace: 'RECONNECT via socketClose — ' + (forceReconnectPending ? 'watchdog-initiated' : 'closed by peer/network') + ' (attempt ' + (reconnectionAttempt + 1) + ')' }); } catch (_e) {}
 
   // Marquer qu'une reconnexion est en cours
   isReconnecting = true;
