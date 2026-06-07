@@ -34,6 +34,19 @@
             save();
             render();
         };
+        // Live status store: a SEPARATE localStorage key, OVERWRITTEN each tick, that
+        // holds the latest main + worker counters. It never appends to the event trace,
+        // so the trace stays a clean event log (steps, reconnects, errors) with no ~5s
+        // spam between frames. log.html reads this for the pinned STATUS header.
+        var KEY_STATUS = 'mcu1-status';
+        window._mcu1Status = function (which, line) {
+            try {
+                var s = {};
+                try { s = JSON.parse(localStorage.getItem(KEY_STATUS) || '{}'); } catch (e2) {}
+                s[which] = '[' + new Date().toTimeString().substring(0, 8) + '] ' + String(line);
+                localStorage.setItem(KEY_STATUS, JSON.stringify(s));
+            } catch (e) {}
+        };
         window.addEventListener('error', function (e) {
             window._mcu1Trace('!! window error: ' + (e.message || e) + ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?'));
         });
@@ -55,7 +68,6 @@
         // into one line so a photo of any portion of log.html surfaces the
         // build/res — they would otherwise only appear once on trace 3.
         window._mcu1PaintCount = 0;
-        var _lastMainBeat = '';
         setInterval(function () {
             try {
                 var w = window._mcu1PaintW || 0;
@@ -63,23 +75,25 @@
                 var b = window._mcu1Build === undefined ? '?' : window._mcu1Build;
                 var r = window._mcu1Res === undefined ? '?' : window._mcu1Res;
                 var tc = window._mcu1TouchCount || 0;
-                var line = '~5s main: paints=' + window._mcu1PaintCount + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b + ' touch=' + tc;
-                // Dedup: only emit when the line changed since the last beat. A
-                // frozen stream logs ONE main line then stays quiet, so the step
-                // sequence above it is not buried under identical ~5s spam.
-                if (line !== _lastMainBeat) {
-                    _lastMainBeat = line;
-                    window._mcu1Trace(line);
-                }
+                // Live counters → the status store (overwritten), NOT the event trace.
+                window._mcu1Status('main', 'main: paints=' + window._mcu1PaintCount + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b + ' touch=' + tc);
             } catch (_e) {}
         }, 5000);
-        window._mcu1Trace('1. Page loaded');
+        // ↓↓↓ BUMP THIS NUMBER ON EVERY legacy/ DEPLOY ↓↓↓
+        // It is logged (so a photo proves WHICH bundle Tesla is actually running —
+        // a stale cached bundle shows an old number) AND it cache-busts every script
+        // (?v=<version>), forcing QtCarBrowser to re-fetch instead of serving cache.
+        window._mcu1BundleVersion = 1;
+        window._mcu1Trace('1. Page loaded — bundle v' + window._mcu1BundleVersion);
     })();
     </script>
     <title>TaaDa | Tesla Android Auto - Driver Assistant</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+    <meta http-equiv="Pragma" content="no-cache"/>
+    <meta http-equiv="Expires" content="0"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
     <!-- <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/> -->
     <link rel="icon" href="favicon.ico"/>
@@ -196,9 +210,16 @@
     <div id="mcu1-trace" style="display:none;position:fixed;bottom:0;left:0;right:0;max-height:38vh;min-height:80px;background:rgba(0,0,0,0.92);color:#0f0;font:12px/1.3 monospace;padding:4px 8px;overflow-y:auto;z-index:99999;white-space:pre-wrap;word-break:break-all;pointer-events:auto;"></div>
 </body>
 <!-- <script src="pcm-player.min.js"></script> -->
-<script src="polyfills.js"></script>
-<script src="jpeg-renderer.js"></script>
-<script src="main.js"></script>
+<!-- Load all bundle scripts with a ?v=<version> cache-buster so a version bump
+     (window._mcu1BundleVersion, set in the head) forces QtCarBrowser to re-fetch
+     fresh JS instead of serving a stale cached copy. document.write keeps the
+     synchronous in-order execution the bundle relies on. -->
+<script>(function () {
+    var v = '?v=' + (window._mcu1BundleVersion || '0');
+    document.write('<script src="polyfills.js' + v + '"><\/script>');
+    document.write('<script src="jpeg-renderer.js' + v + '"><\/script>');
+    document.write('<script src="main.js' + v + '"><\/script>');
+})();</script>
 
 </html>
 

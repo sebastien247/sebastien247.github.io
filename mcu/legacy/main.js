@@ -4,7 +4,7 @@ function _regeneratorDefine2(e, r, n, t) { var i = Object.defineProperty; try { 
 function asyncGeneratorStep(n, t, e, r, o, a, c) { try { var i = n[a](c), u = i.value; } catch (n) { return void e(n); } i.done ? t(u) : Promise.resolve(u).then(r, o); }
 function _asyncToGenerator(n) { return function () { var t = this, e = arguments; return new Promise(function (r, o) { var a = n.apply(t, e); function _next(n) { asyncGeneratorStep(a, r, o, _next, _throw, "next", n); } function _throw(n) { asyncGeneratorStep(a, r, o, _next, _throw, "throw", n); } _next(void 0); }); }; }
 function _readOnlyError(r) { throw new TypeError('"' + r + '" is read-only'); }
-var demuxDecodeWorker = new Worker("./async_decoder.js"),
+var demuxDecodeWorker = new Worker("./async_decoder.js?v=" + (window._mcu1BundleVersion || '0')),
   latestVersion = 2,
   logElement = document.getElementById('log'),
   warningElement = document.getElementById('warning'),
@@ -96,6 +96,10 @@ function showErrorOverlay(message) {
   if (errorOverlay && errorMessage) {
     errorMessage.textContent = message;
     errorOverlay.style.display = "flex";
+    // The error overlay is opaque and covers #videobg — this IS the black flash the
+    // tester sees on each reconnect (the last JPEG persists UNDER it as the CSS
+    // background). Trace it so a reconnect->black is unambiguous in the log.
+    if (window._mcu1Trace) window._mcu1Trace('OVERLAY shown (black covers video): ' + message);
   } else {
     console.error('Error overlay elements not found');
   }
@@ -107,6 +111,7 @@ function showErrorOverlay(message) {
 function hideErrorOverlay() {
   if (errorOverlay) {
     errorOverlay.style.display = "none";
+    if (window._mcu1Trace) window._mcu1Trace('OVERLAY hidden (video visible again)');
   }
 }
 
@@ -783,6 +788,12 @@ function postWorkerMessages(json) {
     }
   }
   demuxDecodeWorker.addEventListener("message", function (e) {
+    // Live worker counters → the separate status store (overwritten, NOT appended to
+    // the event trace), surfaced only in log.html's pinned STATUS header.
+    if (e.data && e.data.hasOwnProperty('status')) {
+      if (window._mcu1Status) window._mcu1Status('worker', e.data.status);
+      return;
+    }
     // Diagnostic trace from the worker.
     if (e.data && e.data.hasOwnProperty('trace')) {
       if (window._mcu1Trace) window._mcu1Trace('[worker] ' + e.data.trace);

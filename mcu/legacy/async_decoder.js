@@ -1,4 +1,4 @@
-importScripts("polyfills.js");
+importScripts("polyfills.js" + self.location.search);
 function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function (o) { return typeof o; } : function (o) { return o && "function" == typeof Symbol && o.constructor === Symbol && o !== Symbol.prototype ? "symbol" : typeof o; }, _typeof(o); }
 function _regeneratorValues(e) { if (null != e) { var t = e["function" == typeof Symbol && Symbol.iterator || "@@iterator"], r = 0; if (t) return t.call(e); if ("function" == typeof e.next) return e; if (!isNaN(e.length)) return { next: function next() { return e && r >= e.length && (e = void 0), { value: e && e[r++], done: !e }; } }; } throw new TypeError(_typeof(e) + " is not iterable"); }
 function _regenerator() { /*! regenerator-runtime -- Copyright (c) 2014-present, Facebook, Inc. -- license (MIT): https://github.com/babel/babel/blob/main/packages/babel-helpers/LICENSE */ var e, t, r = "function" == typeof Symbol ? Symbol : {}, n = r.iterator || "@@iterator", o = r.toStringTag || "@@toStringTag"; function i(r, n, o, i) { var c = n && n.prototype instanceof Generator ? n : Generator, u = Object.create(c.prototype); return _regeneratorDefine2(u, "_invoke", function (r, n, o) { var i, c, u, f = 0, p = o || [], y = !1, G = { p: 0, n: 0, v: e, a: d, f: d.bind(e, 4), d: function d(t, r) { return i = t, c = 0, u = e, G.n = r, a; } }; function d(r, n) { for (c = r, u = n, t = 0; !y && f && !o && t < p.length; t++) { var o, i = p[t], d = G.p, l = i[2]; r > 3 ? (o = l === n) && (u = i[(c = i[4]) ? 5 : (c = 3, 3)], i[4] = i[5] = e) : i[0] <= d && ((o = r < 2 && d < i[1]) ? (c = 0, G.v = n, G.n = i[1]) : d < l && (o = r < 3 || i[0] > n || n > l) && (i[4] = r, i[5] = n, G.n = l, c = 0)); } if (o || r > 1) return a; throw y = !0, n; } return function (o, p, l) { if (f > 1) throw TypeError("Generator is already running"); for (y && 1 === p && d(p, l), c = p, u = l; (t = c < 2 ? e : u) || !y;) { i || (c ? c < 3 ? (c > 1 && (G.n = -1), d(c, u)) : G.n = u : G.v = u); try { if (f = 2, i) { if (c || (o = "next"), t = i[o]) { if (!(t = t.call(i, u))) throw TypeError("iterator result is not an object"); if (!t.done) return t; u = t.value, c < 2 && (c = 0); } else 1 === c && (t = i.return) && t.call(i), c < 2 && (u = TypeError("The iterator does not provide a '" + o + "' method"), c = 1); i = e; } else if ((t = (y = G.n < 0) ? u : r.call(n, G)) !== a) break; } catch (t) { i = e, c = 1, u = t; } finally { f = 1; } } return { value: t, done: y }; }; }(r, o, i), !0), u; } var a = {}; function Generator() {} function GeneratorFunction() {} function GeneratorFunctionPrototype() {} t = Object.getPrototypeOf; var c = [][n] ? t(t([][n]())) : (_regeneratorDefine2(t = {}, n, function () { return this; }), t), u = GeneratorFunctionPrototype.prototype = Generator.prototype = Object.create(c); function f(e) { return Object.setPrototypeOf ? Object.setPrototypeOf(e, GeneratorFunctionPrototype) : (e.__proto__ = GeneratorFunctionPrototype, _regeneratorDefine2(e, o, "GeneratorFunction")), e.prototype = Object.create(u), e; } return GeneratorFunction.prototype = GeneratorFunctionPrototype, _regeneratorDefine2(u, "constructor", GeneratorFunctionPrototype), _regeneratorDefine2(GeneratorFunctionPrototype, "constructor", GeneratorFunction), GeneratorFunction.displayName = "GeneratorFunction", _regeneratorDefine2(GeneratorFunctionPrototype, o, "GeneratorFunction"), _regeneratorDefine2(u), _regeneratorDefine2(u, o, "Generator"), _regeneratorDefine2(u, n, function () { return this; }), _regeneratorDefine2(u, "toString", function () { return "[object Generator]"; }), (_regenerator = function _regenerator() { return { w: i, m: f }; })(); }
@@ -8,8 +8,8 @@ function _unsupportedIterableToArray(r, a) { if (r) { if ("string" == typeof r) 
 function _arrayLikeToArray(r, a) { (null == a || a > r.length) && (a = r.length); for (var e = 0, n = Array(a); e < a; e++) n[e] = r[e]; return n; }
 function asyncGeneratorStep(n, t, e, r, o, a, c) { try { var i = n[a](c), u = i.value; } catch (n) { return void e(n); } i.done ? t(u) : Promise.resolve(u).then(r, o); }
 function _asyncToGenerator(n) { return function () { var t = this, e = arguments; return new Promise(function (r, o) { var a = n.apply(t, e); function _next(n) { asyncGeneratorStep(a, r, o, _next, _throw, "next", n); } function _throw(n) { asyncGeneratorStep(a, r, o, _next, _throw, "throw", n); } _next(void 0); }); }; }
-importScripts("Decoder.js");
-importScripts("binary_touch_protocol.js");
+importScripts("Decoder.js" + self.location.search);
+importScripts("binary_touch_protocol.js" + self.location.search);
 
 // ========== Constants and Variable Declarations ==========
 
@@ -52,7 +52,7 @@ var pendingFrames = [],
 
 // MCU1 diagnostic counters — periodic 5 s trace shows whether frames keep
 // flowing past the first one. Reset only when the worker itself reloads.
-var _diagMsgCount = 0, _diagIdrCount = 0, _diagPFrameCount = 0, _diagDecodedCount = 0, _diagTickStarted = false;
+var _diagMsgCount = 0, _diagIdrCount = 0, _diagPFrameCount = 0, _diagDecodedCount = 0, _diagTickStarted = false, _smallFrameTraced = false;
 
 // MJPEG mode (MCU1): when true, the worker never builds Broadway. It converts
 // each JPEG frame to a data URI HERE (base64 off the main thread) and ships the
@@ -630,6 +630,13 @@ function handleVideoMessage(dat) {
   // logic so a JPEG byte that equals the PONG sentinel is not misclassified.
   if (mjpegMode && dat.length >= 2 && dat[0] === 0xFF && dat[1] === 0xD8) {
     _diagMsgCount++;
+    // Black/blank frame detection: a black 800x480 JPEG is ~1-2 KB vs ~7-30 KB for
+    // real content. If the phone ever sends a tiny frame, surface it ONCE — rules out
+    // the "is the black flash a black IMAGE?" hypothesis (vs the reconnect overlay).
+    if (dat.length < 2500 && !_smallFrameTraced) {
+      _smallFrameTraced = true;
+      try { self.postMessage({ trace: 'small JPEG len=' + dat.length + ' — possible black/blank frame from phone' }); } catch (_te) {}
+    }
     if (!firstVideoFrameReceived) {
       firstVideoFrameReceived = true;
       try { self.postMessage({ trace: '16. First JPEG frame received (len=' + dat.length + ')' }); } catch (_te) {}
@@ -1410,20 +1417,18 @@ self.addEventListener('message', /*#__PURE__*/function () {
           try { self.postMessage({ trace: '8. Worker INIT received' }); } catch (_te) {}
           if (!_diagTickStarted) {
             _diagTickStarted = true;
-            var _lastWorkerBeat = '';
             setInterval(function () {
               try {
                 // mjpeg mode: i/p/d are H.264-only counters (always 0 here), so
                 // drop them — the pertinent signal is m (frames in) and q (queue).
                 var line = mjpegMode
-                  ? '~5s worker: m=' + _diagMsgCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
-                  : '~5s worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=h264';
-                // Dedup: a stalled worker (m frozen) logs ONE line then goes
-                // quiet instead of flooding log.html with identical ~5s lines.
-                if (line !== _lastWorkerBeat) {
-                  _lastWorkerBeat = line;
-                  self.postMessage({ trace: line });
-                }
+                  ? 'worker: m=' + _diagMsgCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
+                  : 'worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=h264';
+                // Live counters go to a SEPARATE status store (overwritten each tick),
+                // NOT the event trace — so the trace stays a clean event log (steps,
+                // reconnects, errors) where disconnections stand out, with no ~5s spam
+                // between frames. log.html reads this for the pinned STATUS header.
+                self.postMessage({ status: line });
               } catch (_te) {}
             }, 5000);
           }

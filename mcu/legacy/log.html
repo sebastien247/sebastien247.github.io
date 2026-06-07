@@ -16,7 +16,11 @@ pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 6px;
 .meta { color: #777; font-size: 11px; margin-top: 8px; white-space: pre-wrap; }
 .summary { white-space: pre-wrap; word-break: break-all; margin: 0 0 8px 0;
       padding: 8px; background: #021; border: 1px solid #0a0; color: #6f6;
-      font-size: 13px; }
+      font-size: 13px;
+      /* Pin the STATUS to the top of the viewport so it stays in frame even when
+         the page is scrolled to the bottom (newest trace). A tester only has to
+         photograph whatever is on screen and BOTH the summary + newest lines show. */
+      position: sticky; top: 0; z-index: 1; }
 .summary b { color: #fff; }
 .summary .bad { color: #f55; }
 .summary .ok { color: #9f9; }
@@ -60,20 +64,23 @@ pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 6px;
         summaryEl.textContent = '(trace is empty)';
     } else {
         pre.textContent = log;
-        summaryEl.innerHTML = buildSummary(log);
+        var status = {};
+        try { status = JSON.parse(localStorage.getItem('mcu1-status') || '{}'); } catch (e) {}
+        summaryEl.innerHTML = buildSummary(log, status);
     }
     var info = 'now:      ' + new Date().toString() + '\n';
     info += 'log size: ' + (log == null ? '(null)' : log.length + ' chars') + '\n';
     info += 'UA:       ' + (navigator.userAgent || '?');
     meta.textContent = info;
-    // Scroll to the TOP (the summary), not the heartbeat tail, so the first
-    // thing a tester photographs is the diagnostic state.
-    window.scrollTo(0, 0);
+    // Scroll to the BOTTOM (the newest trace = the most recent session) — that is
+    // what a tester needs to photograph. The STATUS block is position:sticky so it
+    // stays pinned at the top of the viewport and is captured in the same photo.
+    window.scrollTo(0, document.body.scrollHeight);
 
     function esc(s) {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
-    function buildSummary(text) {
+    function buildSummary(text, status) {
         var all = text.split('\n');
         // Scope to the most recent session (everything after the last marker).
         var start = 0, i;
@@ -81,26 +88,34 @@ pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 6px;
             if (all[i].indexOf('--- new session ---') !== -1) { start = i + 1; break; }
         }
         var lines = all.slice(start);
-        var mainBeat = null, workerBeat = null, lastEvent = null, errs = [];
+        var lastEvent = null, errs = [];
         var connects = 0, b1open = false, lastReconnect = null, pongSuppressed = false;
+        var version = null, overlayShown = 0;
         for (i = 0; i < lines.length; i++) {
             var ln = lines[i];
             if (!ln) continue;
+            if (ln.indexOf('bundle v') !== -1) { version = ln.substring(ln.indexOf('bundle v')); }
+            if (ln.indexOf('OVERLAY shown') !== -1) { overlayShown++; }
             if (ln.indexOf('startSocket: new WebSocket') !== -1) { connects++; }
             if (ln.indexOf('B1 control WS open') !== -1) { b1open = true; }
             if (ln.indexOf('RECONNECT') !== -1) { lastReconnect = ln; }
             if (ln.indexOf('pong lag') !== -1 && ln.indexOf('NOT reconnecting') !== -1) { pongSuppressed = true; }
-            if (ln.indexOf('~5s main:') !== -1) { mainBeat = ln; continue; }
-            if (ln.indexOf('~5s worker:') !== -1) { workerBeat = ln; continue; }
             if (ln.indexOf('!!') !== -1 || ln.indexOf('[alert blocked]') !== -1 || ln.indexOf('threw') !== -1) { errs.push(ln); }
-            lastEvent = ln; // last non-heartbeat trace = furthest step reached
+            if (ln.indexOf('~5s ') !== -1) { continue; } // legacy heartbeat lines (old buffers) — counters now live in the status store
+            lastEvent = ln; // last EVENT trace = furthest step reached (no heartbeat spam now)
         }
+        // main/worker counters come from the separate status store (overwritten each
+        // tick), so the event trace above stays clean and reconnections stand out.
+        var mainBeat = status && status.main ? status.main : null;
+        var workerBeat = status && status.worker ? status.worker : null;
         var html = '';
+        html += '<b>bundle</b>    : ' + (version ? esc(version) : '<span class="bad">not logged (OLD cached bundle?)</span>') + '\n';
         html += '<b>last step</b> : ' + (lastEvent ? esc(lastEvent) : '(none)') + '\n';
         html += '<b>main</b>      : ' + (mainBeat ? esc(mainBeat) : '(no heartbeat yet)') + '\n';
         html += '<b>worker</b>    : ' + (workerBeat ? esc(workerBeat) : '(no heartbeat yet)') + '\n';
         var reconns = connects > 0 ? connects - 1 : 0;
         html += '<b>reconnects</b>: ' + (reconns > 0 ? '<span class="bad">' + reconns + ' (' + connects + ' connects — the flicker)</span>' : '0') + '\n';
+        html += '<b>black flash</b>: ' + (overlayShown > 0 ? '<span class="bad">' + overlayShown + ' (reconnect overlay covered the video)</span>' : '0') + '\n';
         html += '<b>B1 chan</b>   : ' + (b1open ? 'OPEN (control socket up)' : 'not opened (build 65, or +3 port unreachable)') + '\n';
         if (lastReconnect) { html += '<b>last reconn</b>: ' + esc(lastReconnect) + '\n'; }
         if (pongSuppressed) { html += '<b>pong fix</b>  : <span class="ok">active</span> (mjpeg pong-lag suppressed, video=liveness)\n'; }
