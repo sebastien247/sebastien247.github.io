@@ -14,49 +14,92 @@ pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 6px;
 .err { color: #f55; }
 .info { color: #aaa; font-style: italic; }
 .meta { color: #777; font-size: 11px; margin-top: 8px; white-space: pre-wrap; }
+.summary { white-space: pre-wrap; word-break: break-all; margin: 0 0 8px 0;
+      padding: 8px; background: #021; border: 1px solid #0a0; color: #6f6;
+      font-size: 13px; }
+.summary b { color: #fff; }
+.summary .bad { color: #f55; }
 </style>
 </head>
 <body>
 <h1>TaaDa MCU1 — diagnostic log (read-only)</h1>
 <div class="sub">Reads localStorage["mcu1-trace"] only. No worker, no decoder, no fetch, no alert. Cannot crash.</div>
+<div class="summary" id="summary">(parsing...)</div>
 <pre id="log">(initializing...)</pre>
 <div class="meta" id="meta"></div>
 <script>
 /* Pure ES5. Reads the trace the legacy bundle wrote to localStorage on its
-   previous run. Useful when the legacy bundle crashes the browser before
-   its on-page overlay can be photographed. */
+   previous run. The STATUS block at the top is parsed from the trace so a
+   single photo of this page shows where the stream stalled — no scrolling
+   past the ~5s heartbeats needed. */
 (function () {
     var pre = document.getElementById('log');
     var meta = document.getElementById('meta');
-    function show(txt, cls) {
-        pre.textContent = txt;
-        if (cls) { pre.className = cls; }
-    }
+    var summaryEl = document.getElementById('summary');
     var log;
     try {
         log = localStorage.getItem('mcu1-trace');
     } catch (e) {
-        show('!! localStorage is not accessible: ' + (e && e.message ? e.message : String(e)), 'err');
+        pre.className = 'err';
+        pre.textContent = '!! localStorage is not accessible: ' + (e && e.message ? e.message : String(e));
+        summaryEl.textContent = '(localStorage unavailable)';
         return;
     }
     if (log === null) {
-        show(
+        pre.className = 'info';
+        pre.textContent =
             '(no "mcu1-trace" key in localStorage)\n\n' +
             'localStorage itself works, but nothing was written.\n' +
             'Either the legacy bundle never reached its first _mcu1Trace\n' +
-            'call, or localStorage is per-page on this browser.',
-            'info'
-        );
+            'call, or localStorage is per-page on this browser.';
+        summaryEl.textContent = '(no trace yet — bundle never reached _mcu1Trace)';
     } else if (log === '') {
-        show('(empty string stored)', 'info');
+        pre.className = 'info';
+        pre.textContent = '(empty string stored)';
+        summaryEl.textContent = '(trace is empty)';
     } else {
-        show(log);
+        pre.textContent = log;
+        summaryEl.innerHTML = buildSummary(log);
     }
     var info = 'now:      ' + new Date().toString() + '\n';
     info += 'log size: ' + (log == null ? '(null)' : log.length + ' chars') + '\n';
     info += 'UA:       ' + (navigator.userAgent || '?');
     meta.textContent = info;
-    window.scrollTo(0, document.body.scrollHeight);
+    // Scroll to the TOP (the summary), not the heartbeat tail, so the first
+    // thing a tester photographs is the diagnostic state.
+    window.scrollTo(0, 0);
+
+    function esc(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function buildSummary(text) {
+        var all = text.split('\n');
+        // Scope to the most recent session (everything after the last marker).
+        var start = 0, i;
+        for (i = all.length - 1; i >= 0; i--) {
+            if (all[i].indexOf('--- new session ---') !== -1) { start = i + 1; break; }
+        }
+        var lines = all.slice(start);
+        var mainBeat = null, workerBeat = null, lastEvent = null, errs = [];
+        for (i = 0; i < lines.length; i++) {
+            var ln = lines[i];
+            if (!ln) continue;
+            if (ln.indexOf('~5s main:') !== -1) { mainBeat = ln; continue; }
+            if (ln.indexOf('~5s worker:') !== -1) { workerBeat = ln; continue; }
+            if (ln.indexOf('!!') !== -1 || ln.indexOf('[alert blocked]') !== -1 || ln.indexOf('threw') !== -1) { errs.push(ln); }
+            lastEvent = ln; // last non-heartbeat trace = furthest step reached
+        }
+        var html = '';
+        html += '<b>last step</b> : ' + (lastEvent ? esc(lastEvent) : '(none)') + '\n';
+        html += '<b>main</b>      : ' + (mainBeat ? esc(mainBeat) : '(no heartbeat yet)') + '\n';
+        html += '<b>worker</b>    : ' + (workerBeat ? esc(workerBeat) : '(no heartbeat yet)') + '\n';
+        if (errs.length) {
+            html += '<b>errors</b>    : <span class="bad">' + errs.length + ' — ' + esc(errs[errs.length - 1]) + '</span>';
+        } else {
+            html += '<b>errors</b>    : none';
+        }
+        return html;
+    }
 })();
 </script>
 </body>

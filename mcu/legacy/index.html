@@ -23,6 +23,14 @@
         window._mcu1Trace = function (msg) {
             var t = new Date().toTimeString().substring(0, 8);
             buf += '[' + t + '] ' + String(msg) + '\n';
+            // Cap the buffer so a long-lived (or stalled) session cannot grow
+            // localStorage without bound — the old code never trimmed and the
+            // ~5s heartbeats pushed it past 120 KB. Trim from the FRONT (oldest
+            // sessions); the current session's tail is the most relevant and is
+            // always kept.
+            if (buf.length > 49152) {
+                buf = '...[older trace trimmed]...\n' + buf.substring(buf.length - 49152);
+            }
             save();
             render();
         };
@@ -47,6 +55,7 @@
         // into one line so a photo of any portion of log.html surfaces the
         // build/res — they would otherwise only appear once on trace 3.
         window._mcu1PaintCount = 0;
+        var _lastMainBeat = '';
         setInterval(function () {
             try {
                 var w = window._mcu1PaintW || 0;
@@ -54,7 +63,14 @@
                 var b = window._mcu1Build === undefined ? '?' : window._mcu1Build;
                 var r = window._mcu1Res === undefined ? '?' : window._mcu1Res;
                 var tc = window._mcu1TouchCount || 0;
-                window._mcu1Trace('~5s main: paints=' + window._mcu1PaintCount + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b + ' touch=' + tc);
+                var line = '~5s main: paints=' + window._mcu1PaintCount + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b + ' touch=' + tc;
+                // Dedup: only emit when the line changed since the last beat. A
+                // frozen stream logs ONE main line then stays quiet, so the step
+                // sequence above it is not buried under identical ~5s spam.
+                if (line !== _lastMainBeat) {
+                    _lastMainBeat = line;
+                    window._mcu1Trace(line);
+                }
             } catch (_e) {}
         }, 5000);
         window._mcu1Trace('1. Page loaded');

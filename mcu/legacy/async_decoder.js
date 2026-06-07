@@ -1257,8 +1257,21 @@ self.addEventListener('message', /*#__PURE__*/function () {
           try { self.postMessage({ trace: '8. Worker INIT received' }); } catch (_te) {}
           if (!_diagTickStarted) {
             _diagTickStarted = true;
+            var _lastWorkerBeat = '';
             setInterval(function () {
-              try { self.postMessage({ trace: '~5s worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') }); } catch (_te) {}
+              try {
+                // mjpeg mode: i/p/d are H.264-only counters (always 0 here), so
+                // drop them — the pertinent signal is m (frames in) and q (queue).
+                var line = mjpegMode
+                  ? '~5s worker: m=' + _diagMsgCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
+                  : '~5s worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=h264';
+                // Dedup: a stalled worker (m frozen) logs ONE line then goes
+                // quiet instead of flooding log.html with identical ~5s lines.
+                if (line !== _lastWorkerBeat) {
+                  _lastWorkerBeat = line;
+                  self.postMessage({ trace: line });
+                }
+              } catch (_te) {}
             }, 5000);
           }
           port = message.data.port;
