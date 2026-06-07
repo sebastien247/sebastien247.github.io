@@ -54,6 +54,13 @@ var pendingFrames = [],
 // flowing past the first one. Reset only when the worker itself reloads.
 var _diagMsgCount = 0, _diagIdrCount = 0, _diagPFrameCount = 0, _diagDecodedCount = 0, _diagTickStarted = false, _smallFrameTraced = false;
 
+// Black-flash diagnosis (v3): arrival cadence of mjpeg JPEG frames. gapMax = the
+// largest ms between two consecutive frames; burst = count of frames that arrived
+// within <50ms of the previous one (back-to-back). High gapMax + high burst = the
+// phone is delivering in stop/go bursts (a flow-control / ack-cadence smell);
+// steady ~37ms arrivals point the finger at the compositor decode path instead.
+var _diagJpegGapMax = 0, _diagJpegBurst = 0, _diagJpegLastAt = 0;
+
 // MJPEG mode (MCU1): when true, the worker never builds Broadway. It converts
 // each JPEG frame to a data URI HERE (base64 off the main thread) and ships the
 // string to main.js, which paints it as a div's background-image (~24 fps on
@@ -626,6 +633,14 @@ function handleVideoMessage(dat) {
   // logic so a JPEG byte that equals the PONG sentinel is not misclassified.
   if (mjpegMode && dat.length >= 2 && dat[0] === 0xFF && dat[1] === 0xD8) {
     _diagMsgCount++;
+    // v3 black-flash diagnosis: track inter-frame arrival spacing (see _diagJpeg* above).
+    var _nowJ = Date.now();
+    if (_diagJpegLastAt) {
+      var _gapJ = _nowJ - _diagJpegLastAt;
+      if (_gapJ > _diagJpegGapMax) _diagJpegGapMax = _gapJ;
+      if (_gapJ < 50) _diagJpegBurst++;
+    }
+    _diagJpegLastAt = _nowJ;
     // Black/blank frame detection: a black 800x480 JPEG is ~1-2 KB vs ~7-30 KB for
     // real content. If the phone ever sends a tiny frame, surface it ONCE — rules out
     // the "is the black flash a black IMAGE?" hypothesis (vs the reconnect overlay).
@@ -1423,7 +1438,7 @@ self.addEventListener('message', /*#__PURE__*/function () {
                 // mjpeg mode: i/p/d are H.264-only counters (always 0 here), so
                 // drop them — the pertinent signal is m (frames in) and q (queue).
                 var line = mjpegMode
-                  ? 'worker: m=' + _diagMsgCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
+                  ? 'worker: m=' + _diagMsgCount + ' gapMax=' + _diagJpegGapMax + ' burst=' + _diagJpegBurst + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
                   : 'worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=h264';
                 // Live counters go to a SEPARATE status store (overwritten each tick),
                 // NOT the event trace — so the trace stays a clean event log (steps,
