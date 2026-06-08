@@ -832,9 +832,10 @@ function postWorkerMessages(json) {
       return;
     }
 
-    // MJPEG mode: the worker shipped a ready JPEG data URI. Paint it as the
-    // background-image of the #videobg div — ~24 fps on MCU1 vs ~6 for canvas.
-    if (e.data.hasOwnProperty('jpegDataUrl')) {
+    // MJPEG mode: the worker TRANSFERRED the raw JPEG bytes (no base64). Wrap them in a
+    // Blob URL and hand it to the css-bg renderer, which decodes + paints it and REVOKES
+    // the URL when done (bounded memory). ~24 fps display path on MCU1 vs ~6 for canvas.
+    if (e.data.hasOwnProperty('jpegBytes')) {
       if (!jpegRenderer) {
         var videobg = document.getElementById('videobg');
         if (videobg) {
@@ -866,10 +867,13 @@ function postWorkerMessages(json) {
           });
         }
       }
-      if (jpegRenderer) jpegRenderer.paint(e.data.jpegDataUrl);
-      // (v4: decode latency is now measured directly by the double-buffer renderer's
-      // <img> onload — see decMax/decSlow in the onPaint callback above — so the old
-      // separate sampled Image() probe is gone.)
+      if (jpegRenderer) {
+        // createObjectURL only when we'll actually paint, so no Blob URL ever leaks; the
+        // renderer revokes it (and any superseded one) so the decoded-image cache stays flat.
+        try {
+          jpegRenderer.paint(URL.createObjectURL(new Blob([e.data.jpegBytes], { type: 'image/jpeg' })));
+        } catch (_e) {}
+      }
       return;
     }
 

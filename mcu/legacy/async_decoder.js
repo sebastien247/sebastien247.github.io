@@ -63,11 +63,10 @@ var _diagMsgCount = 0, _diagIdrCount = 0, _diagPFrameCount = 0, _diagDecodedCoun
 var _diagJpegGapMax = 0, _diagJpegBurst = 0, _diagJpegLastAt = 0;
 
 // Per-stage FPS diagnosis: rxFps = JPEG frames RECEIVED per second (windowed over the 5s
-// status tick) = the reception rate; b64Max = max base64-encode ms (the post-reception cost
-// of _jpegToDataUri). Compare rxFps to the main thread's pxFps (painted/s) to locate where
-// fps is lost: low rxFps = source/network; high rxFps + low pxFps = display/decode; high
-// b64Max = the worker base64 step.
-var _diagRxLastM = 0, _diagRxFps = 0, _diagB64Max = 0;
+// status tick) = the reception rate. Compare it to the main thread's pxFps (painted/s) to
+// locate where fps is lost: low rxFps = source/network; high rxFps + low pxFps = display/
+// decode. (base64 is gone — frames are transferred as raw bytes — so there's no b64Max.)
+var _diagRxLastM = 0, _diagRxFps = 0;
 
 // MJPEG mode (MCU1): when true, the worker never builds Broadway. It converts
 // each JPEG frame to a data URI HERE (base64 off the main thread) and ships the
@@ -717,11 +716,13 @@ function handleVideoMessage(dat) {
       self.postMessage({ videoFrameReceived: true });
     }
     try {
-      var _b0 = Date.now();
-      var _du = _jpegToDataUri(dat);
-      var _bm = Date.now() - _b0;
-      if (_bm > _diagB64Max) _diagB64Max = _bm;
-      self.postMessage({ jpegDataUrl: _du });
+      // Send the RAW JPEG bytes (transfer = zero-copy) instead of a base64 data URI. base64
+      // cost ~half a core at 18 fps (b64Max was ~100 ms) and the data: URIs piled up in
+      // WebKit's decoded-image cache (unbounded → the "preserve resources" freeze). The page
+      // wraps the bytes in a Blob URL it REVOKES, so memory stays bounded. slice() gives our
+      // own copy so transferring its buffer never disturbs the socket frame.
+      var _u8 = dat.slice();
+      self.postMessage({ jpegBytes: _u8.buffer }, [_u8.buffer]);
     } catch (e) {}
     return;
   }
@@ -1509,7 +1510,7 @@ self.addEventListener('message', /*#__PURE__*/function () {
                 _diagRxFps = Math.round((_diagMsgCount - _diagRxLastM) / 5);
                 _diagRxLastM = _diagMsgCount;
                 var line = mjpegMode
-                  ? 'worker: m=' + _diagMsgCount + ' rxFps=' + _diagRxFps + ' gapMax=' + _diagJpegGapMax + ' burst=' + _diagJpegBurst + ' b64Max=' + _diagB64Max + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
+                  ? 'worker: m=' + _diagMsgCount + ' rxFps=' + _diagRxFps + ' gapMax=' + _diagJpegGapMax + ' burst=' + _diagJpegBurst + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
                   : 'worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=h264';
                 // Live counters go to a SEPARATE status store (overwritten each tick),
                 // NOT the event trace — so the trace stays a clean event log (steps,
