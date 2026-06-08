@@ -39,6 +39,7 @@ var pendingFrames = [],
   controlChannelPort = null,
   controlSocket = null,
   lastVideoAt = 0,       // mjpeg liveness: timestamp of the last video frame received
+  lastHeartbeatAt = 0,   // wall-clock of the last heartbeat() tick — detects Worker suspend/throttle
   _lastPongLagTrace = 0, // throttle for the mjpeg "pong lag (not reconnecting)" trace
   lastPongAt = 0,
   // Timestamp of the last server PONG sentinel (unittype 31)
@@ -60,6 +61,13 @@ var _diagMsgCount = 0, _diagIdrCount = 0, _diagPFrameCount = 0, _diagDecodedCoun
 // phone is delivering in stop/go bursts (a flow-control / ack-cadence smell);
 // steady ~37ms arrivals point the finger at the compositor decode path instead.
 var _diagJpegGapMax = 0, _diagJpegBurst = 0, _diagJpegLastAt = 0;
+
+// Per-stage FPS diagnosis: rxFps = JPEG frames RECEIVED per second (windowed over the 5s
+// status tick) = the reception rate; b64Max = max base64-encode ms (the post-reception cost
+// of _jpegToDataUri). Compare rxFps to the main thread's pxFps (painted/s) to locate where
+// fps is lost: low rxFps = source/network; high rxFps + low pxFps = display/decode; high
+// b64Max = the worker base64 step.
+var _diagRxLastM = 0, _diagRxFps = 0, _diagB64Max = 0;
 
 // MJPEG mode (MCU1): when true, the worker never builds Broadway. It converts
 // each JPEG frame to a data URI HERE (base64 off the main thread) and ships the
@@ -119,6 +127,12 @@ var BASE_RECONNECTION_DELAY = 2000; // Délai de base en ms (2 secondes)
 var MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
 var PONG_TIMEOUT = 6000; // No server PONG for this long ⇒ dead control channel
 var NO_VIDEO_TIMEOUT = 8000; // mjpeg: reconnect only after this long with NO video frame — tolerate brief gaps on a still-live socket (the video usually resumes on its own; reconnecting just black-flashes via the overlay)
+// If heartbeat() hasn't ticked for this long, the Worker was suspended/throttled (the
+// WebView was backgrounded — screen off, phone call), NOT the channel dying. The video/
+// PONG gap that piled up is sleep time, so we re-prime the live socket instead of a false
+// reconnect. Must exceed normal heartbeat jitter (heartbeat runs at 1 Hz). Ported from the
+// source bundle (commit 7408a9334 lineage) — it was lost in the legacy/ mjpeg hand-fork.
+var SUSPEND_THRESHOLD = 2000;
 
 // The phone re-randomises the WebSocket port on every service start; the stable
 // HTTP discovery endpoint is served on this fixed port range.
@@ -510,12 +524,52 @@ function headerMagic(dat) {
 
 // ========== Socket and Message Handling ==========
 
+// True when this Worker was suspended/throttled — the heartbeat interval stopped ticking
+// for longer than normal jitter. Happens when the Tesla backgrounds the WebView (screen
+// off, phone call): timers freeze, so the video/PONG gap that piles up is sleep time, not
+// a dead channel. The socket is usually still OPEN on resume.
+function workerWasSuspended() {
+  return lastHeartbeatAt !== 0 && (Date.now() - lastHeartbeatAt) > SUSPEND_THRESHOLD;
+}
+
+// Recover from a Worker suspension WITHOUT the false reconnect. If the socket is still
+// OPEN, re-baseline EVERY liveness input (so the no-video watchdog does not fire on the
+// sleep gap) and re-prime the stream on the SAME socket (the phone's dead-man timer turned
+// video off while we slept). Only if the socket actually died do we fall back to reconnect.
+function resumeAfterSuspend(source) {
+  var now = Date.now();
+  var drift = now - lastHeartbeatAt;
+  lastHeartbeatAt = now;
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try { self.postMessage({ trace: 'resumed after ' + drift + 'ms (' + source + ', backgrounded?) — socket OPEN, re-prime not reconnect' }); } catch (_e) {}
+    // Fresh baselines so the dead-channel / no-video checks don't fire on the sleep gap.
+    lastPongAt = now;
+    lastheart = now;
+    lastVideoAt = now; // the no-video watchdog (noPong) reads this — re-baseline it too
+    if (pongtimer !== null) clearTimeout(pongtimer);
+    pongtimer = setTimeout(noPong, NO_VIDEO_TIMEOUT);
+    try {
+      // The phone's video-off dead-man timer fired while we slept; START re-enables video,
+      // REQUEST_KEYFRAME pulls a fresh IDR fast, PING re-baselines the PONG watchdog.
+      socket.sendObject({ action: "START" });
+      controlSendObject({ action: "PING" });
+      socket.sendObject({ action: "REQUEST_KEYFRAME" });
+    } catch (e) { /* next heartbeat tick retries */ }
+  } else {
+    try { self.postMessage({ trace: 'resumed after ' + drift + 'ms (' + source + ') — socket rs=' + (socket ? socket.readyState : -1) + ', reconnecting' }); } catch (_e) {}
+    forceReconnect();
+  }
+}
+
 function noPong() {
   // 🚨 NOUVEAU: Ne pas envoyer d'erreur si le serveur est en shutdown
   if (isServerShuttingDown) {
     console.log('Server is shutting down, ignoring no pong');
     return;
   }
+  // Worker-suspension guard: a queued noPong can fire on resume BEFORE the next heartbeat
+  // tick runs, so check here too — the accrued no-video gap is sleep time, re-prime instead.
+  if (workerWasSuspended()) { resumeAfterSuspend('noPong'); return; }
   // Transient drop: reconnect the WebSocket in place. Never reload the page —
   // it is hosted remotely and a reload hangs in a no-coverage zone.
   console.warn('No data from phone (pong watchdog) — forcing in-place reconnect');
@@ -527,6 +581,14 @@ function heartbeat() {
   if (isServerShuttingDown) {
     return;
   }
+
+  // Worker-suspension guard: if this tick fires long after the previous one, the Worker was
+  // frozen/throttled (WebView backgrounded — screen off, phone call). The PONG/video gap
+  // below is sleep time, not a dead channel — re-prime the live socket instead of a false
+  // reconnect. This is the #1 field cause of the noPong loop. Runs BEFORE the timeout checks
+  // (and noPong() guards too, since a queued noPong can win the race on resume).
+  if (workerWasSuspended()) { resumeAfterSuspend('heartbeat'); return; }
+  lastHeartbeatAt = Date.now();
 
   // Dead-link detection via the PONG sentinel. For H.264 this catches a half-open link
   // masked by trickling BUFFERED video, and a stream that never started.
@@ -655,7 +717,11 @@ function handleVideoMessage(dat) {
       self.postMessage({ videoFrameReceived: true });
     }
     try {
-      self.postMessage({ jpegDataUrl: _jpegToDataUri(dat) });
+      var _b0 = Date.now();
+      var _du = _jpegToDataUri(dat);
+      var _bm = Date.now() - _b0;
+      if (_bm > _diagB64Max) _diagB64Max = _bm;
+      self.postMessage({ jpegDataUrl: _du });
     } catch (e) {}
     return;
   }
@@ -880,6 +946,7 @@ function resetStreamStateForReconnect() {
   lastheart = 0;
   lastPongAt = 0;
   lastVideoAt = 0; // force "video stale" until a real frame arrives post-reconnect
+  lastHeartbeatAt = 0; // cleared until the socket 'open' baselines it — a stalled reconnect mustn't read as a suspend
   if (pongtimer) {
     clearTimeout(pongtimer);
     pongtimer = null;
@@ -1105,6 +1172,7 @@ function startSocket() {
 
     // Baseline for the heartbeat dead-channel check until the first real PONG.
     lastPongAt = Date.now();
+    lastHeartbeatAt = Date.now(); // baseline the suspend detector so a slow backoff reconnect isn't misread as a suspend
     // Arm the no-video watchdog on connect too, so a stream that NEVER starts (no
     // video, no pong) still reconnects after NO_VIDEO_TIMEOUT — in mjpeg the pong-
     // timeout no longer covers this. The first video frame re-arms it.
@@ -1437,8 +1505,11 @@ self.addEventListener('message', /*#__PURE__*/function () {
               try {
                 // mjpeg mode: i/p/d are H.264-only counters (always 0 here), so
                 // drop them — the pertinent signal is m (frames in) and q (queue).
+                // Per-stage fps: frames received since the last 5s tick / 5 = reception fps.
+                _diagRxFps = Math.round((_diagMsgCount - _diagRxLastM) / 5);
+                _diagRxLastM = _diagMsgCount;
                 var line = mjpegMode
-                  ? 'worker: m=' + _diagMsgCount + ' gapMax=' + _diagJpegGapMax + ' burst=' + _diagJpegBurst + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
+                  ? 'worker: m=' + _diagMsgCount + ' rxFps=' + _diagRxFps + ' gapMax=' + _diagJpegGapMax + ' burst=' + _diagJpegBurst + ' b64Max=' + _diagB64Max + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
                   : 'worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=h264';
                 // Live counters go to a SEPARATE status store (overwritten each tick),
                 // NOT the event trace — so the trace stays a clean event log (steps,

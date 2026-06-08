@@ -75,15 +75,20 @@
                 var b = window._mcu1Build === undefined ? '?' : window._mcu1Build;
                 var r = window._mcu1Res === undefined ? '?' : window._mcu1Res;
                 var tc = window._mcu1TouchCount || 0;
+                // Per-stage fps: painted frames since the last 5s tick / 5 = display fps.
+                // Compare to the worker's rxFps: rxFps>>pxFps = display/decode bottleneck;
+                // low rxFps = reception/source. (decMax/decSlow & b64Max localise further.)
+                var _pf = Math.round(((window._mcu1PaintCount || 0) - (window._mcu1LastPaintN || 0)) / 5);
+                window._mcu1LastPaintN = window._mcu1PaintCount || 0;
                 // Live counters → the status store (overwritten), NOT the event trace.
-                window._mcu1Status('main', 'main: paints=' + window._mcu1PaintCount + ' swapMax=' + (window._mcu1SwapMax || 0) + ' decMax=' + (window._mcu1DecMax || 0) + ' decSlow=' + (window._mcu1DecSlow || 0) + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b + ' touch=' + tc);
+                window._mcu1Status('main', 'main: paints=' + window._mcu1PaintCount + ' pxFps=' + _pf + ' swapMax=' + (window._mcu1SwapMax || 0) + ' decMax=' + (window._mcu1DecMax || 0) + ' decSlow=' + (window._mcu1DecSlow || 0) + ' w=' + w + ' h=' + h + ' res=' + r + ' build=' + b + ' touch=' + tc);
             } catch (_e) {}
         }, 5000);
         // ↓↓↓ BUMP THIS NUMBER ON EVERY legacy/ DEPLOY ↓↓↓
         // It is logged (so a photo proves WHICH bundle Tesla is actually running —
         // a stale cached bundle shows an old number) AND it cache-busts every script
         // (?v=<version>), forcing QtCarBrowser to re-fetch instead of serving cache.
-        window._mcu1BundleVersion = 5;
+        window._mcu1BundleVersion = 6;
         window._mcu1Trace('1. Page loaded — bundle v' + window._mcu1BundleVersion);
     })();
     </script>

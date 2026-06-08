@@ -861,7 +861,7 @@ function postWorkerMessages(json) {
             window._mcu1LastSwapAt = _n;
             if (!window._mcu1FirstPaintTraced) {
               window._mcu1FirstPaintTraced = true;
-              if (window._mcu1Trace) window._mcu1Trace('18. First JPEG frame painted (css-bg preload v5)');
+              if (window._mcu1Trace) window._mcu1Trace('18. First JPEG frame painted (css-bg preload)');
             }
           });
         }
