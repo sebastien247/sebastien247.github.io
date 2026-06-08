@@ -1,4 +1,18 @@
-const demuxDecodeWorker = new Worker("./async_decoder.js"),
+// Cache-busting : lit le "?v=N" depuis l'URL de CE script (defini dans
+// index.html) et le propage au worker, qui le repropagera a ses importScripts.
+// => un seul endroit a bumper pour tout invalider : la version dans index.html.
+// Si le script est charge sans "?v=", ASSET_VERSION vaut "" (comportement
+// identique a avant : aucune regression).
+const ASSET_VERSION = (function () {
+    try {
+        const scriptSrc = document.currentScript && document.currentScript.src;
+        const v = scriptSrc ? new URL(scriptSrc).searchParams.get('v') : null;
+        return v ? ('?v=' + v) : '';
+    } catch (e) {
+        return '';
+    }
+})();
+const demuxDecodeWorker = new Worker("./async_decoder.js" + ASSET_VERSION),
     latestVersion = 2,
     logElement = document.getElementById('log'),
     warningElement = document.getElementById('warning'),

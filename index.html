@@ -2,14 +2,34 @@
 <html lang="en">
 <head>
     <title>TaaDa | Tesla Android Auto - Driver Assistant</title>
+
+    <!-- ================================================================= -->
+    <!-- CACHE-BUSTING                                                      -->
+    <!-- Le site est servi par GitHub Pages : impossible d'y poser un       -->
+    <!-- en-tete no-store. Pour qu'une mise a jour se charge automatiquement -->
+    <!-- chez TOUS les utilisateurs, on versionne l'URL des assets.         -->
+    <!--                                                                    -->
+    <!-- >>> POUR PUBLIER UNE MISE A JOUR : incremente le numero de version, -->
+    <!--     c.-a-d. remplace TOUS les "?v=1" de ce fichier par "?v=2".      -->
+    <!--     La chaine worker (async_decoder.js -> Decoder.js /             -->
+    <!--     binary_touch_protocol.js) herite automatiquement de la version  -->
+    <!--     via main.js : rien a toucher dans ces fichiers-la.             -->
+    <!--                                                                    -->
+    <!-- Les meta http-equiv ci-dessous aident le vieux navigateur WebKit    -->
+    <!-- de la Tesla a ne pas figer cette page d'entree dans son cache.      -->
+    <!-- ================================================================= -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+    <meta http-equiv="Pragma" content="no-cache"/>
+    <meta http-equiv="Expires" content="0"/>
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
-    <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/>
-    <link rel="icon" href="favicon.ico"/>
-    <link rel="stylesheet" href="styles.css">
-    <link rel="stylesheet" href="feedback.css">
+    <!-- <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/> -->
+    <link rel="icon" href="favicon.ico?v=1"/>
+    <link rel="stylesheet" href="styles.css?v=1">
+    <link rel="stylesheet" href="feedback.css?v=1">
     <!-- Firebase SDK (compat version for simpler integration) -->
     <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore-compat.js"></script>
@@ -117,14 +137,14 @@
     </div>
     
 </body>
-<script src="pcm-player.min.js"></script>
-<script src="main.js"></script>
+<!-- <script src="pcm-player.min.js"></script> -->
+<script src="main.js?v=1"></script>
 
 <!-- Feedback System Modules -->
-<script src="firebase-config.js"></script>
-<script src="feedback-service.js"></script>
-<script src="feedback-dialog.js"></script>
-<script src="feedback-snackbar.js"></script>
+<script src="firebase-config.js?v=1"></script>
+<script src="feedback-service.js?v=1"></script>
+<script src="feedback-dialog.js?v=1"></script>
+<script src="feedback-snackbar.js?v=1"></script>
 <script>
     // Initialize Firebase when page loads
     document.addEventListener('DOMContentLoaded', function() {

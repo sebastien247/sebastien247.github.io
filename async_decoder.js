@@ -1,5 +1,16 @@
-importScripts("Decoder.js");
-importScripts("binary_touch_protocol.js");
+// Cache-busting : recupere le "?v=N" transmis via l'URL de ce worker (depuis
+// main.js) et le propage aux dependances chargees ici, pour qu'un bump de
+// version dans index.html invalide aussi Decoder.js / binary_touch_protocol.js.
+var ASSET_VERSION = (function () {
+    try {
+        var v = new URLSearchParams(self.location.search).get('v');
+        return v ? ('?v=' + v) : '';
+    } catch (e) {
+        return '';
+    }
+})();
+importScripts("Decoder.js" + ASSET_VERSION);
+importScripts("binary_touch_protocol.js" + ASSET_VERSION);
 
 // ========== Constants and Variable Declarations ==========
 
