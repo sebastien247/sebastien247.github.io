@@ -121,6 +121,7 @@
     var gctx = null;
     var jpgData = [];   // data:image/jpeg;base64,... per pool slot
     var jpgBytes = [];  // Uint8Array of raw JPEG bytes per pool slot
+    var benchImageData = null; // ONE raw RGBA frame for the putimage (decode-free) arm
     var encErr = null;
 
     function sizeGen() {
@@ -175,6 +176,10 @@
           statsEl.textContent = 'building unique frame pool ' + b + '/' + POOL +
             ' @ ' + RES.w + 'x' + RES.h;
           if (b < POOL) { setTimeout(step, 0); return; }
+          // Capture ONE raw-RGBA frame for the putimage arm. putImageData cost is content-
+          // independent and has no decode cache, so one frame measures the decode-free ceiling
+          // faithfully (the real raw-pixel transport would putImageData the phone's pixels).
+          try { benchImageData = gctx.getImageData(0, 0, RES.w, RES.h); } catch (e2) { benchImageData = null; }
           done();
         } catch (e) {
           encErr = (e && e.message) ? e.message : ('' + e);
@@ -430,13 +435,27 @@
       im.src = u;
     }
 
+    // (F) putimage: the DECODE-FREE path. Blit raw RGBA straight to the canvas via putImageData
+    //     — NO image decode at all. Models the phone sending raw pixels (or NV21 the worker
+    //     converts) instead of JPEG, so the browser never re-decodes. THE key unexplored arm: if
+    //     this is fast on WebKit 601, the whole JPEG round-trip can go away. It's synchronous, so
+    //     crank "feed" to 60 to see its true ceiling (otherwise dFps is just feed-limited). load
+    //     here = the putImageData blit time itself — compare it to the ~250ms JPEG decode arms.
+    function rPutImage(slot, logicalIndex) {
+      if (!benchImageData) return;
+      var t0 = Date.now();
+      try { ctx.putImageData(benchImageData, 0, 0); } catch (e) {}
+      markShown(logicalIndex, Date.now() - t0);
+    }
+
     // ---- method registry ----------------------------------------------------
     var METHODS = [
       { key: 'css-direct',   fn: rCssDirect,    surface: 'bg'  },
       { key: 'css-preload',  fn: rCssPreload,   surface: 'bg2' },
       { key: 'blob-url',     fn: rBlobUrl,      surface: 'bg'  },
       { key: 'canvas2d',     fn: rCanvas2d,     surface: 'cv'  },
-      { key: 'blob-inorder', fn: rBlobInOrder,  surface: 'bg'  }
+      { key: 'blob-inorder', fn: rBlobInOrder,  surface: 'bg'  },
+      { key: 'putimage',     fn: rPutImage,     surface: 'cv'  }
     ];
     var results = {}; // key -> last finished window snapshot
 
@@ -620,7 +639,14 @@
       makeBtn('res ' + RES.w, function () {
         var self = this;
         stopFeed(); activeRenderer = null; phaseMethod = null;
-        RES = (RES.w === 406) ? { w: 800, h: 480 } : { w: 406, h: 480 };
+        // Cycle small→large so you can MEASURE the cold-decode ceiling at each size on the REAL
+        // MCU1. Cold JPEG decode is ~pixel-linear, so this answers "how small must the phone send
+        // for usable fps?" — 203x240 / 304x360 are the 406x480 content rect at 0.5x / 0.75x;
+        // 800x480 = the full codec frame. Read dFps per size to size the phone-side downscale.
+        var _seq = [ { w: 203, h: 240 }, { w: 304, h: 360 }, { w: 406, h: 480 }, { w: 800, h: 480 } ];
+        var _i = 0, _j;
+        for (_j = 0; _j < _seq.length; _j++) { if (_seq[_j].w === RES.w) { _i = _j; break; } }
+        RES = _seq[(_i + 1) % _seq.length];
         self.textContent = 'res ' + RES.w;
         statsEl.textContent = 'rebuilding pool @ ' + RES.w + 'x' + RES.h + '...';
         buildPool(function () { renderStats(false); });
