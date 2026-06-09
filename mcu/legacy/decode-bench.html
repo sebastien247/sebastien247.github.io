@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MCU1 decode-bench v2 (live-faithful, lag-aware)</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <style>
+    html, body { margin: 0; padding: 0; background: #000; overflow: hidden; font-family: monospace; }
+    /* Display surfaces. Only ONE is visible per phase; others are display:none so they
+       cost nothing. #bg/#bg2 = css-background (the SHIPPED renderer surface, also GPU-
+       promoted via translateZ(0)); #imA = <img> data: path; #cv = canvas2d. */
+    #cv, #imA, #bg, #bg2 { position: fixed; top: 0; left: 0; right: 0; bottom: 0; display: none; z-index: 0; }
+    #bg, #bg2 {
+      background-repeat: no-repeat; background-position: center center;
+      background-size: contain; background-color: #000;
+      -webkit-transform: translateZ(0); transform: translateZ(0); /* own GPU layer (601-honored) */
+    }
+    #imA { width: 100%; height: 100%; }
+    #cv  { width: 100%; height: 100%; }
+    #stats {
+      position: fixed; top: 6px; left: 6px; right: 6px;
+      color: #0f0; font-weight: bold; font-size: 15px; line-height: 1.35;
+      background: rgba(0,0,0,0.82); padding: 6px 10px; border-radius: 4px;
+      z-index: 10; white-space: pre; word-break: break-word;
+    }
+    #big {
+      position: fixed; left: 6px; right: 6px; bottom: 6px;
+      color: #0ff; font-weight: bold; font-size: 20px; line-height: 1.2;
+      background: rgba(0,0,0,0.82); padding: 6px 10px; border-radius: 4px;
+      z-index: 10; white-space: pre-wrap; word-break: break-word;
+    }
+    #ctl { position: fixed; top: 6px; right: 6px; z-index: 20; text-align: right; }
+    #ctl button {
+      font-family: monospace; font-size: 14px; font-weight: bold;
+      margin: 2px; padding: 6px 9px; border: 1px solid #0a0; border-radius: 4px;
+      background: #021; color: #0f0;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <img id="imA" />
+  <div id="bg"></div>
+  <div id="bg2"></div>
+  <div id="stats">preparing frame generator&hellip;</div>
+  <div id="big"></div>
+  <div id="ctl"></div>
+
+  <script>
+  /* ===================================================================
+     MCU1 decode-bench v2 — a LIVE-FAITHFUL successor to render-bench.html.
+
+     WHY render-bench LIED (and what this fixes):
+       * render-bench cycled only 120 small synthetic frames with idx%120 and
+         chained the next decode off the previous onload — SUPPLY == DEMAND.
+         After warmup nearly every "frame" was a CACHE HIT (decoded bitmap /
+         byte-identical data: URL already resident), and css-direct never even
+         awaited a decode. Its ~22-24 fps was a CACHED-REDISPLAY/COMPOSITE rate,
+         NOT a from-scratch JPEG decode rate. The live stream is UNIQUE every
+         frame (0% cache hit) → every decode is COLD. That is most of the 24→3 gap.
+       * It had NO independent feed and NO notion of frame age, so it was blind to
+         the field's real bug: an unbounded producer (worker ~27 fps) vs a bounded
+         consumer (main ~3 fps under Tesla throttle) → the surplus piles up in the
+         worker->main FIFO (UPSTREAM of drop-to-latest) and the displayed frame
+         falls MINUTES behind, growing without bound.
+
+     WHAT THIS PAGE DOES DIFFERENTLY:
+       1. A generator emits a UNIQUE frame per logical index (counter + moving
+          shapes + per-frame noise speckle + hex token) so the decoded-image cache
+          is NEVER a free hit — every decode is real cold work, like live frames.
+          The pool is sized > one full measurement window so a window NEVER repeats
+          a slot (the bug render-bench had: pool 120 vs 27*4=108 still wrapped).
+       2. A FEED loop (setTimeout, configurable Hz, default 27) plays the worker:
+          it bumps genIdx and hands the newest frame to the active renderer,
+          DECOUPLED from decode speed → supply(27) >> demand reproduces the plateau.
+       3. FIVE A/B render methods under the IDENTICAL feed:
+            css-direct, css-preload, blob-url (the SHIPPED v7 path), canvas2d,
+            and blob-INORDER (NO drop-to-latest) — the in-order arm reproduces the
+            minutes-of-growing-lag directly, proving the FIFO accumulation mechanism.
+       4. Per method, over a rolling window: true display fps (DISTINCT frames
+          shown), mean+max decode/onload latency, displayed-frame LAG = genIdx -
+          shownIdx (frames AND seconds), its GROWTH rate (frames/s added to backlog),
+          and a memory-growth proxy (live/peak blob-URL count + JS heap if exposed).
+       5. A big, photographable STATUS for on-MCU1 capture, plus a live rafIdle/s
+          readout (how throttled the tab is RIGHT NOW).
+
+     ES5 ONLY. WebKit-601 / Safari-9 / QtCarBrowser safe: no let/const/arrow, no
+     template literals, no class, no WebCodecs/OffscreenCanvas/createImageBitmap,
+     no Promise/async, no Array.from/find/includes, no performance.now reliance
+     (Date.now only). Decode = new Image()+onload (the ONLY decode primitive MCU1
+     has) — identical to the shipped renderer. Self-contained single file.
+     =================================================================== */
+  (function () {
+    'use strict';
+
+    // ---- tunables (also toggled live via the buttons) ----------------------
+    var FEED_HZ = 27;             // supply rate (frames/s) — matches field rxFps=27
+    var RES = { w: 406, h: 480 }; // content res; 800x480 selectable via button
+    var JPEG_Q = 0.6;             // matches MjpegTranscoder JPEG_QUALITY=60
+    var WIN_MS = 5000;            // rolling measurement window per method (matches field 5s pxFps)
+    // Pool MUST exceed the frames consumed in one window at the HIGHEST feed rate
+    // so a measurement window can NEVER repeat a slot (else cache hits inflate fps,
+    // the exact render-bench bug). Max feed is 60, window 5s, +warmup → size generously.
+    var POOL = 360;
+
+    // ---- DOM ---------------------------------------------------------------
+    var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+    var imA = document.getElementById('imA');
+    var bg = document.getElementById('bg'), bg2 = document.getElementById('bg2');
+    var statsEl = document.getElementById('stats');
+    var bigEl = document.getElementById('big');
+    var ctlEl = document.getElementById('ctl');
+
+    // ---- generator: build a pool of UNIQUE encoded frames ------------------
+    // Keep BOTH the data: URI (css/img paths) and the raw bytes (blob path),
+    // mirroring the two real transport options.
+    var gen = document.createElement('canvas');
+    var gctx = null;
+    var jpgData = [];   // data:image/jpeg;base64,... per pool slot
+    var jpgBytes = [];  // Uint8Array of raw JPEG bytes per pool slot
+    var encErr = null;
+
+    function sizeGen() {
+      gen.width = RES.w; gen.height = RES.h;
+      gctx = gen.getContext('2d');
+    }
+
+    function dataUrlToBytes(d) {
+      var c = d.indexOf(','), b64 = d.substring(c + 1), bin = atob(b64);
+      var a = new Uint8Array(bin.length), i;
+      for (i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+      return a;
+    }
+
+    // Draw a unique frame for logical index n into the generator canvas.
+    function drawFrame(n) {
+      var W = RES.w, H = RES.h, i;
+      gctx.fillStyle = '#0c1622'; gctx.fillRect(0, 0, W, H);
+      // moving vertical bar
+      gctx.fillStyle = '#0af'; gctx.fillRect((n * 13) % W, 0, Math.round(W / 8), H);
+      // moving horizontal stripe
+      gctx.fillStyle = '#3a1a5a'; gctx.fillRect(0, (n * 9) % H, W, Math.round(H / 12));
+      // diagonal sweep block
+      gctx.fillStyle = '#1a5a3a'; gctx.fillRect((n * 23) % W, (n * 5) % H, 70, 70);
+      // noise speckle so adjacent frames differ at the pixel level (cache-proof)
+      gctx.fillStyle = '#fff';
+      for (i = 0; i < 60; i++) {
+        var x = ((n * 7919 + i * 104729) % W), y = ((n * 6151 + i * 53 + (n >> 2)) % H);
+        if (x < 0) x = -x; if (y < 0) y = -y;
+        gctx.fillRect(x % W, y % H, 3, 3);
+      }
+      // big frame counter + a per-frame hex token (varies every frame)
+      gctx.fillStyle = '#fff';
+      gctx.font = 'bold ' + Math.round(H / 6) + 'px monospace';
+      gctx.fillText('#' + n, 14, Math.round(H / 2));
+      gctx.font = 'bold ' + Math.round(H / 14) + 'px monospace';
+      // (n * 2654435761) is a float (>2^31); >>>0 coerces to uint32 — well-defined ES5.
+      gctx.fillText('tok ' + ((n * 2654435761) >>> 0).toString(16), 14, Math.round(H / 2) + Math.round(H / 8));
+    }
+
+    function buildPool(done) {
+      jpgData = []; jpgBytes = []; encErr = null;
+      sizeGen();
+      var b = 0;
+      (function step() {
+        try {
+          drawFrame(b);
+          var d = gen.toDataURL('image/jpeg', JPEG_Q);
+          jpgData.push(d);
+          jpgBytes.push(dataUrlToBytes(d));
+          b++;
+          statsEl.textContent = 'building unique frame pool ' + b + '/' + POOL +
+            ' @ ' + RES.w + 'x' + RES.h;
+          if (b < POOL) { setTimeout(step, 0); return; }
+          done();
+        } catch (e) {
+          encErr = (e && e.message) ? e.message : ('' + e);
+          statsEl.style.color = '#f55';
+          statsEl.textContent = 'ENCODE ERROR (toDataURL jpeg unsupported?): ' + encErr;
+        }
+      })();
+    }
+
+    // ---- idle rAF probe (how throttled is the tab right now) ----------------
+    var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
+              function (cb) { return setTimeout(cb, 16); };
+    var rafTicks = 0;
+    (function rafLoop() { rafTicks++; raf(rafLoop); })();
+
+    // ---- live blob-URL accounting (memory-growth proxy) --------------------
+    var liveBlobUrls = 0, peakBlobUrls = 0, blobMadeTotal = 0;
+    function makeBlobUrl(bytes) {
+      var u = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+      liveBlobUrls++; blobMadeTotal++;
+      if (liveBlobUrls > peakBlobUrls) peakBlobUrls = liveBlobUrls;
+      return u;
+    }
+    function revoke(u) {
+      if (!u) return;
+      try { URL.revokeObjectURL(u); liveBlobUrls--; } catch (e) {}
+    }
+
+    // ===================================================================
+    // THE FEED — a wall-clock timer that SUPPLIES one frame per tick to the
+    // active renderer, INDEPENDENT of how fast that renderer decodes/paints.
+    // This is what render-bench lacked (it chained off onload = supply==demand).
+    //
+    //   genIdx  : monotonic index of the NEWEST frame supplied (the stream "now").
+    //   shownIdx: index of the frame the renderer LAST actually displayed.
+    //   lag     : genIdx - shownIdx  -> backlog in frames; /FEED_HZ -> seconds.
+    //
+    // Each renderer is handed (poolSlot, logicalIndex) and MUST call
+    // markShown(logicalIndex, loadMs) the instant a frame is actually on screen.
+    // Drop-to-latest renderers show a recent index -> small lag; the in-order
+    // renderer processes every supplied frame -> lag grows under throttle.
+    // ===================================================================
+    var feedTimer = null;
+    var genIdx = -1;            // newest supplied logical index
+    var shownIdx = -1;          // last displayed logical index
+    var feeding = false;
+    var activeRenderer = null;  // function(slot, logicalIndex)
+
+    function startFeed() {
+      stopFeed();
+      feeding = true;
+      var period = Math.max(4, Math.round(1000 / FEED_HZ));
+      feedTimer = setInterval(function () {
+        if (!feeding || !activeRenderer) return;
+        genIdx++;
+        var slot = genIdx % POOL;
+        try { activeRenderer(slot, genIdx); } catch (e) {}
+      }, period);
+    }
+    function stopFeed() {
+      feeding = false;
+      if (feedTimer) { clearInterval(feedTimer); feedTimer = null; }
+    }
+
+    // ---- per-method measurement window -------------------------------------
+    var W = {
+      shownFrames: 0,   // DISTINCT frames actually displayed in the window
+      loadSum: 0, loadCnt: 0, loadMax: 0,
+      lagStartFrames: 0, lagStartAt: 0,
+      lastShownIdxInWin: -1
+    };
+    function resetWindow() {
+      W.shownFrames = 0; W.loadSum = 0; W.loadCnt = 0; W.loadMax = 0;
+      W.lagStartFrames = (genIdx - shownIdx); W.lagStartAt = Date.now();
+      W.lastShownIdxInWin = shownIdx;
+    }
+    // Called by a renderer the instant a frame is actually on screen.
+    function markShown(logicalIndex, loadMs) {
+      if (logicalIndex > shownIdx) shownIdx = logicalIndex;
+      // count DISTINCT displayed frames (re-showing the same index does NOT advance fps)
+      if (logicalIndex > W.lastShownIdxInWin) {
+        W.shownFrames++;
+        W.lastShownIdxInWin = logicalIndex;
+      }
+      if (loadMs != null && loadMs >= 0) {
+        W.loadSum += loadMs; W.loadCnt++;
+        if (loadMs > W.loadMax) W.loadMax = loadMs;
+      }
+    }
+
+    // ===================================================================
+    // RENDER METHODS — each takes (slot, logicalIndex). All mirror a real option
+    // in the bundle's history; blob-url IS the shipped v7 path; blob-INORDER is the
+    // NO-drop control that reproduces the field lag.
+    // ===================================================================
+
+    // (A) css-direct: assign the data: URI straight to a div background, rAF-paced.
+    //     No preload, no real decode timing (no onload) -> loadMs is the rAF gap proxy.
+    //     Newest-frame-only: a pending index is overwritten by later feeds before the
+    //     next rAF fires. (On a throttled tab rAF collapses toward ~1Hz -> dispFps drops.)
+    var cssDirectPending = -1, cssDirectSlot = -1, cssDirectArmed = false, cssDirectLastAt = 0;
+    function rCssDirect(slot, logicalIndex) {
+      cssDirectPending = logicalIndex; cssDirectSlot = slot;
+      if (!cssDirectArmed) {
+        cssDirectArmed = true;
+        raf(function tick() {
+          if (activeRenderer !== rCssDirect) { cssDirectArmed = false; return; }
+          if (cssDirectPending > shownIdx) {
+            var now = Date.now();
+            var gap = cssDirectLastAt ? (now - cssDirectLastAt) : 0;
+            cssDirectLastAt = now;
+            try { bg.style.backgroundImage = 'url(' + jpgData[cssDirectSlot] + ')'; } catch (e) {}
+            markShown(cssDirectPending, gap);
+          }
+          raf(tick);
+        });
+      }
+    }
+
+    // (B) css-preload: decode off-DOM via new Image().onload, THEN set the div
+    //     background. onload-chained (no rAF). Drop-to-latest: on onload, jump to the
+    //     newest supplied index, not the one we started with.
+    var cpBusy = false, cpLatestSlot = -1, cpLatestIdx = -1, cpStartAt = 0;
+    function rCssPreload(slot, logicalIndex) {
+      cpLatestSlot = slot; cpLatestIdx = logicalIndex;
+      if (!cpBusy) cpKick();
+    }
+    function cpKick() {
+      if (activeRenderer !== rCssPreload) { cpBusy = false; return; }
+      if (cpLatestIdx <= shownIdx) { cpBusy = false; return; }
+      cpBusy = true;
+      var slot = cpLatestSlot, idx = cpLatestIdx;
+      cpStartAt = Date.now();
+      var u = jpgData[slot];
+      var im = new Image();
+      im.onload = function () {
+        if (activeRenderer !== rCssPreload) { cpBusy = false; return; }
+        var loadMs = Date.now() - cpStartAt;
+        try { bg2.style.backgroundImage = 'url(' + u + ')'; } catch (e) {}
+        markShown(idx, loadMs);
+        cpBusy = false;
+        cpKick(); // chain to newest
+      };
+      im.onerror = function () { cpBusy = false; if (activeRenderer === rCssPreload) cpKick(); };
+      im.src = u;
+    }
+
+    // (C) blob-url: the SHIPPED v7 path (jpeg-renderer.js). createObjectURL over raw
+    //     bytes -> decode via new Image().onload -> set div background -> revoke.
+    //     Drop-to-latest, onload-chained, bounded memory. The apples-to-product arm.
+    var buBusy = false, buLatestSlot = -1, buLatestIdx = -1, buLatestUrl = null,
+        buDrawn = null, buLoadingUrl = null, buStartAt = 0;
+    function rBlobUrl(slot, logicalIndex) {
+      var u = makeBlobUrl(jpgBytes[slot]);
+      // supersede the previous not-yet-shown url (revoke unless on screen / decoding)
+      if (buLatestUrl && buLatestUrl !== buDrawn && buLatestUrl !== buLoadingUrl) revoke(buLatestUrl);
+      buLatestUrl = u; buLatestSlot = slot; buLatestIdx = logicalIndex;
+      if (!buBusy) buKick();
+    }
+    function buKick() {
+      if (activeRenderer !== rBlobUrl) { buBusy = false; return; }
+      if (!buLatestUrl || buLatestIdx <= shownIdx) { buBusy = false; return; }
+      buBusy = true;
+      var u = buLatestUrl, idx = buLatestIdx;
+      buLoadingUrl = u; buStartAt = Date.now();
+      var im = new Image();
+      im.onload = function () {
+        if (activeRenderer !== rBlobUrl) { buBusy = false; revoke(u); return; }
+        var loadMs = Date.now() - buStartAt;
+        var prev = buDrawn;
+        try { bg.style.backgroundImage = 'url(' + u + ')'; } catch (e) {}
+        buDrawn = u; buLoadingUrl = null; buBusy = false;
+        if (prev && prev !== u) revoke(prev);
+        markShown(idx, loadMs);
+        buKick();
+      };
+      im.onerror = function () {
+        revoke(u); if (buLoadingUrl === u) buLoadingUrl = null; buBusy = false;
+        if (activeRenderer === rBlobUrl) buKick();
+      };
+      im.src = u;
+    }
+
+    // (D) canvas2d: blob URL -> decode via Image().onload -> drawImage -> revoke.
+    //     The OLD path (slowest on MCU1 per render-bench). Drop-to-latest.
+    var c2Busy = false, c2LatestSlot = -1, c2LatestIdx = -1, c2LatestUrl = null,
+        c2LoadingUrl = null, c2StartAt = 0;
+    function rCanvas2d(slot, logicalIndex) {
+      var u = makeBlobUrl(jpgBytes[slot]);
+      if (c2LatestUrl && c2LatestUrl !== c2LoadingUrl) revoke(c2LatestUrl);
+      c2LatestUrl = u; c2LatestSlot = slot; c2LatestIdx = logicalIndex;
+      if (!c2Busy) c2Kick();
+    }
+    function c2Kick() {
+      if (activeRenderer !== rCanvas2d) { c2Busy = false; return; }
+      if (!c2LatestUrl || c2LatestIdx <= shownIdx) { c2Busy = false; return; }
+      c2Busy = true;
+      var u = c2LatestUrl, idx = c2LatestIdx;
+      c2LoadingUrl = u; c2StartAt = Date.now();
+      var im = new Image();
+      im.onload = function () {
+        if (activeRenderer !== rCanvas2d) { c2Busy = false; revoke(u); return; }
+        var loadMs = Date.now() - c2StartAt;
+        try { ctx.drawImage(im, 0, 0, cv.width, cv.height); } catch (e) {}
+        if (c2LoadingUrl === u) c2LoadingUrl = null;
+        c2Busy = false; revoke(u);
+        markShown(idx, loadMs);
+        c2Kick();
+      };
+      im.onerror = function () {
+        revoke(u); if (c2LoadingUrl === u) c2LoadingUrl = null; c2Busy = false;
+        if (activeRenderer === rCanvas2d) c2Kick();
+      };
+      im.src = u;
+    }
+
+    // (E) blob-INORDER: the NO-drop control. Every supplied frame is enqueued and
+    //     decoded IN ORDER (FIFO), exactly like the field worker->main hop with no
+    //     coalescing. Under throttle this falls behind and LAG GROWS WITHOUT BOUND —
+    //     this arm reproduces the "minutes and growing" field symptom and proves the
+    //     accumulation is the queue, not the renderer. Memory is bounded only by a
+    //     hard cap (we drop the OLDEST if the queue explodes, to avoid OOM on-device).
+    var ioQueue = [];        // array of { slot, idx }
+    var ioBusy = false, ioStartAt = 0;
+    var IO_MAX_QUEUE = 4000; // safety cap so the bench itself never OOMs the tab
+    function rBlobInOrder(slot, logicalIndex) {
+      ioQueue.push({ slot: slot, idx: logicalIndex });
+      if (ioQueue.length > IO_MAX_QUEUE) ioQueue.shift(); // bound bench memory only
+      if (!ioBusy) ioKick();
+    }
+    function ioKick() {
+      if (activeRenderer !== rBlobInOrder) { ioBusy = false; return; }
+      if (!ioQueue.length) { ioBusy = false; return; }
+      ioBusy = true;
+      var item = ioQueue.shift();          // OLDEST first — no drop-to-latest
+      var u = makeBlobUrl(jpgBytes[item.slot]);
+      var idx = item.idx;
+      ioStartAt = Date.now();
+      var im = new Image();
+      im.onload = function () {
+        if (activeRenderer !== rBlobInOrder) { ioBusy = false; revoke(u); return; }
+        var loadMs = Date.now() - ioStartAt;
+        try { bg.style.backgroundImage = 'url(' + u + ')'; } catch (e) {}
+        revoke(u);
+        markShown(idx, loadMs);
+        ioBusy = false;
+        ioKick();
+      };
+      im.onerror = function () {
+        revoke(u); ioBusy = false;
+        if (activeRenderer === rBlobInOrder) ioKick();
+      };
+      im.src = u;
+    }
+
+    // ---- method registry ----------------------------------------------------
+    var METHODS = [
+      { key: 'css-direct',   fn: rCssDirect,    surface: 'bg'  },
+      { key: 'css-preload',  fn: rCssPreload,   surface: 'bg2' },
+      { key: 'blob-url',     fn: rBlobUrl,      surface: 'bg'  },
+      { key: 'canvas2d',     fn: rCanvas2d,     surface: 'cv'  },
+      { key: 'blob-inorder', fn: rBlobInOrder,  surface: 'bg'  }
+    ];
+    var results = {}; // key -> last finished window snapshot
+
+    function showSurface(which) {
+      cv.style.display  = which === 'cv'  ? 'block' : 'none';
+      imA.style.display = which === 'imA' ? 'block' : 'none';
+      bg.style.display  = which === 'bg'  ? 'block' : 'none';
+      bg2.style.display = which === 'bg2' ? 'block' : 'none';
+    }
+
+    // Reset all renderer state so a method starts clean (revoke any held urls).
+    function resetRenderers() {
+      cssDirectPending = -1; cssDirectArmed = false; cssDirectLastAt = 0;
+      cpBusy = false; cpLatestIdx = -1;
+      revoke(buLatestUrl); revoke(buDrawn); revoke(buLoadingUrl);
+      buBusy = false; buLatestUrl = null; buDrawn = null; buLoadingUrl = null; buLatestIdx = -1;
+      revoke(c2LatestUrl); revoke(c2LoadingUrl);
+      c2Busy = false; c2LatestUrl = null; c2LoadingUrl = null; c2LatestIdx = -1;
+      ioQueue = []; ioBusy = false;
+    }
+
+    // ---- phase driver -------------------------------------------------------
+    // Each method runs for WIN_MS of measurement (after a short warmup) under the
+    // identical feed. We RESET genIdx/shownIdx at each phase start so lag growth is
+    // per-method from zero — the question is "does THIS method let lag grow?".
+    var phaseIdx = -1, phaseMethod = null, phaseStartAt = 0, running = false, manualMode = false;
+
+    function startMethod(m) {
+      resetRenderers();
+      cv.width = RES.w; cv.height = RES.h;
+      phaseMethod = m;
+      showSurface(m.surface);
+      genIdx = -1; shownIdx = -1;
+      activeRenderer = m.fn;
+      startFeed();
+      phaseStartAt = Date.now();
+      setTimeout(function () { if (phaseMethod === m) resetWindow(); }, 600); // warmup
+    }
+
+    function finishMethod() {
+      if (!phaseMethod) return;
+      var dtSec = Math.max(0.001, (Date.now() - W.lagStartAt) / 1000);
+      var lagNow = genIdx - shownIdx;
+      var dispFps = +(W.shownFrames / dtSec).toFixed(1);
+      var meanLoad = W.loadCnt ? Math.round(W.loadSum / W.loadCnt) : 0;
+      var lagGrowth = +((lagNow - W.lagStartFrames) / dtSec).toFixed(1); // frames/s added to backlog
+      results[phaseMethod.key] = {
+        dispFps: dispFps,
+        meanLoad: meanLoad,
+        maxLoad: W.loadMax,
+        lagFrames: lagNow,
+        lagSec: +(lagNow / FEED_HZ).toFixed(1),
+        lagGrowth: lagGrowth,
+        peakBlobs: peakBlobUrls,
+        liveBlobs: liveBlobUrls
+      };
+    }
+
+    function nextPhase() {
+      finishMethod();
+      phaseIdx++;
+      if (phaseIdx >= METHODS.length) {
+        stopFeed(); activeRenderer = null; phaseMethod = null; running = false;
+        renderStats(true);
+        return;
+      }
+      peakBlobUrls = liveBlobUrls; // peak is per-method
+      startMethod(METHODS[phaseIdx]);
+      renderStats(false);
+    }
+
+    // ---- rendering the on-screen status ------------------------------------
+    function pad(s, n) { s = '' + s; while (s.length < n) s += ' '; return s; }
+    function renderStats(done) {
+      var lagNow = genIdx - shownIdx;
+      var live = '';
+      if (phaseMethod && !done && !manualMode) {
+        var dtSec = Math.max(0.001, (Date.now() - W.lagStartAt) / 1000);
+        var dispFps = (W.shownFrames / dtSec).toFixed(1);
+        var meanLoad = W.loadCnt ? Math.round(W.loadSum / W.loadCnt) : 0;
+        live = 'NOW ' + phaseMethod.key + '  dispFps=' + dispFps +
+               '  load(mean/max)=' + meanLoad + '/' + W.loadMax + 'ms';
+      } else if (manualMode && phaseMethod) {
+        var dt2 = Math.max(0.001, (Date.now() - W.lagStartAt) / 1000);
+        live = 'MANUAL ' + phaseMethod.key + '  dispFps=' +
+               (W.shownFrames / dt2).toFixed(1) +
+               '  load(mean/max)=' + (W.loadCnt ? Math.round(W.loadSum / W.loadCnt) : 0) +
+               '/' + W.loadMax + 'ms';
+      } else {
+        live = done ? 'DONE - photograph this' : 'idle';
+      }
+
+      var head = 'decode-bench v2  feed=' + FEED_HZ + 'fps  res=' + RES.w + 'x' + RES.h +
+                 '  rafIdle=' + lastIdleRaf + '/s  pool=' + POOL + ' uniq' +
+                 '  blobs(live/peak)=' + liveBlobUrls + '/' + peakBlobUrls;
+
+      var table = '\nmethod         dFps  load(mn/mx)ms  lag(fr/s)    grow/s';
+      var i, k, r;
+      for (i = 0; i < METHODS.length; i++) {
+        k = METHODS[i].key; r = results[k];
+        if (r) {
+          table += '\n' + pad(k, 14) + ' ' + pad(r.dispFps, 5) +
+                   pad(r.meanLoad + '/' + r.maxLoad, 14) +
+                   pad(r.lagFrames + '/' + r.lagSec + 's', 13) +
+                   (r.lagGrowth > 0 ? '+' : '') + r.lagGrowth;
+        } else if (phaseMethod && phaseMethod.key === k) {
+          table += '\n' + pad(k, 14) + ' (running' + (manualMode ? ', manual' : '') + ')';
+        } else {
+          table += '\n' + pad(k, 14) + ' ...';
+        }
+      }
+      statsEl.textContent = head + '\n' + live + '\n' + table;
+
+      // BIG photographable lag verdict for the active method.
+      var heap = '';
+      if (window.performance && performance.memory && performance.memory.usedJSHeapSize) {
+        heap = '  heap=' + Math.round(performance.memory.usedJSHeapSize / 1048576) + 'MB';
+      }
+      if (phaseMethod) {
+        bigEl.textContent =
+          phaseMethod.key.toUpperCase() +
+          '   LAG ' + lagNow + ' fr = ' + (lagNow / FEED_HZ).toFixed(1) + ' s' +
+          '   shown #' + (shownIdx < 0 ? '-' : shownIdx) +
+          ' / gen #' + (genIdx < 0 ? '-' : genIdx) +
+          heap;
+      } else if (done) {
+        bigEl.textContent = 'ALL METHODS DONE - the arm whose LAG stays ~0 and grow/s ~0 ' +
+          'is the live-correct one. blob-inorder SHOULD show growing lag (the field bug). ' +
+          'blobs live/peak=' + liveBlobUrls + '/' + peakBlobUrls + heap;
+      }
+    }
+
+    // ---- 1s ticker: idle rAF + advance phases + refresh status -------------
+    var lastIdleRaf = 0;
+    function ticker() {
+      var r = rafTicks; rafTicks = 0;
+      lastIdleRaf = r;
+      if (running && phaseMethod && !manualMode) {
+        if (W.lagStartAt && (Date.now() - W.lagStartAt) >= WIN_MS) {
+          nextPhase();
+        }
+      }
+      renderStats(!running && phaseIdx >= METHODS.length);
+    }
+
+    // ---- controls (live, manual A/B + feed/res toggles) --------------------
+    function makeBtn(label, fn) {
+      var b = document.createElement('button');
+      b.textContent = label;
+      b.onclick = fn;
+      ctlEl.appendChild(b);
+      return b;
+    }
+    function manualSelect(m) {
+      manualMode = true; running = false; phaseIdx = METHODS.length;
+      resetRenderers();
+      cv.width = RES.w; cv.height = RES.h;
+      phaseMethod = m; showSurface(m.surface);
+      genIdx = -1; shownIdx = -1;
+      activeRenderer = m.fn; startFeed();
+      setTimeout(function () { if (phaseMethod === m) resetWindow(); }, 400);
+    }
+    function indexOfNum(arr, v) { var i; for (i = 0; i < arr.length; i++) { if (arr[i] === v) return i; } return -1; }
+    function buildControls() {
+      ctlEl.innerHTML = '';
+      makeBtn('AUTO A/B', function () {
+        manualMode = false; phaseIdx = -1; results = {}; running = true;
+        nextPhase();
+      });
+      var i;
+      for (i = 0; i < METHODS.length; i++) {
+        (function (m) { makeBtn(m.key, function () { manualSelect(m); }); })(METHODS[i]);
+      }
+      makeBtn('feed ' + FEED_HZ, function () {
+        var seq = [6, 10, 15, 22, 27, 30, 60];
+        var j = indexOfNum(seq, FEED_HZ); FEED_HZ = seq[(j + 1) % seq.length];
+        if (feeding) startFeed();
+        this.textContent = 'feed ' + FEED_HZ;
+        renderStats(false);
+      });
+      makeBtn('res ' + RES.w, function () {
+        var self = this;
+        stopFeed(); activeRenderer = null; phaseMethod = null;
+        RES = (RES.w === 406) ? { w: 800, h: 480 } : { w: 406, h: 480 };
+        self.textContent = 'res ' + RES.w;
+        statsEl.textContent = 'rebuilding pool @ ' + RES.w + 'x' + RES.h + '...';
+        buildPool(function () { renderStats(false); });
+      });
+    }
+
+    // ---- boot ---------------------------------------------------------------
+    buildControls();
+    buildPool(function () {
+      setInterval(ticker, 1000);
+      manualMode = false; phaseIdx = -1; running = true; // auto-start the A/B sweep
+      nextPhase();
+    });
+  })();
+  </script>
+</body>
+</html>

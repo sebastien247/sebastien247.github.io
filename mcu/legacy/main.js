@@ -864,12 +864,19 @@ function postWorkerMessages(json) {
               window._mcu1FirstPaintTraced = true;
               if (window._mcu1Trace) window._mcu1Trace('18. First JPEG frame painted (css-bg preload)');
             }
+          }, function () {
+            // onReady: the frame is settled (shown OR failed) → ACK the worker's 1-deep credit
+            // window so it forwards the NEXT (latest) frame, never more than one in flight. Echo
+            // the seq we handled so the worker reports the true source→display lag.
+            try { demuxDecodeWorker.postMessage({ jpegAck: true, seq: window._mcu1AckSeq || 0 }); } catch (_e) {}
           });
         }
       }
       if (jpegRenderer) {
-        // createObjectURL only when we'll actually paint, so no Blob URL ever leaks; the
-        // renderer revokes it (and any superseded one) so the decoded-image cache stays flat.
+        // Remember which live-stream seq this frame is, so onReady's ACK can echo it (the worker
+        // turns it into the true source→display lag gauge). createObjectURL only when we'll paint,
+        // so no Blob URL leaks; the renderer revokes it so the decoded-image cache stays flat.
+        window._mcu1AckSeq = (typeof e.data.seq === 'number') ? e.data.seq : (window._mcu1AckSeq || 0);
         try {
           jpegRenderer.paint(URL.createObjectURL(new Blob([e.data.jpegBytes], { type: 'image/jpeg' })));
         } catch (_e) {}

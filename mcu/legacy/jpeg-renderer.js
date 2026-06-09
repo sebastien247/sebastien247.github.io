@@ -37,9 +37,10 @@
     try { if (global.URL && global.URL.revokeObjectURL) global.URL.revokeObjectURL(u); } catch (e) {}
   }
 
-  function JpegRenderer(el, onPaint) {
+  function JpegRenderer(el, onPaint, onReady) {
     this.el = el;
     this.onPaint = onPaint || null;
+    this.onReady = onReady || null; // fired once a frame is settled (shown OR failed) — drives the worker→main 1-deep credit/ACK window
     this.latest = null;      // newest blob URL handed in, not yet shown
     this.drawn = null;       // blob URL currently set as the background
     this.loadingUri = null;  // blob URL currently being decoded
@@ -85,12 +86,14 @@
       if (self.onPaint) {
         try { self.onPaint(im.naturalWidth || 0, im.naturalHeight || 0, loadMs); } catch (e2) {}
       }
+      if (self.onReady) { try { self.onReady(); } catch (e3) {} } // ACK: frame is on screen, request the next
       self._kick(); // chain straight to the newest frame — no rAF
     };
     im.onerror = function () {
       _revoke(uri);
       if (self.loadingUri === uri) self.loadingUri = null;
       self.busy = false;
+      if (self.onReady) { try { self.onReady(); } catch (e3) {} } // ACK even on failure so the credit window never stalls
       self._kick();
     };
     im.src = uri;

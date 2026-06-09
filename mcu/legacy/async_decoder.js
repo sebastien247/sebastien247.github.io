@@ -40,6 +40,11 @@ var pendingFrames = [],
   controlSocket = null,
   lastVideoAt = 0,       // mjpeg liveness: timestamp of the last video frame received
   lastHeartbeatAt = 0,   // wall-clock of the last heartbeat() tick — detects Worker suspend/throttle
+  _mjpegPending = null,  // 1-deep credit window: latest JPEG bytes not yet forwarded to main (intermediates dropped HERE, before the worker→main hop, so the FIFO can't grow → no more minutes-long lag)
+  _mjpegCredit = true,   // true = main displayed the previous frame and is ready for the next
+  _mjpegSeq = 0,         // monotonic count of JPEG frames RECEIVED from the socket (live-stream clock)
+  _mjpegAckedSeq = 0,    // seq main last actually displayed (from its ack) — for the true source→display lag gauge
+  _mjpegSentAt = 0,      // wall-clock of the last forward, for the ack-loss safety timeout
   _lastPongLagTrace = 0, // throttle for the mjpeg "pong lag (not reconnecting)" trace
   lastPongAt = 0,
   // Timestamp of the last server PONG sentinel (unittype 31)
@@ -131,7 +136,7 @@ var NO_VIDEO_TIMEOUT = 8000; // mjpeg: reconnect only after this long with NO vi
 // PONG gap that piled up is sleep time, so we re-prime the live socket instead of a false
 // reconnect. Must exceed normal heartbeat jitter (heartbeat runs at 1 Hz). Ported from the
 // source bundle (commit 7408a9334 lineage) — it was lost in the legacy/ mjpeg hand-fork.
-var SUSPEND_THRESHOLD = 2000;
+var SUSPEND_THRESHOLD = 6000; // raised from 2000: Tesla throttle jitter is 2-24s (not a real suspend), so 2000 false-tripped the suspend path constantly. NO_VIDEO_TIMEOUT=8000 is still the real liveness backstop.
 
 // The phone re-randomises the WebSocket port on every service start; the stable
 // HTTP discovery endpoint is served on this fixed port range.
@@ -539,24 +544,50 @@ function resumeAfterSuspend(source) {
   var now = Date.now();
   var drift = now - lastHeartbeatAt;
   lastHeartbeatAt = now;
+  // Capture liveness BEFORE we re-baseline lastVideoAt below: in mjpeg, a JPEG within
+  // NO_VIDEO_TIMEOUT means the stream never actually died — this was a Tesla THROTTLE hiccup,
+  // not a real phone-call suspend.
+  var videoStillAlive = mjpegMode && lastVideoAt && (now - lastVideoAt) <= NO_VIDEO_TIMEOUT;
   if (socket && socket.readyState === WebSocket.OPEN) {
-    try { self.postMessage({ trace: 'resumed after ' + drift + 'ms (' + source + ', backgrounded?) — socket OPEN, re-prime not reconnect' }); } catch (_e) {}
+    try { self.postMessage({ trace: 'resumed after ' + drift + 'ms (' + source + ', backgrounded?) — socket OPEN, ' + (videoStillAlive ? 'video alive: timers only' : 're-prime') + ' not reconnect' }); } catch (_e) {}
     // Fresh baselines so the dead-channel / no-video checks don't fire on the sleep gap.
     lastPongAt = now;
     lastheart = now;
     lastVideoAt = now; // the no-video watchdog (noPong) reads this — re-baseline it too
     if (pongtimer !== null) clearTimeout(pongtimer);
     pongtimer = setTimeout(noPong, NO_VIDEO_TIMEOUT);
-    try {
-      // The phone's video-off dead-man timer fired while we slept; START re-enables video,
-      // REQUEST_KEYFRAME pulls a fresh IDR fast, PING re-baselines the PONG watchdog.
-      socket.sendObject({ action: "START" });
-      controlSendObject({ action: "PING" });
-      socket.sendObject({ action: "REQUEST_KEYFRAME" });
-    } catch (e) { /* next heartbeat tick retries */ }
+    // Only hammer the socket with START + PING + REQUEST_KEYFRAME when video is actually STALE.
+    // If mjpeg video is still flowing, re-baselining the timers above is enough — the burst
+    // (REQUEST_KEYFRAME is meaningless when every JPEG is already a full frame) only adds load
+    // that feeds the very Tesla throttle that tripped us. This kills the self-sustaining re-prime
+    // spam seen as the constant "resumed after Xms" flood.
+    if (!videoStillAlive) {
+      try {
+        socket.sendObject({ action: "START" });
+        controlSendObject({ action: "PING" });
+        socket.sendObject({ action: "REQUEST_KEYFRAME" });
+      } catch (e) { /* next heartbeat tick retries */ }
+    }
   } else {
     try { self.postMessage({ trace: 'resumed after ' + drift + 'ms (' + source + ') — socket rs=' + (socket ? socket.readyState : -1) + ', reconnecting' }); } catch (_e) {}
     forceReconnect();
+  }
+}
+
+// Forward the latest stashed JPEG to main, but ONLY when main is ready (the 1-deep credit
+// window). Called on each received frame and on main's ack. An ack-loss SAFETY TIMEOUT re-opens
+// the credit if main has been silent too long, so a dropped ack can't stall the stream forever
+// (the next received frame's flush call recovers it).
+function _mjpegFlush() {
+  if (!_mjpegCredit && _mjpegSentAt && (Date.now() - _mjpegSentAt) > 2000) {
+    _mjpegCredit = true; // assume the ack was lost / main wedged; recover
+  }
+  if (_mjpegCredit && _mjpegPending) {
+    var p = _mjpegPending;
+    _mjpegPending = null;
+    _mjpegCredit = false;
+    _mjpegSentAt = Date.now();
+    try { self.postMessage({ jpegBytes: p.buf, seq: p.seq }, [p.buf]); } catch (e) {}
   }
 }
 
@@ -716,13 +747,17 @@ function handleVideoMessage(dat) {
       self.postMessage({ videoFrameReceived: true });
     }
     try {
-      // Send the RAW JPEG bytes (transfer = zero-copy) instead of a base64 data URI. base64
-      // cost ~half a core at 18 fps (b64Max was ~100 ms) and the data: URIs piled up in
-      // WebKit's decoded-image cache (unbounded → the "preserve resources" freeze). The page
-      // wraps the bytes in a Blob URL it REVOKES, so memory stays bounded. slice() gives our
-      // own copy so transferring its buffer never disturbs the socket frame.
-      var _u8 = dat.slice();
-      self.postMessage({ jpegBytes: _u8.buffer }, [_u8.buffer]);
+      // 1-DEEP CREDIT WINDOW (the lag fix). The phone over-supplies (~27fps) but WebKit-601 can
+      // only DECODE+display ~3-8fps, and the mjpeg path has no back-pressure — so forwarding EVERY
+      // frame let the worker→main FIFO grow unbounded and the displayed image fell MINUTES behind.
+      // Instead: stash only the LATEST bytes here and forward at most ONE frame in flight, sending
+      // the next only after main ACKs it displayed the previous (see _mjpegFlush / messageHandler).
+      // Stale frames are dropped HERE, before the hop, so latency stays ~one decode. We still send
+      // raw bytes (transfer = zero-copy, no base64); slice() = our own copy so transferring its
+      // buffer never disturbs the socket frame.
+      _mjpegSeq++;
+      _mjpegPending = { buf: dat.slice().buffer, seq: _mjpegSeq };
+      _mjpegFlush();
     } catch (e) {}
     return;
   }
@@ -948,6 +983,7 @@ function resetStreamStateForReconnect() {
   lastPongAt = 0;
   lastVideoAt = 0; // force "video stale" until a real frame arrives post-reconnect
   lastHeartbeatAt = 0; // cleared until the socket 'open' baselines it — a stalled reconnect mustn't read as a suspend
+  _mjpegPending = null; _mjpegCredit = true; _mjpegSentAt = 0; // reset the credit window so the first post-reconnect frame forwards immediately
   if (pongtimer) {
     clearTimeout(pongtimer);
     pongtimer = null;
@@ -1413,6 +1449,14 @@ var appVersion = 22;
 var initted = false;
 var postInitJobs = [];
 function messageHandler(message) {
+  // 1-deep credit window ACK from main: it displayed a frame and is ready for the next. Open the
+  // credit, record which seq it showed (for the true source→display lag gauge), forward the latest.
+  if (message.data && message.data.jpegAck) {
+    _mjpegCredit = true;
+    if (typeof message.data.seq === 'number') _mjpegAckedSeq = message.data.seq;
+    _mjpegFlush();
+    return;
+  }
   if (message.data.action === 'NIGHT') {
     night = message.data.value;
   }
@@ -1510,7 +1554,7 @@ self.addEventListener('message', /*#__PURE__*/function () {
                 _diagRxFps = Math.round((_diagMsgCount - _diagRxLastM) / 5);
                 _diagRxLastM = _diagMsgCount;
                 var line = mjpegMode
-                  ? 'worker: m=' + _diagMsgCount + ' rxFps=' + _diagRxFps + ' gapMax=' + _diagJpegGapMax + ' burst=' + _diagJpegBurst + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
+                  ? 'worker: m=' + _diagMsgCount + ' rxFps=' + _diagRxFps + ' gapMax=' + _diagJpegGapMax + ' burst=' + _diagJpegBurst + ' lag=' + (_mjpegSeq - _mjpegAckedSeq) + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=mjpeg'
                   : 'worker: m=' + _diagMsgCount + ' i=' + _diagIdrCount + ' p=' + _diagPFrameCount + ' d=' + _diagDecodedCount + ' q=' + pendingFrames.length + ' tx=' + _diagTouchSent + ' drp=' + _diagTouchDropped + ' w=' + (width || 0) + ' h=' + (height || 0) + ' build=' + (appVersion || '?') + ' mode=h264';
                 // Live counters go to a SEPARATE status store (overwritten each tick),
                 // NOT the event trace — so the trace stays a clean event log (steps,
