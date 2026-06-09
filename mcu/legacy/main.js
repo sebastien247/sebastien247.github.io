@@ -350,6 +350,22 @@ function convertToCanvasCoordinates(screenX, screenY) {
   // already cropped to the content rect (width-widthMargin x height-heightMargin)
   // and the content sits at the AA frame's TOP-LEFT (insets are right/bottom), so
   // map the tap straight into the content, accounting for any contain-letterbox.
+  // RAW-pixel path paints the canvas with the pre-cropped content frame (width x height). Map the tap
+  // into that content space via the canvas rect + contain-letterbox — like the #videobg branch below
+  // but on the canvas, with NO margin subtraction (the raw frame IS already the content rect).
+  if (window._mcu1RawCanvas) {
+    var rc = canvasElement.getBoundingClientRect();
+    var rcw = width, rch = height;
+    if (rc.width > 0 && rc.height > 0 && rcw > 0 && rch > 0) {
+      var rRatio = rcw / rch, rElRatio = rc.width / rc.height;
+      var rDispW, rDispH, rOffX, rOffY;
+      if (rElRatio > rRatio) { rDispH = rc.height; rDispW = rDispH * rRatio; rOffX = (rc.width - rDispW) / 2; rOffY = 0; }
+      else { rDispW = rc.width; rDispH = rDispW / rRatio; rOffX = 0; rOffY = (rc.height - rDispH) / 2; }
+      var rmpx = Math.max(0, Math.min(1, (screenX - rc.left - rOffX) / rDispW));
+      var rmpy = Math.max(0, Math.min(1, (screenY - rc.top - rOffY) / rDispH));
+      return { x: Math.floor(rmpx * rcw), y: Math.floor(rmpy * rch) };
+    }
+  }
   if (mjpegEnabled) {
     var vb = document.getElementById('videobg');
     var r = vb ? vb.getBoundingClientRect() : null;
@@ -909,9 +925,23 @@ function postWorkerMessages(json) {
           window._mcu1PaintCount = (window._mcu1PaintCount || 0) + 1;
           window._mcu1PaintW = fw;
           window._mcu1PaintH = fh;
+          var _swn = Date.now();
+          if (window._mcu1LastSwapAt) { var _swg = _swn - window._mcu1LastSwapAt; if (_swg > (window._mcu1SwapMax || 0)) window._mcu1SwapMax = _swg; }
+          window._mcu1LastSwapAt = _swn;
           if (!window._mcu1FirstPaintTraced) {
             window._mcu1FirstPaintTraced = true;
-            if (window._mcu1Trace) window._mcu1Trace('18. First frame painted (' + fw + 'x' + fh + ')');
+            if (e.data.seq !== undefined) {
+              // RAW-pixel path paints the CANVAS (not #videobg) — show it + flag the touch mode.
+              window._mcu1RawCanvas = true;
+              canvasElement.style.display = 'block';
+              var _vbr = document.getElementById('videobg'); if (_vbr) _vbr.style.display = 'none';
+            }
+            if (window._mcu1Trace) window._mcu1Trace('18. First frame painted (' + fw + 'x' + fh + (e.data.seq !== undefined ? ' raw/putImageData' : '') + ')');
+          }
+          // 1-deep credit window ACK (raw path carries seq): the frame is on screen → request the next.
+          if (e.data.seq !== undefined) {
+            window._mcu1AckSeq = e.data.seq;
+            try { demuxDecodeWorker.postMessage({ jpegAck: true, seq: e.data.seq }); } catch (_e) {}
           }
         }
       }

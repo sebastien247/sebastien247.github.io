@@ -587,7 +587,15 @@ function _mjpegFlush() {
     _mjpegPending = null;
     _mjpegCredit = false;
     _mjpegSentAt = Date.now();
-    try { self.postMessage({ jpegBytes: p.buf, seq: p.seq }, [p.buf]); } catch (e) {}
+    try {
+      if (p.kind === 'raw') {
+        // RAW path: forward ready RGBA pixels — main just putImageData (NO browser decode/convert).
+        // Reuses the existing software-render sink (main.js frameBuffer handler) + this credit window.
+        self.postMessage({ frameBuffer: p.buf, width: p.w, height: p.h, seq: p.seq }, [p.buf]);
+      } else {
+        self.postMessage({ jpegBytes: p.buf, seq: p.seq }, [p.buf]);
+      }
+    } catch (e) {}
   }
 }
 
@@ -713,12 +721,67 @@ function handleMessage(event) {
     handleVideoMessage(dat);
   }
 }
+// Convert a received RAW-pixel frame (payload after the 12-byte RV header) to an RGBA ArrayBuffer
+// for putImageData. fmt 1 = RGBA already → just copy the payload (ZERO convert: the decode-free
+// ideal, all work delegated to the phone). fmt 3 = RGB565 → cheap bit-shift expand (no YUV math).
+// Returns a transferable ArrayBuffer of exactly w*h*4 bytes, or null on a bad/short frame.
+function _rawToRgba(dat, fmt, w, h) {
+  var n = w * h;
+  if (!n) return null;
+  if (fmt === 1) { // RGBA on the wire — pass straight through (no conversion on the Tesla)
+    var need = 12 + n * 4;
+    if (dat.length < need) return null;
+    return dat.slice(12, need).buffer; // own copy → transferable
+  }
+  if (fmt === 3) { // RGB565 LE on the wire — expand to RGBA (cheap: shifts/masks, no YUV matrix)
+    var need2 = 12 + n * 2;
+    if (dat.length < need2) return null;
+    var out = new Uint8Array(n * 4), o = 0, i, p, r, g, b, off = 12;
+    for (i = 0; i < n; i++) {
+      p = dat[off + i * 2] | (dat[off + i * 2 + 1] << 8);
+      r = (p >> 11) & 0x1F; g = (p >> 5) & 0x3F; b = p & 0x1F;
+      out[o++] = (r << 3) | (r >> 2);
+      out[o++] = (g << 2) | (g >> 4);
+      out[o++] = (b << 3) | (b >> 2);
+      out[o++] = 255;
+    }
+    return out.buffer;
+  }
+  return null; // unknown format
+}
 function handleVideoMessage(dat) {
   // 🚨 AMÉLIORATION: Réinitialiser le watchdog sur TOUT paquet vidéo reçu
   // Cela prouve que la connexion est active même si le PING/PONG spécifique saute
   if (pongtimer !== null) clearTimeout(pongtimer);
   pongtimer = setTimeout(noPong, NO_VIDEO_TIMEOUT);
   lastVideoAt = Date.now(); // mjpeg liveness: a fresh frame proves the link is alive
+  // RAW-PIXEL frame (decode-free path): magic 'R','V' (0x52,0x56 — ≠0xFF so never a JPEG/NAL/PONG).
+  // Header[12] = R,V, fmt(1=RGBA,3=RGB565), ver, width(u32 LE), height(u32 LE); pixels @ offset 12.
+  // The phone already decoded + cropped + (optionally) converted; the browser does ZERO decode —
+  // main just putImageData. Goes through the SAME 1-deep credit window as the JPEG path. Checked
+  // FIRST so a raw byte is never mis-read as JPEG/unittype.
+  if (mjpegMode && dat.length >= 12 && dat[0] === 0x52 && dat[1] === 0x56) {
+    _diagMsgCount++;
+    var _nowR = Date.now();
+    if (_diagJpegLastAt) { var _gR = _nowR - _diagJpegLastAt; if (_gR > _diagJpegGapMax) _diagJpegGapMax = _gR; if (_gR < 50) _diagJpegBurst++; }
+    _diagJpegLastAt = _nowR;
+    var _rfmt = dat[2];
+    var _rw = dat[4] | (dat[5] << 8) | (dat[6] << 16) | (dat[7] * 16777216);
+    var _rh = dat[8] | (dat[9] << 8) | (dat[10] << 16) | (dat[11] * 16777216);
+    if (!firstVideoFrameReceived) {
+      firstVideoFrameReceived = true;
+      try { self.postMessage({ trace: '16. First RAW frame (fmt=' + _rfmt + ' ' + _rw + 'x' + _rh + ' len=' + dat.length + ')' }); } catch (_te) {}
+      self.postMessage({ connectionProgress: { step: 3, message: '3/3 - First frame received!' } });
+      self.postMessage({ videoFrameReceived: true });
+    }
+    var _rgbaBuf = _rawToRgba(dat, _rfmt, _rw, _rh);
+    if (_rgbaBuf) {
+      _mjpegSeq++;
+      _mjpegPending = { kind: 'raw', buf: _rgbaBuf, w: _rw, h: _rh, seq: _mjpegSeq };
+      _mjpegFlush();
+    }
+    return;
+  }
   // MJPEG mode: a binary message starting with FF D8 is a complete JPEG frame.
   // Forward it to the main thread (transfer, falling back to copy) for native
   // Image() decode — Broadway is never involved. Checked before the unittype
@@ -756,7 +819,7 @@ function handleVideoMessage(dat) {
       // raw bytes (transfer = zero-copy, no base64); slice() = our own copy so transferring its
       // buffer never disturbs the socket frame.
       _mjpegSeq++;
-      _mjpegPending = { buf: dat.slice().buffer, seq: _mjpegSeq };
+      _mjpegPending = { kind: 'jpeg', buf: dat.slice().buffer, seq: _mjpegSeq };
       _mjpegFlush();
     } catch (e) {}
     return;

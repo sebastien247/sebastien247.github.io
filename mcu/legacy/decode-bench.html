@@ -122,6 +122,8 @@
     var jpgData = [];   // data:image/jpeg;base64,... per pool slot
     var jpgBytes = [];  // Uint8Array of raw JPEG bytes per pool slot
     var benchImageData = null; // ONE raw RGBA frame for the putimage (decode-free) arm
+    var benchNv21 = null;      // ONE NV21 (12bpp) frame for the nv21-rgba convert arm
+    var convImgData = null;    // reused RGBA ImageData the convert arm writes into + blits
     var encErr = null;
 
     function sizeGen() {
@@ -180,6 +182,7 @@
           // independent and has no decode cache, so one frame measures the decode-free ceiling
           // faithfully (the real raw-pixel transport would putImageData the phone's pixels).
           try { benchImageData = gctx.getImageData(0, 0, RES.w, RES.h); } catch (e2) { benchImageData = null; }
+          buildConvArm(); // build the NV21 frame + reusable RGBA buffer for the nv21-rgba convert arm
           done();
         } catch (e) {
           encErr = (e && e.message) ? e.message : ('' + e);
@@ -448,6 +451,63 @@
       markShown(logicalIndex, Date.now() - t0);
     }
 
+    // Build ONE representative NV21 (YUV420sp, 12bpp) frame from the RGBA, so the convert arm can run
+    // the REAL NV21->RGBA loop. NV21 = full Y plane (w*h) then interleaved V,U (w*h/2). BT.601.
+    function buildNv21() {
+      benchNv21 = null;
+      if (!benchImageData) return;
+      var w = RES.w, h = RES.h, rgba = benchImageData.data, ySize = w * h;
+      var nv = new Uint8Array(ySize + (ySize >> 1));
+      var x, y, i, r, g, b, uv = ySize;
+      for (i = 0; i < ySize; i++) {
+        r = rgba[i * 4]; g = rgba[i * 4 + 1]; b = rgba[i * 4 + 2];
+        nv[i] = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+      }
+      for (y = 0; y < h; y += 2) {
+        for (x = 0; x < w; x += 2) {
+          i = (y * w + x) * 4; r = rgba[i]; g = rgba[i + 1]; b = rgba[i + 2];
+          nv[uv++] = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128; // V
+          nv[uv++] = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128; // U
+        }
+      }
+      benchNv21 = nv;
+    }
+    function buildConvArm() {
+      buildNv21();
+      try { convImgData = ctx.createImageData(RES.w, RES.h); } catch (e) { convImgData = null; }
+    }
+
+    // (G) nv21-rgba: the DECODE-FREE path WITH the real per-frame work — convert NV21 (the phone's
+    //     native ImageReader output, 12bpp) to RGBA via a BT.601 integer loop, then putImageData. This
+    //     is THE measurement the NV21-vs-RGBA-on-wire decision hinges on: its load = convert + blit;
+    //     subtract the putimage arm's load (~blit only) to isolate the CONVERT cost at each res. NOTE:
+    //     in production the convert runs in the WORKER (off the paint thread), so the main thread pays
+    //     only the blit — this arm (convert+blit on ONE thread) is a WORST CASE; the isolated
+    //     convert_ms is the number that matters. If convert+blit < ~66ms (15fps budget) here at
+    //     304x360, NV21-on-wire is comfortably viable.
+    function rNv21Convert(slot, logicalIndex) {
+      if (!benchNv21 || !convImgData) return;
+      var w = RES.w, h = RES.h, ySize = w * h, out = convImgData.data, nv = benchNv21;
+      var t0 = Date.now();
+      var x, y, uvRow, uvCol, Y, U, V, o, uvBase = ySize;
+      for (y = 0; y < h; y++) {
+        uvRow = uvBase + (y >> 1) * w;
+        for (x = 0; x < w; x++) {
+          Y = (nv[y * w + x] - 16) * 298;
+          uvCol = x & ~1;
+          V = nv[uvRow + uvCol] - 128;
+          U = nv[uvRow + uvCol + 1] - 128;
+          o = (y * w + x) * 4;
+          out[o]     = (Y + 409 * V + 128) >> 8;       // Uint8ClampedArray auto-clamps to 0..255
+          out[o + 1] = (Y - 100 * U - 208 * V + 128) >> 8;
+          out[o + 2] = (Y + 516 * U + 128) >> 8;
+          out[o + 3] = 255;
+        }
+      }
+      try { ctx.putImageData(convImgData, 0, 0); } catch (e) {}
+      markShown(logicalIndex, Date.now() - t0);
+    }
+
     // ---- method registry ----------------------------------------------------
     var METHODS = [
       { key: 'css-direct',   fn: rCssDirect,    surface: 'bg'  },
@@ -455,7 +515,8 @@
       { key: 'blob-url',     fn: rBlobUrl,      surface: 'bg'  },
       { key: 'canvas2d',     fn: rCanvas2d,     surface: 'cv'  },
       { key: 'blob-inorder', fn: rBlobInOrder,  surface: 'bg'  },
-      { key: 'putimage',     fn: rPutImage,     surface: 'cv'  }
+      { key: 'putimage',     fn: rPutImage,     surface: 'cv'  },
+      { key: 'nv21-rgba',    fn: rNv21Convert,  surface: 'cv'  }
     ];
     var results = {}; // key -> last finished window snapshot
 
