@@ -725,6 +725,15 @@ function postWorkerMessages(json) {
         demuxDecodeWorker.postMessage({action: "NIGHT", value: event.matches});
     });
 
+    // Relay page visibility to the worker. A Worker cannot observe
+    // document.visibilityState, yet it is the only reliable way to tell a REAL
+    // backgrounding (phone call → timers frozen, re-prime on resume) from a
+    // CPU-starved event loop (timers late but page visible → the liveness
+    // watchdogs must keep running, see workerWasSuspended()).
+    document.addEventListener('visibilitychange', () => {
+        demuxDecodeWorker.postMessage({action: "VISIBILITY", hidden: document.visibilityState === 'hidden'});
+    });
+
     //setInterval(function(){navigator.geolocation.getCurrentPosition(handlepossition);},500);
 }
 

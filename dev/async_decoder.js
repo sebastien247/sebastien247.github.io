@@ -32,6 +32,10 @@ let pendingFrames = [],
     lastPongAt = 0, // Timestamp of the last server PONG sentinel (unittype 31)
     lastFrameAt = 0, // Timestamp of the last decoded video frame (unittype 1/5)
     lastHeartbeatAt = 0, // Wall-clock of the last heartbeat() tick — detects Worker suspension (WebView backgrounded during a call)
+    pageHidden = false, // Mirror of document.visibilityState, relayed by main.js (action VISIBILITY)
+    lastVisibilityHiddenAt = 0, // Wall-clock of the last hidden transition — corroborates a suspension
+    resumeStrikes = 0, // Consecutive resumeAfterSuspend re-primes that produced NO fresh PONG
+    lastResumeAt = 0, // Wall-clock of the last resumeAfterSuspend re-prime
     connectTimeout = null, // Watchdog handle for a WebSocket stuck in CONNECTING
     isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
     firstVideoFrameReceived = false; // Flag to track first video frame
@@ -67,11 +71,24 @@ const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
 // takes this long to be noticed, but the in-place reconnect is fast once fired.
 const NO_DATA_TIMEOUT = 3000; //8000; // No binary data at all (video OR PONG) for this long ⇒ reconnect (was 3000)
 const PONG_TIMEOUT = 6000; //12000;   // No PONG sentinel for this long ⇒ dead control channel (was 6000)
-// If heartbeat() hasn't ticked for this long, the Worker was suspended/throttled
-// (the WebView was backgrounded during a phone call), NOT the channel dying. The
-// data/PONG gap is sleep time, so we re-prime the live socket instead of forcing
-// a false reconnect. Must exceed normal heartbeat jitter (~1-2s).
-const SUSPEND_THRESHOLD = 2000;
+// Suspension detection (WebView backgrounded during a phone call: timers freeze,
+// the PONG/data gap is sleep time, so we re-prime instead of reconnecting).
+// Two tiers, because heartbeat-tick drift alone CANNOT distinguish a frozen
+// Worker from a CPU-starved-but-alive one — and a starved loop under heavy
+// decode routinely shows 2-4 s of drift. Treating that as "suspended" suppressed
+// every liveness watchdog while latency piled up (the 2.6.0 field regression):
+// - drift > SUSPEND_THRESHOLD_HIDDEN AND main.js reported the page hidden
+//   during the gap ⇒ trust it, it is a real backgrounding.
+// - no visibility signal ⇒ only a drift > SUSPEND_THRESHOLD is credible
+//   (a real freeze lasts the duration of the call, far beyond any decode stall).
+const SUSPEND_THRESHOLD_HIDDEN = 2000;
+const SUSPEND_THRESHOLD = 8000;
+// A re-prime is only believable if the previous one actually revived the channel
+// (a fresh PONG arrived since). After this many consecutive re-primes without
+// one, stop assuming "suspension" and force the in-place reconnect — that drop
+// is also what discards the stale video queued in the TCP buffers, resetting
+// any accumulated display latency.
+const SUSPEND_RESUME_MAX_STRIKES = 2;
 
 // The phone re-randomises the WebSocket port on every service start; the stable
 // HTTP discovery endpoint is served on this fixed port range.
@@ -433,7 +450,21 @@ function headerMagic(dat) {
  * is sleep time, not a dead channel. The socket is usually still OPEN on resume.
  */
 function workerWasSuspended() {
-    return lastHeartbeatAt !== 0 && (Date.now() - lastHeartbeatAt) > SUSPEND_THRESHOLD;
+    if (lastHeartbeatAt === 0) {
+        return false;
+    }
+    const drift = Date.now() - lastHeartbeatAt;
+    if (drift <= SUSPEND_THRESHOLD_HIDDEN) {
+        return false;
+    }
+    // Corroborated: main.js saw the page go hidden during this gap (phone call
+    // backgrounded the WebView). The small threshold applies.
+    if (pageHidden || lastVisibilityHiddenAt >= lastHeartbeatAt) {
+        return true;
+    }
+    // Uncorroborated: a CPU-starved-but-alive loop shows 2-4 s drift under heavy
+    // decode; only a much larger gap is a credible freeze.
+    return drift > SUSPEND_THRESHOLD;
 }
 
 /**
@@ -447,6 +478,24 @@ function resumeAfterSuspend(source) {
     const drift = now - lastHeartbeatAt;
     lastHeartbeatAt = now;
     if (socket && socket.readyState === WebSocket.OPEN) {
+        // Strike gate: if the PREVIOUS re-prime produced no fresh PONG, this
+        // "suspension" is really a dead/jammed channel. After
+        // SUSPEND_RESUME_MAX_STRIKES stale re-primes, reconnect in place — the
+        // socket drop also flushes the stale video sitting in the TCP buffers,
+        // so the accumulated display latency resets without a page reload.
+        if (lastResumeAt !== 0 && lastPongAt <= lastResumeAt) {
+            resumeStrikes++;
+        } else {
+            resumeStrikes = 0;
+        }
+        if (resumeStrikes >= SUSPEND_RESUME_MAX_STRIKES) {
+            debugLog('resume strikes exhausted (' + resumeStrikes + ' re-primes, no fresh PONG) — reconnecting');
+            resumeStrikes = 0;
+            lastResumeAt = 0;
+            forceReconnect('suspendStrikes drift=' + drift + 'ms');
+            return;
+        }
+        lastResumeAt = now;
         debugLog('resumed after ' + drift + 'ms (' + source + ', backgrounded during a call?) — socket OPEN, re-prime not reconnect');
         // Fresh baselines so the dead-channel checks don't fire on the sleep gap.
         lastPongAt = now;
@@ -745,6 +794,8 @@ function resetStreamStateForReconnect() {
     firstVideoFrameReceived = false;
     lastheart = 0;
     lastPongAt = 0;
+    resumeStrikes = 0;
+    lastResumeAt = 0;
 
     if (pongtimer) {
         clearTimeout(pongtimer);
@@ -1375,6 +1426,15 @@ self.addEventListener('message', async (message) => {
             console.log("Sending RESET_AA_PROFILE to Android");
             socket.sendObject({action: "RESET_AA_PROFILE"});
         }
+    } else if (message.data.action === 'VISIBILITY') {
+        // Relayed by main.js from document.visibilitychange. A worker cannot see
+        // page visibility itself; this is what lets workerWasSuspended() tell a
+        // REAL backgrounding (phone call) from a CPU-starved event loop.
+        pageHidden = message.data.hidden === true;
+        if (pageHidden) {
+            lastVisibilityHiddenAt = Date.now();
+        }
+        debugLog('page visibility: ' + (pageHidden ? 'hidden' : 'visible'));
     } else if(!initted) {
         postInitJobs.push(message);
     } else {
