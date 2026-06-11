@@ -1,4 +1,18 @@
-const demuxDecodeWorker = new Worker("./async_decoder.js"),
+// Cache-busting : lit le "?v=N" depuis l'URL de CE script (defini dans
+// index.html) et le propage au worker, qui le repropagera a ses importScripts.
+// => un seul endroit a bumper pour tout invalider : la version dans index.html.
+// Si le script est charge sans "?v=", ASSET_VERSION vaut "" (comportement
+// identique a avant : aucune regression).
+const ASSET_VERSION = (function () {
+    try {
+        const scriptSrc = document.currentScript && document.currentScript.src;
+        const v = scriptSrc ? new URL(scriptSrc).searchParams.get('v') : null;
+        return v ? ('?v=' + v) : '';
+    } catch (e) {
+        return '';
+    }
+})();
+const demuxDecodeWorker = new Worker("./async_decoder.js" + ASSET_VERSION),
     latestVersion = 2,
     logElement = document.getElementById('log'),
     warningElement = document.getElementById('warning'),
@@ -473,6 +487,12 @@ function postWorkerMessages(json) {
         usebt = json.usebt;
     }
     port = json.port;
+    // B1 control-channel discovery: a build-66+ phone advertises a SECOND
+    // WebSocket port dedicated to PING/PONG + touch, so those small control
+    // messages no longer queue behind bulk H.264 video (head-of-line blocking).
+    // Absent/null on older phones → controlChannelPort stays falsy and the worker
+    // keeps everything on the single video socket (byte-identical legacy path).
+    const controlChannelPort = json.controlChannelPort || null;
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
@@ -532,7 +552,7 @@ function postWorkerMessages(json) {
     
     // Initialiser le worker avec le canvas offscreen
     demuxDecodeWorker.postMessage(
-        {canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height}, 
+        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height},
         [offscreen]
     );
 
@@ -1106,6 +1126,7 @@ function startAudio(){
 // it is never injected into the stream.
 const DEBUG_LOG_KEY = 'taada_debug_logs';
 const DEBUG_LOG_MAX = 400;                       // hard cap on stored entries (~50 KB)
+const DEBUG_LOG_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;   // drop entries older than 14 days
 const debugPanelEnabled = /[?&]debug(=|&|$)/.test(location.search);
 let debugLogs = loadDebugLogs();
 let debugPanelBody = null;
@@ -1118,7 +1139,8 @@ function loadDebugLogs() {
     try {
         const raw = localStorage.getItem(DEBUG_LOG_KEY);
         const parsed = raw ? JSON.parse(raw) : [];
-        return Array.isArray(parsed) ? parsed : [];
+        if (!Array.isArray(parsed)) return [];
+        return TaadaDebugLogUtils.pruneDebugLogs(parsed, Date.now(), DEBUG_LOG_MAX_AGE_MS, DEBUG_LOG_MAX);
     } catch (e) {
         return [];
     }
@@ -1126,9 +1148,7 @@ function loadDebugLogs() {
 
 function persistDebugLogs() {
     try {
-        if (debugLogs.length > DEBUG_LOG_MAX) {
-            debugLogs = debugLogs.slice(debugLogs.length - DEBUG_LOG_MAX);
-        }
+        debugLogs = TaadaDebugLogUtils.pruneDebugLogs(debugLogs, Date.now(), DEBUG_LOG_MAX_AGE_MS, DEBUG_LOG_MAX);
         localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLogs));
     } catch (e) {
         // Quota / private-mode failure: shed the oldest half and retry once, then
@@ -1149,7 +1169,7 @@ function formatTs(ts) {
 
 function appendDebugLog(entry) {
     if (!entry || !entry.msg) return;
-    const e = { ts: entry.ts || Date.now(), msg: String(entry.msg) };
+    const e = { ts: entry.ts || Date.now(), msg: String(entry.msg).slice(0, 1000) };
     debugLogs.push(e);
     persistDebugLogs();
     if (debugPanelEnabled && debugPanelBody) {
@@ -1158,11 +1178,44 @@ function appendDebugLog(entry) {
     updateDebugPillCount();
 }
 
+// Mirror console.error/warn and uncaught errors into the persisted buffer so a
+// single screenshot tells the whole story (not just the ~9 connection events).
+(function installDebugCapture() {
+    // Only wrap console + error listeners under ?debug. Capturing every
+    // console.error/warn for ALL users means a synchronous localStorage write on
+    // each call (e.g. the 5s connection-retry errors) — needless work on the car's
+    // weak CPU. Rare connection events are still always recorded via the worker.
+    if (!debugPanelEnabled) return;
+    const wrap = (orig, level) => function () {
+        try {
+            const msg = Array.prototype.map.call(arguments, a =>
+                (a && a.stack) ? a.stack : (typeof a === 'object' ? JSON.stringify(a) : String(a))
+            ).join(' ');
+            appendDebugLog({ ts: Date.now(), msg: '[' + level + '] ' + msg });
+        } catch (e) { /* never let logging break the app */ }
+        return orig.apply(this, arguments);
+    };
+    console.error = wrap(console.error.bind(console), 'error');
+    console.warn  = wrap(console.warn.bind(console), 'warn');
+    window.addEventListener('error', (ev) => {
+        appendDebugLog({ ts: Date.now(), msg: '[onerror] ' + (ev.message || '') + ' @ ' + (ev.filename || '') + ':' + (ev.lineno || '') });
+    });
+    window.addEventListener('unhandledrejection', (ev) => {
+        const r = ev && ev.reason;
+        appendDebugLog({ ts: Date.now(), msg: '[unhandledrejection] ' + ((r && r.stack) || String(r)) });
+    });
+})();
+
 function renderDebugLine(e) {
     const line = document.createElement('div');
     line.textContent = formatTs(e.ts) + '  ' + e.msg;
     line.style.cssText = 'padding:1px 0;border-bottom:1px solid rgba(255,255,255,0.06);white-space:pre-wrap;word-break:break-word;';
     debugPanelBody.appendChild(line);
+    // Cap DOM nodes like the buffer — a long reconnect-error loop would otherwise
+    // grow the panel unbounded and chew memory on the car's browser.
+    while (debugPanelBody.childElementCount > DEBUG_LOG_MAX) {
+        debugPanelBody.removeChild(debugPanelBody.firstChild);
+    }
     debugPanelBody.scrollTop = debugPanelBody.scrollHeight;   // follow the latest
 }
 
