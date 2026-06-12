@@ -539,6 +539,8 @@ function postWorkerMessages(json) {
     }
 
     const forceBroadway = findGetParameter("broadway") === "1";
+    // ?webcodec=1: force WebCodecs and disable the Broadway demotion (diagnostic).
+    const forceWebCodec = findGetParameter("webcodec") === "1";
 
 
     canvasElement.width = width;
@@ -552,7 +554,7 @@ function postWorkerMessages(json) {
     
     // Initialiser le worker avec le canvas offscreen
     demuxDecodeWorker.postMessage(
-        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height},
+        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height},
         [offscreen]
     );
 
@@ -1430,9 +1432,61 @@ demuxDecodeWorker.addEventListener('message', (e) => {
     }
 });
 
+// Best-effort hardware fingerprint. The browser cannot read the real Tesla
+// "HW2/3/4" label, but the MCU generation (what decides WebCodecs vs Broadway)
+// is inferable: QtCarBrowser/no-WebCodecs = MCU1; the WebGL UNMASKED_RENDERER
+// (Tegra/Intel/AMD) + core count separate MCU1/MCU2/MCU3. Logged once so the
+// field correlates the Broadway/choppy issue with the hardware. All guesses are
+// marked '?' — never asserted as fact.
+function getWebglRenderer() {
+    try {
+        const c = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
+        const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+        if (!gl) return 'no-webgl';
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        if (!ext) return 'renderer-hidden';
+        return gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) + ' | ' + gl.getParameter(ext.UNMASKED_VENDOR_WEBGL);
+    } catch (e) { return 'err:' + e.message; }
+}
+
+function guessMcu(ua, renderer, cores, hasWebCodec) {
+    const r = (renderer || '').toLowerCase();
+    const u = (ua || '').toLowerCase();
+    // MCU1: QtCarBrowser has no WebCodecs; its GPU is the Tegra (NOT a desktop
+    // GeForce). Match 'tegra' specifically so a dev box with a GeForce is not
+    // mislabelled MCU1.
+    if (/qtcarbrowser/.test(u) || !hasWebCodec || /tegra/.test(r)) return 'MCU1?(Tegra/no-WebCodecs)';
+    if (/amd|radeon/.test(r)) return 'MCU3?(Ryzen/HW4)';
+    if (/intel|atom|hd graphics|uhd graphics/.test(r)) return 'MCU2?(Intel)';
+    // Desktop GPUs (dev runs) — Teslas never ship a discrete GeForce.
+    if (/geforce|rtx|gtx|quadro/.test(r)) return 'non-Tesla?(desktop GPU, dev run)';
+    if (cores >= 6) return 'MCU3?(cores=' + cores + ')';
+    if (cores > 0) return 'MCU2?(cores=' + cores + ')';
+    return 'unknown';
+}
+
+function logHardwareFingerprint() {
+    try {
+        const ua = navigator.userAgent || '';
+        const cores = navigator.hardwareConcurrency || 0;
+        const mem = navigator.deviceMemory || '?';
+        const renderer = getWebglRenderer();
+        const hasWebCodec = (typeof VideoDecoder !== 'undefined');
+        const guess = guessMcu(ua, renderer, cores, hasWebCodec);
+        appendDebugLog({ ts: Date.now(), msg: 'hw: ' + guess
+            + ' | cores=' + cores + ' mem=' + mem
+            + ' webcodec=' + (hasWebCodec ? 'yes' : 'no')
+            + ' screen=' + (window.screen ? (screen.width + 'x' + screen.height) : '?')
+            + ' dpr=' + (window.devicePixelRatio ? Math.round(window.devicePixelRatio * 100) / 100 : '?')
+            + ' gpu="' + renderer + '"'
+            + ' ua="' + ua + '"' });
+    } catch (e) { /* fingerprint must never break the page */ }
+}
+
 // Session marker (separates one drive/session from the next in the saved log),
 // then show the panel if ?debug is present.
 appendDebugLog({ ts: Date.now(), msg: '=== page loaded (' + (debugPanelEnabled ? 'debug panel ON' : 'logging only') + ') ===' });
+logHardwareFingerprint();
 if (debugPanelEnabled) {
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', ensureDebugPanel);
