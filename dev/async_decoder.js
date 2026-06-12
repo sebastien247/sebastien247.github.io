@@ -392,6 +392,14 @@ function separateNalUnits(event){
 
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
+    // Arrival metric counted HERE, not in handleVideoMessage: messages whose
+    // first NAL is SPS/PPS/filler reach the decodable AU through headerMagic →
+    // videoMagic, and a first-NAL sniff at message level undercounts them
+    // (observed rx=0 while dec=30 in the bench repro).
+    if (unittype === 1 || unittype === 5) {
+        m.rxFrames++;
+        m.totalRxFrames++;
+    }
     if (unittype === 1) {
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
@@ -709,8 +717,6 @@ function handleVideoMessage(dat){
     }
     if (unittype === 1 || unittype === 5) {
         lastFrameAt = Date.now();
-        m.rxFrames++;
-        m.totalRxFrames++;
         videoMagic(dat);
 
         // Dismiss the waiting overlay only on a real IDR keyframe (unittype 5),
