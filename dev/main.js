@@ -1252,7 +1252,7 @@ function ensureDebugPanel() {
     const header = document.createElement('div');
     header.style.cssText = 'display:flex;align-items:center;padding:4px 6px;background:rgba(255,255,255,0.08);flex:0 0 auto;';
     const title = document.createElement('span');
-    title.textContent = 'TaaDa logs';
+    title.textContent = 'TaaDa logs' + (ASSET_VERSION ? ' ' + ASSET_VERSION.replace('?v=', 'v') : '');
     title.style.cssText = 'flex:1 1 auto;font-weight:bold;color:#fff;';
     header.appendChild(title);
     header.appendChild(makeDebugBtn('Copy', copyDebugLogs));
