@@ -1139,6 +1139,7 @@ const DEBUG_LOG_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;   // drop entries older t
 const debugPanelEnabled = /[?&]debug(=|&|$)/.test(location.search);
 let debugLogs = loadDebugLogs();
 let debugPanelBody = null;
+let debugMetricsLine = null;
 // Open by default under ?debug: the whole point is for the tester to SEE the
 // logs and photograph the Tesla screen (no devtools in the car). The "—" button
 // minimises it to a small pill to free Android Auto when needed.
@@ -1261,7 +1262,14 @@ function ensureDebugPanel() {
     debugPanelBody = document.createElement('div');
     debugPanelBody.style.cssText = 'flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:4px 6px;-webkit-overflow-scrolling:touch;';
 
+    // Sticky live pipeline metrics line (1 Hz from the worker), always visible
+    // above the scrolling log so a photo of the panel captures the current state.
+    debugMetricsLine = document.createElement('div');
+    debugMetricsLine.style.cssText = 'flex:0 0 auto;padding:3px 6px;background:rgba(255,255,255,0.05);color:#ffd479;white-space:pre-wrap;word-break:break-word;border-bottom:1px solid rgba(255,255,255,0.12);';
+    debugMetricsLine.textContent = 'm: waiting for stream…';
+
     panel.appendChild(header);
+    panel.appendChild(debugMetricsLine);
     panel.appendChild(debugPanelBody);
 
     const pill = document.createElement('button');
@@ -1312,13 +1320,20 @@ function updateDebugPillCount() {
 
 function clearDebugLogs() {
     debugLogs = [];
+    metricsRing = [];
     try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(METRICS_KEY); } catch (e) { /* ignore */ }
     if (debugPanelBody) debugPanelBody.innerHTML = '';
+    if (debugMetricsLine) debugMetricsLine.textContent = 'm: cleared';
     updateDebugPillCount();
 }
 
 function copyDebugLogs() {
-    const text = debugLogs.map(e => formatTs(e.ts) + '  ' + e.msg).join('\n');
+    let text = debugLogs.map(e => formatTs(e.ts) + '  ' + e.msg).join('\n');
+    if (metricsRing.length > 0) {
+        text += '\n--- pipeline metrics (1 Hz, last ' + metricsRing.length + 's) ---\n'
+            + metricsRing.map(mm => formatTs(mm.ts) + '  ' + formatMetrics(mm)).join('\n');
+    }
     try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(text).catch(() => fallbackCopyDebug(text));
@@ -1343,12 +1358,71 @@ function fallbackCopyDebug(text) {
     } catch (e) { /* ignore — user can still screenshot the panel */ }
 }
 
-// Dedicated worker listener so connection logs are captured even before the main
-// message handler is wired in postWorkerMessages(). A Worker can have several
-// message listeners; both fire.
+// ===================== Pipeline metrics (1 Hz from the worker) ==============
+// Stage-by-stage latency diagnosis: arrival vs decode vs render rate, queue
+// depths, worker event-loop drift, PONG age and PONG deficit (≈ seconds of
+// backlog upstream of the worker). Kept in a ring, persisted so a tester can
+// reproduce the lag, reload with ?debug, and read/copy the history.
+const METRICS_KEY = 'taada_metrics';
+const METRICS_MAX = 900;            // ~15 min of 1 Hz samples (~70 KB)
+let metricsRing = (() => {
+    // Reload the persisted ring so Copy after a reproduce-then-reload still
+    // exports the samples leading up to the incident.
+    try {
+        const parsed = JSON.parse(localStorage.getItem(METRICS_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+})();
+let lastMetricsPersistAt = 0;
+let lastMetricsSummaryAt = 0;
+
+function formatMetrics(mm) {
+    return 'm: rx=' + mm.rxFps + ' dec=' + mm.decFps + ' ren=' + mm.renFps + 'fps'
+        + ' ' + mm.rxKBps + 'KB/s'
+        + ' dq=' + mm.dq + ' pf=' + mm.pf
+        + ' bk=' + mm.backlog + ' pd=' + mm.pongDef
+        + ' pongAge=' + mm.pongAge + 'ms'
+        + ' drift=' + mm.drift + 'ms';
+}
+
+function handleWorkerMetrics(mm) {
+    metricsRing.push(mm);
+    if (metricsRing.length > METRICS_MAX) {
+        metricsRing = metricsRing.slice(metricsRing.length - METRICS_MAX);
+    }
+
+    const nowMs = Date.now();
+    if (nowMs - lastMetricsPersistAt > 5000) {
+        lastMetricsPersistAt = nowMs;
+        try {
+            localStorage.setItem(METRICS_KEY, JSON.stringify(metricsRing));
+        } catch (e) {
+            metricsRing = metricsRing.slice(Math.floor(metricsRing.length / 2));
+            try { localStorage.setItem(METRICS_KEY, JSON.stringify(metricsRing)); } catch (e2) { /* give up */ }
+        }
+    }
+
+    if (debugMetricsLine) {
+        debugMetricsLine.textContent = formatMetrics(mm);
+    }
+
+    // Every 30 s, drop a summary into the persistent event log so the saved
+    // history shows the TREND (was the backlog growing before the disconnect?).
+    if (nowMs - lastMetricsSummaryAt > 30000) {
+        lastMetricsSummaryAt = nowMs;
+        appendDebugLog({ ts: nowMs, msg: formatMetrics(mm) });
+    }
+}
+
+// Dedicated worker listener so connection logs and metrics are captured even
+// before the main message handler is wired in postWorkerMessages(). A Worker
+// can have several message listeners; both fire.
 demuxDecodeWorker.addEventListener('message', (e) => {
     if (e && e.data && e.data.hasOwnProperty('debugLog')) {
         appendDebugLog(e.data.debugLog);
+    }
+    if (e && e.data && e.data.hasOwnProperty('metrics')) {
+        handleWorkerMetrics(e.data.metrics);
     }
 });
 

@@ -42,6 +42,26 @@ let pendingFrames = [],
 
 const texturePool = [];
 
+// ── Pipeline metrics (1 Hz sampler, relayed to main.js → ?debug panel) ──────
+// Answers WHERE display latency accumulates, stage by stage:
+//   rxFrames/rxBytes   arrival rate into the worker (counted at message entry)
+//   decOut             frames the decoder actually output
+//   rendered           frames drawn to the canvas
+//   dq / pf gauges     decoder internal queue / pendingFrames render queue
+//   tickDriftMax       worker event-loop health (heartbeat lateness beyond 1 s)
+//   pingsSent-pongsRx  PONG deficit. PINGs go uplink (uncongested), the phone
+//                      replies immediately, and PONGs are FIFO with video on the
+//                      downlink — so at 1 ping/s the deficit ≈ SECONDS of backlog
+//                      sitting upstream of the worker (phone outQueue + TCP
+//                      buffers + worker inbox). The single number that separates
+//                      "lag lives upstream" from "lag lives in decode/render".
+const m = {
+    rxFrames: 0, rxBytes: 0, decOut: 0, rendered: 0,
+    totalRxFrames: 0, totalRendered: 0,
+    pingsSent: 0, pongsRx: 0,
+    tickDriftMax: 0,
+};
+
 /**
  * Relays one connection-lifecycle log line to the main thread. A Worker has no
  * localStorage, so the main thread persists these and renders the ?debug panel.
@@ -145,6 +165,26 @@ function updateFrameCounter() {
     frameTimes[runtime] = frameCounter;
     frameRate = Math.round((frameCounter - frameTimes[runtime - 10]) / 10);
     runtime++;
+
+    // 1 Hz pipeline sample for the ?debug panel. Cheap: a handful of integers.
+    const nowMs = Date.now();
+    try {
+        self.postMessage({ metrics: {
+            ts: nowMs,
+            rxFps: m.rxFrames,
+            decFps: m.decOut,
+            renFps: m.rendered,
+            rxKBps: Math.round(m.rxBytes / 1024),
+            dq: decoder !== null ? decoder.decodeQueueSize : -1,
+            pf: pendingFrames.length,
+            backlog: m.totalRxFrames - m.totalRendered,
+            pongDef: m.pingsSent - m.pongsRx,
+            pongAge: lastPongAt ? (nowMs - lastPongAt) : -1,
+            frameAge: lastFrameAt ? (nowMs - lastFrameAt) : -1,
+            drift: m.tickDriftMax,
+        }});
+    } catch (e) { /* metrics must never break the stream */ }
+    m.rxFrames = 0; m.rxBytes = 0; m.decOut = 0; m.rendered = 0; m.tickDriftMax = 0;
 }
 
 function getFrameStats() {
@@ -211,6 +251,7 @@ function switchToBroadway() {
 
     broadwayDecoder = new Decoder({rgb: true});
     broadwayDecoder.onPictureDecoded = function (buffer){
+        m.decOut++;
         pendingFrames.push(buffer)
         if(underflow) {
             renderFrame();
@@ -226,6 +267,7 @@ function switchToBroadway() {
 function createVideoDecoder() {
     decoder = new VideoDecoder({
         output: (frame) => {
+            m.decOut++;
             pendingFrames.push(frame);
             if (underflow) {
                 renderFrame();
@@ -314,6 +356,8 @@ async function renderFrame() {
     }
     const frame = pendingFrames.shift();
     drawImageToCanvas(frame);
+    m.rendered++;
+    m.totalRendered++;
 
     if (pendingFrames.length < 5) {
         socket.sendObject({action: "ACK"});
@@ -508,6 +552,7 @@ function resumeAfterSuspend(source) {
             socket.sendObject({action: "START"});
             // PING on the control socket (when present) for a fast PONG that re-
             // baselines the watchdog; falls back to the video socket otherwise.
+            m.pingsSent++;
             controlSendObject({action: "PING"});
             socket.sendObject({action: "REQUEST_KEYFRAME"});
         } catch (e) { /* next heartbeat tick retries */ }
@@ -550,6 +595,13 @@ function heartbeat() {
         resumeAfterSuspend('heartbeat');
         return;
     }
+    // Event-loop health: how late is this 1 s tick beyond its schedule.
+    if (lastHeartbeatAt !== 0) {
+        const tickDrift = (Date.now() - lastHeartbeatAt) - 1000;
+        if (tickDrift > m.tickDriftMax) {
+            m.tickDriftMax = tickDrift;
+        }
+    }
     lastHeartbeatAt = Date.now();
 
     // Dead control channel: the phone replies to every PING with a PONG sentinel
@@ -581,6 +633,7 @@ function heartbeat() {
     if (typeof frameRate !== 'undefined') {
         pingPayload.fps = frameRate;
     }
+    m.pingsSent++;
     // B1: PING rides the control socket when present so the PONG can come back
     // without queueing behind video. Falls back to the video socket otherwise.
     controlSendObject(pingPayload);
@@ -643,16 +696,21 @@ function handleVideoMessage(dat){
     if (pongtimer !== null) clearTimeout(pongtimer);
     pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
 
+    m.rxBytes += dat.length;
+
     let unittype = (dat[4] & 0x1f);
     if (unittype === 31)
     {
         // Server PONG sentinel — proof the control channel is alive. Tracked
         // separately from video so heartbeat() can detect a half-open channel.
+        m.pongsRx++;
         lastPongAt = Date.now();
         return;
     }
     if (unittype === 1 || unittype === 5) {
         lastFrameAt = Date.now();
+        m.rxFrames++;
+        m.totalRxFrames++;
         videoMagic(dat);
 
         // Dismiss the waiting overlay only on a real IDR keyframe (unittype 5),
@@ -796,6 +854,13 @@ function resetStreamStateForReconnect() {
     lastPongAt = 0;
     resumeStrikes = 0;
     lastResumeAt = 0;
+
+    // Re-baseline the pipeline metrics: the reconnect just discarded everything
+    // in flight (TCP buffers, decoder queue, pendingFrames), so carrying the old
+    // backlog / PONG deficit across would misread as leftover lag.
+    m.totalRendered = m.totalRxFrames;
+    m.pingsSent = 0;
+    m.pongsRx = 0;
 
     if (pongtimer) {
         clearTimeout(pongtimer);
@@ -1145,6 +1210,10 @@ function socketClose(event) {
         + ' code=' + closeCode + ' reason="' + closeReason + '"'
         + ' sinceLastPong=' + (lastPongAt ? (Date.now() - lastPongAt) + 'ms' : 'n/a')
         + ' sinceLastFrame=' + (lastFrameAt ? (Date.now() - lastFrameAt) + 'ms' : 'n/a')
+        + ' backlog=' + (m.totalRxFrames - m.totalRendered)
+        + ' pongDef=' + (m.pingsSent - m.pongsRx)
+        + ' dq=' + (decoder !== null ? decoder.decodeQueueSize : -1)
+        + ' pf=' + pendingFrames.length
         + ' retryIn=' + exponentialDelay + 'ms');
 
     // 🚨 NOUVEAU: Notifier le thread principal de la perte de connexion
