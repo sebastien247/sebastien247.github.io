@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Dimensions de la fenêtre</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #f0f0f0;
+    }
+    #dimensions {
+      font-size: 2em;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <div id="dimensions"></div>
+
+  <script>
+    function updateDimensions() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      document.getElementById('dimensions').textContent = 
+        `Largeur : ${width}px | Hauteur : ${height}px`;
+    }
+
+    // Affichage initial
+    updateDimensions();
+
+    // Mettre à jour à chaque redimensionnement
+    window.addEventListener('resize', updateDimensions);
+  </script>
+</body>
+</html>

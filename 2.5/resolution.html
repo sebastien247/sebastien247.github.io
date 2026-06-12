@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Diagnostic résolution — TaaDa</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --good: #3fb950;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    body { padding: 16px; min-height: 100vh; }
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+
+    /* Carte héro : résolution physique de l'écran */
+    .hero {
+      background: var(--card);
+      border: 2px solid var(--accent);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      margin-bottom: 16px;
+    }
+    .hero .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
+    .hero .value {
+      font-family: "SF Mono", "Consolas", "Roboto Mono", monospace;
+      font-size: clamp(36px, 12vw, 72px);
+      font-weight: 700;
+      color: var(--good);
+      line-height: 1.1;
+      margin: 8px 0;
+      word-break: break-word;
+    }
+    .hero .note { color: var(--muted); font-size: 12px; }
+
+    /* Grille de métriques */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .metric {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .metric .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+    .metric .v {
+      font-family: "SF Mono", "Consolas", "Roboto Mono", monospace;
+      font-size: 18px;
+      font-weight: 600;
+      margin-top: 4px;
+      word-break: break-word;
+    }
+    .metric .v.span { font-size: 13px; font-weight: 400; color: var(--muted); }
+
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    button {
+      flex: 1 1 140px;
+      background: var(--accent);
+      color: #0d1117;
+      border: none;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+    button:active { opacity: .7; }
+
+    pre {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: "SF Mono", "Consolas", "Roboto Mono", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--muted);
+      max-height: 40vh;
+      overflow: auto;
+    }
+    .toast {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--good);
+      color: #0d1117;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-weight: 600;
+      opacity: 0;
+      transition: opacity .2s;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <h1>Diagnostic de résolution</h1>
+  <div class="sub">Charger cette page sur l'écran du véhicule pour relever sa résolution réelle.</div>
+
+  <div class="hero">
+    <div class="label">Résolution physique de l'écran</div>
+    <div class="value" id="hero-physical">—</div>
+    <div class="note" id="hero-note">pixels physiques = pixels CSS × densité (devicePixelRatio)</div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <div class="actions">
+    <button id="copy">📋 Copier le rapport</button>
+    <button id="refresh" class="secondary">↻ Rafraîchir</button>
+  </div>
+
+  <pre id="dump">…</pre>
+
+  <div class="toast" id="toast">Copié</div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // Lecture défensive : certaines API (visualViewport, screen.orientation)
+      // peuvent être absentes sur les navigateurs embarqués (QtCarBrowser, etc.).
+      function safe(fn, fallback) {
+        try { var v = fn(); return (v === undefined || v === null) ? fallback : v; }
+        catch (e) { return fallback; }
+      }
+
+      function collect() {
+        var s = window.screen || {};
+        var dpr = safe(function () { return window.devicePixelRatio; }, 1) || 1;
+        var vv = window.visualViewport;
+
+        var screenCssW = safe(function () { return s.width; }, 0);
+        var screenCssH = safe(function () { return s.height; }, 0);
+        var innerW = safe(function () { return window.innerWidth; }, 0);
+        var innerH = safe(function () { return window.innerHeight; }, 0);
+
+        return {
+          // Résolution physique de l'écran (la "vraie" résolution du véhicule)
+          screenPhysicalW: Math.round(screenCssW * dpr),
+          screenPhysicalH: Math.round(screenCssH * dpr),
+          // Résolution physique de la zone affichée (viewport)
+          viewportPhysicalW: Math.round(innerW * dpr),
+          viewportPhysicalH: Math.round(innerH * dpr),
+
+          dpr: dpr,
+
+          // Valeurs en pixels CSS (logiques)
+          screenCssW: screenCssW,
+          screenCssH: screenCssH,
+          availW: safe(function () { return s.availWidth; }, 0),
+          availH: safe(function () { return s.availHeight; }, 0),
+          innerW: innerW,
+          innerH: innerH,
+          outerW: safe(function () { return window.outerWidth; }, 0),
+          outerH: safe(function () { return window.outerHeight; }, 0),
+          clientW: safe(function () { return document.documentElement.clientWidth; }, 0),
+          clientH: safe(function () { return document.documentElement.clientHeight; }, 0),
+          vvW: vv ? Math.round(vv.width) : null,
+          vvH: vv ? Math.round(vv.height) : null,
+          vvScale: vv ? vv.scale : null,
+
+          colorDepth: safe(function () { return s.colorDepth; }, null),
+          pixelDepth: safe(function () { return s.pixelDepth; }, null),
+          orientation: safe(function () { return s.orientation && s.orientation.type; }, null) ||
+                       safe(function () { return window.orientation; }, null),
+          userAgent: safe(function () { return navigator.userAgent; }, ''),
+          platform: safe(function () { return navigator.platform; }, ''),
+          ts: new Date().toString()
+        };
+      }
+
+      function dim(w, h) { return w + ' × ' + h; }
+
+      function render() {
+        var d = collect();
+
+        document.getElementById('hero-physical').textContent =
+          dim(d.screenPhysicalW, d.screenPhysicalH);
+        document.getElementById('hero-note').textContent =
+          dim(d.screenCssW, d.screenCssH) + ' CSS × ' + d.dpr + ' (densité) = ' +
+          dim(d.screenPhysicalW, d.screenPhysicalH) + ' physiques';
+
+        var metrics = [
+          ['Viewport (CSS)', dim(d.innerW, d.innerH), 'window.innerWidth × innerHeight'],
+          ['Viewport (physique)', dim(d.viewportPhysicalW, d.viewportPhysicalH), 'zone affichée réelle'],
+          ['Écran (CSS)', dim(d.screenCssW, d.screenCssH), 'screen.width × height'],
+          ['Densité (DPR)', String(d.dpr), 'devicePixelRatio'],
+          ['Disponible', dim(d.availW, d.availH), 'screen.avail*'],
+          ['Fenêtre (outer)', dim(d.outerW, d.outerH), 'window.outer*'],
+          ['Document', dim(d.clientW, d.clientH), 'documentElement.client*'],
+          ['Visual viewport', d.vvW !== null ? dim(d.vvW, d.vvH) + (d.vvScale ? ' @' + d.vvScale : '') : 'n/d', 'visualViewport'],
+          ['Orientation', d.orientation !== null ? String(d.orientation) : 'n/d', ''],
+          ['Profondeur couleur', d.colorDepth !== null ? d.colorDepth + ' bits' : 'n/d', 'screen.colorDepth']
+        ];
+
+        var grid = document.getElementById('grid');
+        grid.innerHTML = '';
+        metrics.forEach(function (m) {
+          var el = document.createElement('div');
+          el.className = 'metric';
+          var k = document.createElement('div'); k.className = 'k'; k.textContent = m[0];
+          var v = document.createElement('div'); v.className = 'v'; v.textContent = m[1];
+          el.appendChild(k); el.appendChild(v);
+          if (m[2]) { var s = document.createElement('div'); s.className = 'v span'; s.textContent = m[2]; el.appendChild(s); }
+          grid.appendChild(el);
+        });
+
+        document.getElementById('dump').textContent = buildReport(d);
+        return d;
+      }
+
+      function buildReport(d) {
+        return [
+          'TaaDa — Diagnostic de résolution',
+          d.ts,
+          '',
+          'RÉSOLUTION PHYSIQUE ÉCRAN  : ' + dim(d.screenPhysicalW, d.screenPhysicalH),
+          'Viewport physique          : ' + dim(d.viewportPhysicalW, d.viewportPhysicalH),
+          'devicePixelRatio           : ' + d.dpr,
+          '',
+          'screen (CSS)               : ' + dim(d.screenCssW, d.screenCssH),
+          'screen.avail               : ' + dim(d.availW, d.availH),
+          'window.inner (viewport CSS): ' + dim(d.innerW, d.innerH),
+          'window.outer               : ' + dim(d.outerW, d.outerH),
+          'documentElement.client     : ' + dim(d.clientW, d.clientH),
+          'visualViewport             : ' + (d.vvW !== null ? dim(d.vvW, d.vvH) + ' @' + d.vvScale : 'n/d'),
+          'orientation                : ' + (d.orientation !== null ? d.orientation : 'n/d'),
+          'colorDepth / pixelDepth    : ' + d.colorDepth + ' / ' + d.pixelDepth,
+          'platform                   : ' + d.platform,
+          'userAgent                  : ' + d.userAgent
+        ].join('\n');
+      }
+
+      function toast(msg) {
+        var t = document.getElementById('toast');
+        t.textContent = msg;
+        t.classList.add('show');
+        setTimeout(function () { t.classList.remove('show'); }, 1500);
+      }
+
+      function copyReport() {
+        var text = document.getElementById('dump').textContent;
+        function fallback() {
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed'; ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.focus(); ta.select();
+          var ok = false;
+          try { ok = document.execCommand('copy'); } catch (e) {}
+          document.body.removeChild(ta);
+          toast(ok ? 'Copié' : 'Copie impossible — sélectionnez le texte');
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(
+            function () { toast('Copié'); },
+            fallback
+          );
+        } else {
+          fallback();
+        }
+      }
+
+      // Câblage
+      document.getElementById('copy').addEventListener('click', copyReport);
+      document.getElementById('refresh').addEventListener('click', render);
+      window.addEventListener('resize', render);
+      window.addEventListener('orientationchange', render);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', render);
+      }
+      // Filet de sécurité : certains navigateurs embarqués n'émettent pas
+      // d'événement resize de façon fiable.
+      setInterval(render, 1000);
+
+      render();
+    })();
+  </script>
+</body>
+</html>
