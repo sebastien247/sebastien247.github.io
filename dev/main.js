@@ -1379,10 +1379,14 @@ let lastMetricsSummaryAt = 0;
 function formatMetrics(mm) {
     return 'm: rx=' + mm.rxFps + ' dec=' + mm.decFps + ' ren=' + mm.renFps + 'fps'
         + ' ' + mm.rxKBps + 'KB/s'
+        + ' ' + (mm.path || '?')
         + ' dq=' + mm.dq + ' pf=' + mm.pf
         + ' bk=' + mm.backlog + ' pd=' + mm.pongDef
+        + ' gap=' + (mm.gapMax == null ? '?' : mm.gapMax) + 'ms'
+        + ' dec=' + (mm.decMs == null ? '?' : mm.decMs) + 'ms'
         + ' pongAge=' + mm.pongAge + 'ms'
-        + ' drift=' + mm.drift + 'ms';
+        + ' drift=' + mm.drift + 'ms'
+        + (mm.bwSwitches ? ' bwSw=' + mm.bwSwitches + (mm.bwReason ? ' [' + mm.bwReason + ']' : '') : '');
 }
 
 function handleWorkerMetrics(mm) {

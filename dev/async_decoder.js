@@ -60,6 +60,15 @@ const m = {
     totalRxFrames: 0, totalRendered: 0,
     pingsSent: 0, pongsRx: 0,
     tickDriftMax: 0,
+    // Stage discriminators (upstream stall vs browser decode bottleneck):
+    //   gapMax   longest silence between two arriving frames in the window. Big
+    //            gap = the SOURCE stalled (phone throttled / TCP), then bursts.
+    //   decMs    synchronous ms the worker spent inside decode() this window.
+    //            ~0 on WebCodecs (async submit), real on Broadway (software,
+    //            on-thread) → a big decMs with a big drift = browser-bound.
+    //   so a burst with gapMax≈0 + decMs high = browser can't keep up; a burst
+    //            with gapMax in the seconds = frames batched upstream.
+    gapMax: 0, decMs: 0, lastArrivalAt: 0,
 };
 
 /**
@@ -182,9 +191,15 @@ function updateFrameCounter() {
             pongAge: lastPongAt ? (nowMs - lastPongAt) : -1,
             frameAge: lastFrameAt ? (nowMs - lastFrameAt) : -1,
             drift: m.tickDriftMax,
+            path: decoder !== null ? 'wc' : (broadwayDecoder !== null ? 'bw' : '-'),
+            gapMax: m.gapMax,
+            decMs: m.decMs,
+            bwSwitches: m.bwSwitches || 0,
+            bwReason: m.bwReason || '',
         }});
     } catch (e) { /* metrics must never break the stream */ }
-    m.rxFrames = 0; m.rxBytes = 0; m.decOut = 0; m.rendered = 0; m.tickDriftMax = 0;
+    m.rxFrames = 0; m.rxBytes = 0; m.decOut = 0; m.rendered = 0;
+    m.tickDriftMax = 0; m.gapMax = 0; m.decMs = 0;
 }
 
 function getFrameStats() {
@@ -244,9 +259,15 @@ function createShader(gl, type, source) {
     gl.deleteShader(shader);
 }
 
-function switchToBroadway() {
-    console.log("Switching to broadway decoder");
-    debugLog('decoder fallback → Broadway (WebCodecs error)');
+// reason: WHICH of the WebCodecs->Broadway demotion gates fired. Logged + kept
+// so the field tells us why a capable browser dropped to software decode (the
+// fallback is one-way and sticky until reload — see #latency-regression-260).
+function switchToBroadway(reason) {
+    const why = reason || 'unspecified';
+    console.log("Switching to broadway decoder: " + why);
+    debugLog('decoder fallback → Broadway: ' + why);
+    m.bwReason = why;
+    m.bwSwitches = (m.bwSwitches || 0) + 1;
     decoder = null;
 
     broadwayDecoder = new Decoder({rgb: true});
@@ -274,7 +295,7 @@ function createVideoDecoder() {
             }
         },
         error: (e) => {
-            switchToBroadway()
+            switchToBroadway('error-cb: ' + (e && e.message ? e.message : e))
         },
     });
 }
@@ -337,11 +358,13 @@ function initCanvas(canvas, forceBroadway) {
         try {
             createVideoDecoder();
         } catch(e) {
-            switchToBroadway();
+            switchToBroadway('init-ctor-threw: ' + (e && e.message ? e.message : e));
         }
     } else {
         console.log("Forcing to broadway decoder")
-        switchToBroadway();
+        // forceBroadway=true means INIT chose Broadway: either ?broadway=1 (MCU1)
+        // or the isWebCodecsWorkingWithDecode() probe failed/ timed out at startup.
+        switchToBroadway('init-forced (probe-fail or ?broadway=1)');
     }
 
     startSocket();
@@ -397,9 +420,16 @@ function videoMagic(dat){
     // videoMagic, and a first-NAL sniff at message level undercounts them
     // (observed rx=0 while dec=30 in the bench repro).
     if (unittype === 1 || unittype === 5) {
+        const _now = Date.now();
+        if (m.lastArrivalAt !== 0) {
+            const gap = _now - m.lastArrivalAt;
+            if (gap > m.gapMax) { m.gapMax = gap; }
+        }
+        m.lastArrivalAt = _now;
         m.rxFrames++;
         m.totalRxFrames++;
     }
+    const _dt0 = Date.now();
     if (unittype === 1) {
         if(decoder !== null) {
             let chunk = new EncodedVideoChunk({
@@ -413,16 +443,17 @@ function videoMagic(dat){
                     decoder.decode(chunk);
                 } catch (e) {
                     console.error("Video decoder error", e);
-                    switchToBroadway();
+                    switchToBroadway('decode-threw-P: ' + (e && e.message ? e.message : e));
                 }
             } else {
-                switchToBroadway();
+                switchToBroadway('decoder-closed-P');
             }
         }
 
         if(broadwayDecoder !== null) {
             broadwayDecoder.decode(dat)
         }
+        m.decMs += Date.now() - _dt0;
         return;
     }
 
@@ -447,16 +478,17 @@ function videoMagic(dat){
                     decoder.decode(chunk);
                 } catch (e) {
                     console.error("Video decoder error", e);
-                    switchToBroadway();
+                    switchToBroadway('decode-threw-IDR: ' + (e && e.message ? e.message : e));
                 }
             } else {
-                switchToBroadway();
+                switchToBroadway('decoder-closed-IDR');
             }
         }
 
         if(broadwayDecoder !== null) {
             broadwayDecoder.decode(data)
         }
+        m.decMs += Date.now() - _dt0;
     }
 }
 
@@ -481,7 +513,7 @@ function headerMagic(dat) {
             try {
                 decoder.configure(config);
             } catch (exc) {
-                switchToBroadway();
+                switchToBroadway('configure-threw: ' + (exc && exc.message ? exc.message : exc));
             }
         }
 
@@ -867,6 +899,7 @@ function resetStreamStateForReconnect() {
     m.totalRendered = m.totalRxFrames;
     m.pingsSent = 0;
     m.pongsRx = 0;
+    m.lastArrivalAt = 0;   // don't count the reconnect gap as a source stall
 
     if (pongtimer) {
         clearTimeout(pongtimer);
@@ -894,7 +927,7 @@ function resetStreamStateForReconnect() {
         try {
             createVideoDecoder();
         } catch (e) {
-            switchToBroadway();
+            switchToBroadway('reconnect-ctor-threw: ' + (e && e.message ? e.message : e));
         }
     }
 }
@@ -1297,7 +1330,7 @@ async function isWebCodecsWorkingWithDecode() {
                     frame.close();
                     resolve(true);
                 },
-                error: () => resolve(false)
+                error: (e) => { debugLog('webcodecs probe error: ' + (e && e.message ? e.message : e)); resolve(false); }
             });
             decoder.configure({codec: 'avc1.42002a', codedHeight: 1080, codedWidth: 1920});
             const chunk = new EncodedVideoChunk({
@@ -1306,8 +1339,11 @@ async function isWebCodecsWorkingWithDecode() {
                 data: sample
             });
             decoder.decode(chunk);
-            // fallback in case output or error doesn't fire
-            setTimeout(() => resolve(false), 1000);
+            // fallback in case output or error doesn't fire. A capable browser
+            // can still miss this 1 s window on a cold GPU decode service, which
+            // wrongly condemns the whole session to Broadway — logged so the field
+            // shows when the INITIAL choice was a probe timeout, not a real failure.
+            setTimeout(() => { debugLog('webcodecs probe timeout (1s) → Broadway'); resolve(false); }, 1000);
         });
     } catch (e) {
         return false;
@@ -1444,7 +1480,7 @@ self.addEventListener('message', async (message) => {
                 console.error("Error reconfiguring decoder:", e);
                 self.postMessage({error: "Erreur lors du changement de résolution: " + e.message});
                 // En cas d'erreur, essayer de basculer vers Broadway
-                switchToBroadway();
+                switchToBroadway('resize-reconfigure-threw: ' + (e && e.message ? e.message : e));
             }
         } else if (broadwayDecoder !== null) {
             // Pour Broadway, nous n'avons pas besoin de reconfiguration explicite
