@@ -78,6 +78,28 @@ const m = {
 let forceWebCodec = false;
 let wcRecoverAt = 0, wcRecoverCount = 0;
 
+// WebCodecs frame-ordering gate. A VideoDecoder MUST receive configure() (from
+// the SPS) and then a key frame (IDR) before any delta (P) frame, or decode()
+// throws "Cannot call 'decode' on an unconfigured codec" / "A key frame is
+// required after configure()". On a reconnect the stream resumes mid-GOP, so
+// in-flight P-frames arrive before the re-sent SPS+IDR. Without this gate those
+// P-frames crash the hardware decoder and we wrongly demote to Broadway (the
+// field root cause). true = drop P-frames and pull a keyframe until the first
+// IDR after (re)configure has decoded.
+let awaitingKeyframe = true;
+let lastKeyframeReqAt = 0;
+
+function maybeRequestKeyframe() {
+    const now = Date.now();
+    if (now - lastKeyframeReqAt < 1000) { return; }   // the phone caps at 2s anyway
+    lastKeyframeReqAt = now;
+    try {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.sendObject({action: "REQUEST_KEYFRAME"});
+        }
+    } catch (e) { /* next drop retries */ }
+}
+
 /**
  * Relays one connection-lifecycle log line to the main thread. A Worker has no
  * localStorage, so the main thread persists these and renders the ?debug panel.
@@ -322,6 +344,9 @@ function switchToBroadway(reason) {
  * drop would otherwise stay wedged after it.
  */
 function createVideoDecoder() {
+    // A fresh decoder is unconfigured and needs SPS (configure) then an IDR
+    // before any P-frame — gate P-frames until that first keyframe lands.
+    awaitingKeyframe = true;
     decoder = new VideoDecoder({
         output: (frame) => {
             m.decOut++;
@@ -468,21 +493,26 @@ function videoMagic(dat){
     const _dt0 = Date.now();
     if (unittype === 1) {
         if(decoder !== null) {
-            let chunk = new EncodedVideoChunk({
-                type: 'delta',
-                timestamp: 0,
-                duration: 0,
-                data: dat
-            });
-            if (decoder.state !== 'closed') {
+            if (decoder.state === 'closed') {
+                switchToBroadway('decoder-closed-P');
+            } else if (decoder.state !== 'configured' || awaitingKeyframe) {
+                // P-frame before configure()/first keyframe (e.g. mid-GOP after a
+                // reconnect). Decoding it would throw and demote us to Broadway —
+                // drop it and pull a fresh IDR instead.
+                maybeRequestKeyframe();
+            } else {
+                let chunk = new EncodedVideoChunk({
+                    type: 'delta',
+                    timestamp: 0,
+                    duration: 0,
+                    data: dat
+                });
                 try {
                     decoder.decode(chunk);
                 } catch (e) {
                     console.error("Video decoder error", e);
                     switchToBroadway('decode-threw-P: ' + (e && e.message ? e.message : e));
                 }
-            } else {
-                switchToBroadway('decoder-closed-P');
             }
         }
 
@@ -503,21 +533,27 @@ function videoMagic(dat){
         }
         let data = appendByteArray(sps, dat);
         if(decoder !== null) {
-            let chunk = new EncodedVideoChunk({
-                type: 'key',
-                timestamp: 0,
-                duration: 0,
-                data: data
-            });
-            if (decoder.state !== 'closed') {
+            if (decoder.state === 'closed') {
+                switchToBroadway('decoder-closed-IDR');
+            } else if (decoder.state !== 'configured') {
+                // SPS seen but this (just-recreated) decoder is not configured
+                // yet; wait for the configure() the re-sent SPS triggers.
+                maybeRequestKeyframe();
+            } else {
+                let chunk = new EncodedVideoChunk({
+                    type: 'key',
+                    timestamp: 0,
+                    duration: 0,
+                    data: data
+                });
                 try {
                     decoder.decode(chunk);
+                    // First key frame after (re)configure decoded: P-frames may flow.
+                    awaitingKeyframe = false;
                 } catch (e) {
                     console.error("Video decoder error", e);
                     switchToBroadway('decode-threw-IDR: ' + (e && e.message ? e.message : e));
                 }
-            } else {
-                switchToBroadway('decoder-closed-IDR');
             }
         }
 
@@ -548,6 +584,9 @@ function headerMagic(dat) {
         if(decoder !== null) {
             try {
                 decoder.configure(config);
+                // After configure() WebCodecs requires a key frame before any
+                // delta frame — hold P-frames until the next IDR decodes.
+                awaitingKeyframe = true;
             } catch (exc) {
                 switchToBroadway('configure-threw: ' + (exc && exc.message ? exc.message : exc));
             }
