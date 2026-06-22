@@ -1565,7 +1565,11 @@ self.addEventListener('message', async (message) => {
                 
                 console.log("Reconfiguring decoder with:", config);
                 decoder.configure(config);
-                
+                // Same contract as headerMagic: after configure() a key frame is
+                // required before any P-frame — gate P-frames until the next IDR
+                // (the CLEAR_BUFFERS that follows requests one).
+                awaitingKeyframe = true;
+
                 self.postMessage({warning: "Résolution adaptée, en attente d'une nouvelle image clé..."});
             } catch (e) {
                 console.error("Error reconfiguring decoder:", e);
