@@ -36,6 +36,10 @@ let pendingFrames = [],
     lastVisibilityHiddenAt = 0, // Wall-clock of the last hidden transition — corroborates a suspension
     resumeStrikes = 0, // Consecutive resumeAfterSuspend re-primes that produced NO fresh PONG
     lastResumeAt = 0, // Wall-clock of the last resumeAfterSuspend re-prime
+    skippingStale = false, // True while draining+dropping the post-suspend backlog (skip-to-latest)
+    skipStaleStartAt = 0, // Wall-clock when the current skip-to-latest drain began
+    skipStaleDropped = 0, // Frames dropped during the current skip-to-latest drain
+    lastSkipArrivalAt = 0, // Wall-clock of the last frame seen while skipping (live-cadence probe)
     connectTimeout = null, // Watchdog handle for a WebSocket stuck in CONNECTING
     isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
     firstVideoFrameReceived = false; // Flag to track first video frame
@@ -69,6 +73,11 @@ const m = {
     //   so a burst with gapMax≈0 + decMs high = browser can't keep up; a burst
     //            with gapMax in the seconds = frames batched upstream.
     gapMax: 0, decMs: 0, lastArrivalAt: 0,
+    // Net WebCodecs VideoFrame balance (created minus closed). A VideoFrame is
+    // GPU-backed and MUST be closed; if this climbs over time it is a frame leak
+    // (the prime suspect for a Tesla resource-watchdog tab suspend/kill). Stays
+    // ~0 in steady state; surfaced as `vf=` in the ?debug line.
+    vfLive: 0,
 };
 
 // Diagnostic flag (?webcodec=1): force WebCodecs and DISABLE the Broadway
@@ -148,6 +157,20 @@ const SUSPEND_THRESHOLD = 8000;
 // any accumulated display latency.
 const SUSPEND_RESUME_MAX_STRIKES = 2;
 
+// Skip-to-latest after a suspension. The phone NEVER flow-controls the browser
+// (MediaSocketServer.send is fire-and-forget — confirmed in the Android source),
+// so a worker freeze leaves a backlog of stale frames piled in the phone's WS
+// out-queue + TCP buffers. Plainly re-priming REPLAYS that backlog: the worker
+// decodes+draws seconds of stale video (a visible fast-forward on a fast decoder,
+// and permanent lag on a decode-bound MCU that can't outrun the live 30 fps).
+// The backlog carries periodic IDRs, so an awaitingKeyframe gate alone clears on
+// the first stale IDR and replays the rest. Instead we DROP every arriving frame
+// while they stream back-to-back (the backlog drains far faster than live), then
+// resume the moment arrivals slow to the live cadence and pull one fresh keyframe.
+const SKIP_LIVE_GAP_MS = 25;     // inter-arrival gap meaning "caught up to live" (live ≈ 33 ms @30 fps; backlog ≈ sub-10 ms)
+const SKIP_MIN_DROPPED = 5;      // require a short back-to-back burst before trusting a live-gap (ignore a lone first frame)
+const SKIP_MAX_MS = 2000;        // safety cap: never drop longer than this, even if the cadence never settles
+
 // The phone re-randomises the WebSocket port on every service start; the stable
 // HTTP discovery endpoint is served on this fixed port range.
 const DISCOVERY_PORT_BASE = 8081;
@@ -225,6 +248,7 @@ function updateFrameCounter() {
             decMs: m.decMs,
             bwSwitches: m.bwSwitches || 0,
             bwReason: m.bwReason || '',
+            vfLive: m.vfLive,
         }});
     } catch (e) { /* metrics must never break the stream */ }
     m.rxFrames = 0; m.rxBytes = 0; m.decOut = 0; m.rendered = 0;
@@ -273,6 +297,7 @@ function drawImageToCanvas(image) {
 
     if (image.close) {
         image.close();
+        m.vfLive--;
     }
 }
 
@@ -350,6 +375,7 @@ function createVideoDecoder() {
     decoder = new VideoDecoder({
         output: (frame) => {
             m.decOut++;
+            m.vfLive++;   // GPU-backed; must be closed in drawImageToCanvas/reset
             pendingFrames.push(frame);
             if (underflow) {
                 renderFrame();
@@ -439,7 +465,16 @@ async function renderFrame() {
         return;
     }
     const frame = pendingFrames.shift();
-    drawImageToCanvas(frame);
+    try {
+        drawImageToCanvas(frame);
+    } catch (e) {
+        // A WebGL throw (e.g. context lost under memory pressure) must NOT wedge
+        // the drain loop: that would stop renderFrame from running while the
+        // decoder keeps producing VideoFrames, leaking GPU memory until the tab
+        // is killed. Close the frame here so it is never leaked, log once.
+        if (frame && frame.close) { try { frame.close(); m.vfLive--; } catch (e2) { /* already closed */ } }
+        console.error("drawImageToCanvas failed", e);
+    }
     m.rendered++;
     m.totalRendered++;
 
@@ -476,6 +511,29 @@ function separateNalUnits(event){
 
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
+    // Skip-to-latest drain: after a suspension we drop the stale backlog while it
+    // streams back-to-back (sub-SKIP_LIVE_GAP_MS apart). The instant arrivals slow
+    // to the live cadence we have caught up — stop dropping, force a keyframe and
+    // gate P-frames until it decodes (a live P referencing dropped frames would
+    // throw and demote to Broadway, so awaitingKeyframe here is load-bearing).
+    if (skippingStale && (unittype === 1 || unittype === 5)) {
+        const _n = Date.now();
+        const gap = lastSkipArrivalAt ? (_n - lastSkipArrivalAt) : 0;
+        lastSkipArrivalAt = _n;
+        const drainedToLive = skipStaleDropped >= SKIP_MIN_DROPPED && gap >= SKIP_LIVE_GAP_MS;
+        const capped = (_n - skipStaleStartAt) > SKIP_MAX_MS;
+        if (!drainedToLive && !capped) {
+            skipStaleDropped++;
+            return; // drop this stale backlog frame — do NOT decode or count it
+        }
+        skippingStale = false;
+        awaitingKeyframe = true;
+        debugLog('skip-to-latest: dropped ' + skipStaleDropped + ' stale frames ('
+            + (capped ? 'cap ' + SKIP_MAX_MS + 'ms' : 'live gap=' + gap + 'ms') + ') — resuming at live');
+        maybeRequestKeyframe();
+        // fall through: this first live frame is handled normally below (a P is
+        // held by awaitingKeyframe; an IDR decodes and clears the gate).
+    }
     // Arrival metric counted HERE, not in handleVideoMessage: messages whose
     // first NAL is SPS/PPS/filler reach the decodable AU through headerMagic →
     // videoMagic, and a first-NAL sniff at message level undercounts them
@@ -661,6 +719,22 @@ function resumeAfterSuspend(source) {
         lastheart = now;
         if (pongtimer) { clearTimeout(pongtimer); }
         pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
+        // Skip-to-latest: the stale backlog queued during the freeze is about to
+        // pour in on this same socket. Drop it instead of replaying it (see the
+        // SKIP_* constants). Close the stale decoded frames already buffered so the
+        // render loop can't show the stale tail, and arm the drain in videoMagic.
+        skippingStale = true;
+        skipStaleStartAt = now;
+        skipStaleDropped = 0;
+        lastSkipArrivalAt = now;
+        for (const frame of pendingFrames) {
+            if (frame && frame.close) { try { frame.close(); m.vfLive--; } catch (e) { /* already closed */ } }
+        }
+        pendingFrames = [];
+        underflow = true;
+        // The display latency we are about to discard must not be carried in the
+        // backlog gauge (totalRxFrames - totalRendered) as leftover lag.
+        m.totalRendered = m.totalRxFrames;
         try {
             // The phone's 3s video-off dead-man timer fired while we slept; START
             // re-enables video, REQUEST_KEYFRAME pulls a fresh IDR fast.
@@ -967,6 +1041,10 @@ function resetStreamStateForReconnect() {
     lastPongAt = 0;
     resumeStrikes = 0;
     lastResumeAt = 0;
+    // A real reconnect already discards the backlog via the socket drop; clear any
+    // in-progress skip-to-latest drain so it can't carry into the fresh stream.
+    skippingStale = false;
+    skipStaleDropped = 0;
 
     // Re-baseline the pipeline metrics: the reconnect just discarded everything
     // in flight (TCP buffers, decoder queue, pendingFrames), so carrying the old
@@ -983,7 +1061,7 @@ function resetStreamStateForReconnect() {
 
     for (const frame of pendingFrames) {
         if (frame && frame.close) {
-            try { frame.close(); } catch (e) { /* frame already closed */ }
+            try { frame.close(); m.vfLive--; } catch (e) { /* frame already closed */ }
         }
     }
     pendingFrames = [];
@@ -1094,6 +1172,10 @@ function handleControlMessage(event) {
     }
     const dat = new Uint8Array(event.data);
     if ((dat[4] & 0x1f) === 31) {
+        // Count the PONG here too: under B1 the sentinel returns on the control
+        // socket, not the video socket, so without this m.pongsRx never advances
+        // and the pongDef metric climbs ~1/s forever (a false "backlog").
+        m.pongsRx++;
         lastPongAt = Date.now();
         // Re-arm NO_DATA: the PONG is proof-of-liveness, just like a video frame.
         // Without this a video-only stall fires noPong() and reconnects even though
@@ -1609,13 +1691,16 @@ self.addEventListener('message', async (message) => {
         // Vider les tampons de frames en attente
         console.log("Clearing pending frames buffer, had " + pendingFrames.length + " frames");
         
-        // Nettoyer en conservant éventuellement la dernière frame pour éviter l'écran noir
+        // Nettoyer en conservant éventuellement la dernière frame pour éviter
+        // l'écran noir. Les frames qu'on jette sont des VideoFrame GPU : il faut
+        // les close() sinon elles fuient (sinon pendingFrames=[] perd la réf sans
+        // libérer le GPU).
         if (pendingFrames.length > 0) {
-            const lastFrame = pendingFrames[pendingFrames.length - 1];
-            pendingFrames = [];
-            if (lastFrame) {
-                pendingFrames.push(lastFrame);
+            const lastFrame = pendingFrames.pop();
+            for (const f of pendingFrames) {
+                if (f && f.close) { try { f.close(); m.vfLive--; } catch (e) { /* already closed */ } }
             }
+            pendingFrames = lastFrame ? [lastFrame] : [];
         } else {
             pendingFrames = [];
         }
