@@ -22,6 +22,9 @@ let pendingFrames = [],
     runtime = 0,
     frameCounter = 0,
     sps, decoder = null, socket, height, width, port, gl, heart = 0,
+    glCanvas = null, // OffscreenCanvas ref, kept so the GL context can be re-fetched after a loss
+    glContextLost = false, // True between webglcontextlost and webglcontextrestored — render is paused
+    glContextLostAt = 0, // Wall-clock of the last context loss (for the restore-latency log + watchdog)
     // B1 control channel: when the phone advertises controlChannelPort (build 66+),
     // a SECOND WebSocket carries PING/PONG + binary touch so they don't queue behind
     // bulk H.264 video. Both stay falsy/null on older phones ⇒ single-socket legacy path.
@@ -249,6 +252,7 @@ function updateFrameCounter() {
             bwSwitches: m.bwSwitches || 0,
             bwReason: m.bwReason || '',
             vfLive: m.vfLive,
+            glLost: glContextLost,
         }});
     } catch (e) { /* metrics must never break the stream */ }
     m.rxFrames = 0; m.rxBytes = 0; m.decOut = 0; m.rendered = 0;
@@ -387,13 +391,11 @@ function createVideoDecoder() {
     });
 }
 
-function initCanvas(canvas, forceBroadway) {
-
-    height = canvas.height;
-    width = canvas.width;
-
-    gl = canvas.getContext('webgl2');
-
+// Rebuild the entire WebGL pipeline (shaders, program, buffers, attribs) on the
+// CURRENT `gl`. Extracted from initCanvas so the webglcontextrestored handler can
+// re-run it on a fresh context after a loss (the shaders/buffers/textures of the
+// lost context are all invalid). Texture pool is cleared by the caller.
+function setupGlPipeline() {
     const vertexSource = `
         attribute vec2 a_position;
         attribute vec2 a_texCoord;
@@ -440,6 +442,54 @@ function initCanvas(canvas, forceBroadway) {
     gl.enableVertexAttribArray(texcoordLocation);
     gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
     gl.vertexAttribPointer(texcoordLocation, 2, gl.FLOAT, false, 0, 0);
+}
+
+// WebGL context loss recovery. The Tesla browser drops the GL context under GPU
+// memory pressure; WITHOUT preventDefault on the lost event the context is never
+// restored, so renderFrame's draws silently no-op forever (data/PONG keep
+// flowing, so no watchdog fires) and the picture freezes until the user reloads
+// — the exact "freezes, never recovers, reload fixes it, but the log looks
+// healthy" field symptom. preventDefault makes the loss recoverable; the restored
+// handler rebuilds the pipeline and pulls a fresh keyframe so video resumes.
+function installGlContextHandlers(canvas) {
+    glCanvas = canvas;
+    canvas.addEventListener('webglcontextlost', (e) => {
+        e.preventDefault();              // REQUIRED — without it the context never restores
+        glContextLost = true;
+        glContextLostAt = Date.now();
+        texturePool.length = 0;          // textures belong to the lost context
+        debugLog('WebGL context LOST — render paused, awaiting restore (reload-free recovery)');
+    }, false);
+    canvas.addEventListener('webglcontextrestored', () => {
+        try {
+            gl = canvas.getContext('webgl2');
+            setupGlPipeline();
+            glContextLost = false;
+            awaitingKeyframe = true;     // request a clean IDR; nothing valid to paint yet
+            maybeRequestKeyframe();
+            debugLog('WebGL context RESTORED after ' + (Date.now() - glContextLostAt) + 'ms — render resumed');
+        } catch (err) {
+            debugLog('WebGL restore failed: ' + (err && err.message ? err.message : err));
+        }
+    }, false);
+    // Dormant test hook (bench only — nothing in the field invokes it): lets the
+    // render repro force a context loss to validate the handlers. The extension
+    // ref is grabbed from the LIVE context and kept, because getExtension() on an
+    // already-lost context returns null (so restore must use the stored ref).
+    let __glLoseExt = null;
+    try { __glLoseExt = gl.getExtension('WEBGL_lose_context'); } catch (e) { /* unsupported */ }
+    self.__debugLoseContext = () => { try { if (__glLoseExt) __glLoseExt.loseContext(); } catch (e) { /* ignore */ } };
+    self.__debugRestoreContext = () => { try { if (__glLoseExt) __glLoseExt.restoreContext(); } catch (e) { /* ignore */ } };
+}
+
+function initCanvas(canvas, forceBroadway) {
+
+    height = canvas.height;
+    width = canvas.width;
+
+    gl = canvas.getContext('webgl2');
+    installGlContextHandlers(canvas);
+    setupGlPipeline();
 
     if(!forceBroadway) {
         try {
@@ -465,17 +515,30 @@ async function renderFrame() {
         return;
     }
     const frame = pendingFrames.shift();
-    try {
-        drawImageToCanvas(frame);
-    } catch (e) {
-        // A WebGL throw (e.g. context lost under memory pressure) must NOT wedge
-        // the drain loop: that would stop renderFrame from running while the
-        // decoder keeps producing VideoFrames, leaking GPU memory until the tab
-        // is killed. Close the frame here so it is never leaked, log once.
+    let painted = false;
+    if (glContextLost || (gl && gl.isContextLost && gl.isContextLost())) {
+        // Context is gone: drawing would silently no-op. Drop the frame (consume +
+        // close it so it never leaks) without counting it as painted, so `ren`
+        // truthfully reads 0 while the picture is frozen — the signal that used to
+        // be hidden by counting failed draws as rendered.
         if (frame && frame.close) { try { frame.close(); m.vfLive--; } catch (e2) { /* already closed */ } }
-        console.error("drawImageToCanvas failed", e);
+    } else {
+        try {
+            drawImageToCanvas(frame);
+            painted = true;
+        } catch (e) {
+            // A WebGL throw (e.g. context lost mid-draw) must NOT wedge the drain
+            // loop: that would stop renderFrame while the decoder keeps producing
+            // VideoFrames, leaking GPU memory until the tab is killed. Close the
+            // frame here so it is never leaked, log once.
+            if (frame && frame.close) { try { frame.close(); m.vfLive--; } catch (e2) { /* already closed */ } }
+            console.error("drawImageToCanvas failed", e);
+        }
     }
-    m.rendered++;
+    // rendered = frames actually PAINTED (fps gauge stays honest when render dies);
+    // totalRendered = frames CONSUMED from the queue (backlog math — a dropped
+    // frame is consumed, so it counts here either way).
+    if (painted) { m.rendered++; }
     m.totalRendered++;
 
     if (pendingFrames.length < 5) {
@@ -792,6 +855,18 @@ function heartbeat() {
         }
     }
     lastHeartbeatAt = Date.now();
+
+    // Silent WebGL context loss: some browsers drop the context without firing the
+    // webglcontextlost event. Catch it here so the flag (and the log) reflect a
+    // frozen picture even when the event never came. Restore still depends on the
+    // browser firing webglcontextrestored; this only ensures detection + honest
+    // metrics (ren=0) instead of a silent freeze that reads healthy.
+    if (!glContextLost && gl && gl.isContextLost && gl.isContextLost()) {
+        glContextLost = true;
+        glContextLostAt = Date.now();
+        texturePool.length = 0;
+        debugLog('WebGL context LOST (silent, no event) — render paused, awaiting restore');
+    }
 
     // Dead control channel: the phone replies to every PING with a PONG sentinel
     // (unittype 31). lastPongAt is updated only by that sentinel, never by video
