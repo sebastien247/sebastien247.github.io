@@ -572,6 +572,31 @@ function separateNalUnits(event){
         .map(dat => Uint8Array.from(dat));
 }
 
+/**
+ * Promote the connection overlay to stage 3 and dismiss it — fired ONCE, the
+ * first time an IDR keyframe is actually handed to a decoder. This lives here
+ * (not in handleVideoMessage) on purpose: a message-level first-NAL sniff misses
+ * the keyframe whenever the encoder packs SPS/PPS/AUD ahead of the IDR in the
+ * SAME WebSocket message (observed on Redmi/PixelOS/LineageOS MediaCodec). Such a
+ * message reaches the IDR through separateNalUnits→headerMagic→videoMagic, so
+ * firing from videoMagic covers BOTH framings (IDR-as-own-message and SPS-led
+ * keyframe) — the same blind spot the rx metric was moved here to fix (see the
+ * "rx=0 while dec=30" note above).
+ */
+function notifyFirstVideoFrame() {
+    if (firstVideoFrameReceived) return;
+    firstVideoFrameReceived = true;
+    console.log("First IDR keyframe decoded, notifying main thread");
+    debugLog('stream live — first IDR keyframe decoded');
+    self.postMessage({
+        connectionProgress: {
+            step: 3,
+            message: '3/3 - First frame received!'
+        }
+    });
+    self.postMessage({videoFrameReceived: true});
+}
+
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
     // Skip-to-latest drain: after a suspension we drop the stale backlog while it
@@ -653,6 +678,7 @@ function videoMagic(dat){
             return;
         }
         let data = appendByteArray(sps, dat);
+        let idrDecoded = false;
         if(decoder !== null) {
             if (decoder.state === 'closed') {
                 switchToBroadway('decoder-closed-IDR');
@@ -671,6 +697,7 @@ function videoMagic(dat){
                     decoder.decode(chunk);
                     // First key frame after (re)configure decoded: P-frames may flow.
                     awaitingKeyframe = false;
+                    idrDecoded = true;
                 } catch (e) {
                     console.error("Video decoder error", e);
                     switchToBroadway('decode-threw-IDR: ' + (e && e.message ? e.message : e));
@@ -680,7 +707,13 @@ function videoMagic(dat){
 
         if(broadwayDecoder !== null) {
             broadwayDecoder.decode(data)
+            idrDecoded = true;
         }
+        // Dismiss the waiting overlay only on a successfully decoded IDR (never a
+        // P-frame, which decodes green without a preceding keyframe). Fired here
+        // so it works regardless of whether the IDR arrived as its own message or
+        // wrapped behind SPS/PPS in a single message — see notifyFirstVideoFrame.
+        if (idrDecoded) notifyFirstVideoFrame();
         m.decMs += Date.now() - _dt0;
     }
 }
@@ -974,24 +1007,9 @@ function handleVideoMessage(dat){
     if (unittype === 1 || unittype === 5) {
         lastFrameAt = Date.now();
         videoMagic(dat);
-
-        // Dismiss the waiting overlay only on a real IDR keyframe (unittype 5),
-        // never on a P-frame: a P-frame with no preceding keyframe decodes to a
-        // green/corrupt image that must not be shown to the user as "ready".
-        if (unittype === 5 && !firstVideoFrameReceived) {
-            firstVideoFrameReceived = true;
-            console.log("First IDR keyframe decoded, notifying main thread");
-            debugLog('stream live — first IDR keyframe decoded');
-
-            // Send progress update and videoFrameReceived notification
-            self.postMessage({
-                connectionProgress: {
-                    step: 3,
-                    message: '3/3 - First frame received!'
-                }
-            });
-            self.postMessage({videoFrameReceived: true});
-        }
+        // Stage 2→3 promotion now fires from videoMagic on a decoded IDR, so it
+        // also covers the else-branch below (a keyframe whose message is led by
+        // SPS/PPS/AUD reaches the IDR via separateNalUnits→headerMagic→videoMagic).
     }
     else
         separateNalUnits(dat).forEach(headerMagic)
