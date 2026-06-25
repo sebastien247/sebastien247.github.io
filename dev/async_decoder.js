@@ -45,7 +45,22 @@ let pendingFrames = [],
     lastSkipArrivalAt = 0, // Wall-clock of the last frame seen while skipping (live-cadence probe)
     connectTimeout = null, // Watchdog handle for a WebSocket stuck in CONNECTING
     isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
-    firstVideoFrameReceived = false; // Flag to track first video frame
+    firstVideoFrameReceived = false, // Flag to track first video frame
+    // Video codec of the live stream, sniffed from the first parameter-set NAL
+    // (H.264 SPS 0x67 / PPS 0x68 vs H.265 VPS/SPS/PPS types 32/33/34, which can
+    // never collide). Null until detected. The phone advertises a codec via the
+    // developer setting, but AA may down-negotiate, so the WIRE is authoritative.
+    streamCodec = null,
+    // H.265 parameter sets (kept separate; concatenated into `sps` as the IDR
+    // prelude VPS+SPS+PPS so a keyframe access unit is self-contained).
+    h265vps = null, h265sps = null, h265pps = null,
+    // True once HEVC is proven unsupported on this browser/head unit. There is NO
+    // software HEVC path (Broadway is H.264-only), so we stop decoding and surface
+    // a clear error rather than loop or render garbage.
+    h265Unsupported = false, h265RecoverAt = 0, h265RecoverCount = 0,
+    // Codec string the H.265 decoder is currently configured for — skips redundant
+    // per-GOP reconfigure (the param sets repeat each GOP).
+    h265ConfiguredCodec = null;
 
 const texturePool = [];
 
@@ -223,6 +238,169 @@ function appendByteArray(buffer1, buffer2) {
     return tmp;
 }
 
+// ========== Codec Detection & H.265 Support ==========
+
+/** Two-hex-digit string for a byte, e.g. 0x9 -> "09". */
+function hexByte(b) {
+    const h = (b & 0xff).toString(16);
+    return h.length < 2 ? '0' + h : h;
+}
+
+/**
+ * Sniff the codec from a single Annex-B NAL (start code + header). The parameter
+ * sets are unambiguous between the two codecs:
+ *   H.264  SPS = type 7 (0x67), PPS = type 8 (0x68)   — nal_unit_type = byte & 0x1f
+ *   H.265  VPS = 32, SPS = 33, PPS = 34               — nal_unit_type = (byte>>1) & 0x3f
+ * The H.265 param-set header bytes (0x40/0x42/0x44) never collide with the H.264
+ * ones, so the first param set we see decides the parser. Returns 'h264' | 'h265'
+ * | null (a VCL/other NAL we can't classify yet).
+ */
+function detectCodecFromNal(dat) {
+    if (!dat || dat.length < 5) return null;
+    const h265t = (dat[4] >> 1) & 0x3f;
+    if (h265t === 32 || h265t === 33 || h265t === 34) return 'h265'; // VPS/SPS/PPS
+    const h264t = dat[4] & 0x1f;
+    if (h264t === 7 || h264t === 8) return 'h264';                   // SPS/PPS
+    return null;
+}
+
+/** H.265 nal_unit_type from an Annex-B NAL (header at dat[4..5]). */
+function h265NalType(dat) { return (dat[4] >> 1) & 0x3f; }
+
+/**
+ * Strip H.264/H.265 emulation-prevention bytes (00 00 03 -> 00 00) from a NAL's
+ * RBSP, starting AFTER the start code + NAL header. Needed before bit-parsing the
+ * SPS, where 00 00 00 runs in the profile_tier_level can carry an inserted 0x03.
+ */
+function rbspNoEmulation(dat, startOffset) {
+    const out = [];
+    let zeros = 0;
+    for (let i = startOffset; i < dat.length; i++) {
+        const b = dat[i];
+        if (zeros >= 2 && b === 0x03) { zeros = 0; continue; } // drop emulation byte
+        out.push(b);
+        zeros = (b === 0x00) ? zeros + 1 : 0;
+    }
+    return out;
+}
+
+/**
+ * Derive the WebCodecs HEVC codec string (e.g. "hev1.1.6.L93.B0") from an H.265
+ * SPS NAL, per ISO 14496-15. Layout after the 2-byte NAL header:
+ *   sps_video_parameter_set_id u(4) | sps_max_sub_layers_minus1 u(3) | nesting u(1)  [1 byte]
+ *   profile_tier_level():
+ *     general_profile_space u(2) | general_tier_flag u(1) | general_profile_idc u(5) [1 byte]
+ *     general_profile_compatibility_flag[32]                                          [4 bytes]
+ *     constraint indicator flags                                                      [6 bytes]
+ *     general_level_idc u(8)                                                          [1 byte]
+ * The compatibility flags are emitted reversed-bit-order; constraint trailing zero
+ * bytes are dropped. Falls back to a generic Main/L3.1 string if the SPS is short.
+ */
+function hevcCodecString(spsNal) {
+    try {
+        const r = rbspNoEmulation(spsNal, 6); // skip 4-byte start code + 2-byte NAL header
+        const ptl = 1;                        // after the vps_id/sub_layers/nesting byte
+        const b0 = r[ptl];
+        const profileSpace = (b0 >> 6) & 0x3;
+        const tier = (b0 >> 5) & 0x1;
+        const profileIdc = b0 & 0x1f;
+        const compat = ((r[ptl + 1] << 24) | (r[ptl + 2] << 16) | (r[ptl + 3] << 8) | r[ptl + 4]) >>> 0;
+        const constraint = r.slice(ptl + 5, ptl + 11);
+        const levelIdc = r[ptl + 11];
+        if (levelIdc === undefined) throw new Error('SPS too short');
+
+        const spacePrefix = profileSpace === 0 ? '' : String.fromCharCode('A'.charCodeAt(0) + profileSpace - 1);
+        const A = spacePrefix + profileIdc;
+        let rev = 0;
+        for (let i = 0; i < 32; i++) { rev = (rev << 1) | ((compat >>> i) & 1); }
+        const B = (rev >>> 0).toString(16).toUpperCase();
+        const C = (tier ? 'H' : 'L') + levelIdc;
+        const d = constraint.map(hexByte);
+        while (d.length && d[d.length - 1] === '00') d.pop();
+        const D = d.map((x) => x.toUpperCase()).join('.');
+        return 'hev1.' + A + '.' + B + '.' + C + (D ? '.' + D : '');
+    } catch (e) {
+        debugLog('hevcCodecString parse failed (' + (e && e.message ? e.message : e) + '), using generic Main/L3.1');
+        return 'hev1.1.6.L93.B0';
+    }
+}
+
+/**
+ * Build the VideoDecoder configure() argument for the current stream. Unifies the
+ * three former inline avc1 sites (headerMagic, RESIZE, default) and adds the H.265
+ * branch. H.264 string is byte-identical to the previous inline logic.
+ */
+function buildCodecConfig() {
+    const cfg = { codedHeight: height, codedWidth: width };
+    if (streamCodec === 'h265' && h265sps) {
+        cfg.codec = hevcCodecString(h265sps);
+    } else if (sps && sps.length > 7) {
+        cfg.codec = 'avc1.' + hexByte(sps[5]) + hexByte(sps[6]) + hexByte(sps[7]);
+    } else {
+        cfg.codec = 'avc1.42002a';
+    }
+    return cfg;
+}
+
+/**
+ * Configure the decoder for H.265. isConfigSupported() gives a DETERMINISTIC
+ * answer to the on-car crux ("does this head unit's Chromium decode HEVC?"): if it
+ * is false we surface a clear error and stop, instead of feeding NAL into a decoder
+ * that will async-error forever (Broadway can't take over — it is H.264-only).
+ */
+async function configureH265() {
+    if (decoder === null || !h265sps || h265Unsupported) return;
+    const cfg = buildCodecConfig();
+    // A real AA stream re-sends VPS/SPS/PPS each GOP (and our keyframe-loop test
+    // every frame). Skip the (async) reconfigure when the decoder is already
+    // configured for this exact codec string — avoids per-GOP churn + a needless
+    // awaitingKeyframe re-arm. Dimension changes go through the RESIZE path.
+    if (decoder.state === 'configured' && h265ConfiguredCodec === cfg.codec) return;
+    try {
+        if (typeof VideoDecoder !== 'undefined' && VideoDecoder.isConfigSupported) {
+            const support = await VideoDecoder.isConfigSupported(cfg);
+            if (!support || !support.supported) {
+                h265Unsupported = true;
+                debugLog('HEVC unsupported here: ' + cfg.codec);
+                self.postMessage({ error: 'HEVC (H.265) is not supported by this browser/head unit. Switch the developer Video codec setting back to H.264.' });
+                return;
+            }
+        }
+        if (decoder.state !== 'closed') {
+            decoder.configure(cfg);
+            h265ConfiguredCodec = cfg.codec;
+            awaitingKeyframe = true;
+            debugLog('H265 decoder configured: ' + cfg.codec);
+        }
+    } catch (e) {
+        debugLog('H265 configure threw: ' + (e && e.message ? e.message : e));
+        switchToBroadway('h265-configure-threw: ' + (e && e.message ? e.message : e));
+    }
+}
+
+/**
+ * H.265 per-NAL handler (mirror of headerMagic for H.264). VPS/SPS/PPS are stored
+ * and concatenated into `sps` (the IDR prelude). Everything else (VCL slices, SEI,
+ * AUD) flows to videoMagic, which classifies key vs delta by HEVC nal_unit_type.
+ */
+function headerMagicH265(dat) {
+    const t = h265NalType(dat);
+    if (t === 32) { h265vps = dat; rebuildH265Prelude(); return; }       // VPS
+    if (t === 33) { h265sps = dat; rebuildH265Prelude(); configureH265(); return; } // SPS
+    if (t === 34) { h265pps = dat; rebuildH265Prelude(); return; }       // PPS
+    videoMagic(dat);
+}
+
+/** Concatenate the latest VPS+SPS+PPS into `sps`, prepended to each IDR. */
+function rebuildH265Prelude() {
+    let blob = null;
+    for (const ps of [h265vps, h265sps, h265pps]) {
+        if (!ps) continue;
+        blob = blob === null ? ps : appendByteArray(blob, ps);
+    }
+    if (blob !== null) sps = blob;
+}
+
 // ========== Frame Functions ==========
 
 function updateFrameCounter() {
@@ -322,6 +500,37 @@ function createShader(gl, type, source) {
 // fallback is one-way and sticky until reload — see #latency-regression-260).
 function switchToBroadway(reason) {
     const why = reason || 'unspecified';
+
+    // H.265 has NO software fallback — Broadway decodes H.264 only. Demoting would
+    // feed HEVC NAL to an H.264 decoder and paint garbage. Recreate the hardware
+    // decoder and pull a keyframe; if it keeps failing (HEVC truly unsupported on
+    // this head unit), give up after a few tries and surface a clear error so the
+    // tester flips the codec back to H.264 — never silently render trash.
+    if (streamCodec === 'h265') {
+        const now = Date.now();
+        if (now - h265RecoverAt > 10000) { h265RecoverCount = 0; }
+        h265RecoverAt = now;
+        h265RecoverCount++;
+        if (h265RecoverCount <= 4 && !h265Unsupported) {
+            debugLog('h265-recover #' + h265RecoverCount + ': ' + why);
+            m.bwReason = 'h265-recover: ' + why;
+            try {
+                if (decoder && decoder.state !== 'closed') { try { decoder.close(); } catch (e) { /* already closed */ } }
+                createVideoDecoder();
+                configureH265();
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.sendObject({action: "REQUEST_KEYFRAME"});
+                }
+            } catch (e) {
+                debugLog('h265-recover failed: ' + (e && e.message ? e.message : e));
+            }
+        } else {
+            h265Unsupported = true;
+            debugLog('h265-recover storm — declaring HEVC unsupported');
+            self.postMessage({ error: 'HEVC (H.265) failed to decode on this browser/head unit. Switch the developer Video codec setting back to H.264.' });
+        }
+        return;
+    }
 
     // ?webcodec=1: never demote to software. Recreate the hardware decoder and
     // pull a fresh keyframe instead. A storm guard (>8 recoveries / 10 s) lets a
@@ -598,13 +807,28 @@ function notifyFirstVideoFrame() {
 }
 
 function videoMagic(dat){
-    let unittype = (dat[4] & 0x1f);
+    // Classify this NAL as keyframe / delta independent of codec. For H.264 these
+    // map exactly to the legacy unittype===5 / ===1 checks (behaviour unchanged).
+    // For H.265, key = IRAP slices (BLA/IDR/CRA, types 16..23) and delta = other
+    // VCL slices (types 0..15); non-VCL NALs (>31: SEI/AUD/EOS/FD) decode nothing.
+    let isKey, isDelta;
+    if (streamCodec === 'h265') {
+        if (h265Unsupported) return; // no software HEVC fallback — stop, error already surfaced
+        const t = h265NalType(dat);
+        if (t > 31) return;          // non-VCL — handled in headerMagicH265 or skipped
+        isKey = (t >= 16 && t <= 23);
+        isDelta = !isKey;
+    } else {
+        const unittype = (dat[4] & 0x1f);
+        isKey = (unittype === 5);
+        isDelta = (unittype === 1);
+    }
     // Skip-to-latest drain: after a suspension we drop the stale backlog while it
     // streams back-to-back (sub-SKIP_LIVE_GAP_MS apart). The instant arrivals slow
     // to the live cadence we have caught up — stop dropping, force a keyframe and
     // gate P-frames until it decodes (a live P referencing dropped frames would
     // throw and demote to Broadway, so awaitingKeyframe here is load-bearing).
-    if (skippingStale && (unittype === 1 || unittype === 5)) {
+    if (skippingStale && (isDelta || isKey)) {
         const _n = Date.now();
         const gap = lastSkipArrivalAt ? (_n - lastSkipArrivalAt) : 0;
         lastSkipArrivalAt = _n;
@@ -626,7 +850,7 @@ function videoMagic(dat){
     // first NAL is SPS/PPS/filler reach the decodable AU through headerMagic →
     // videoMagic, and a first-NAL sniff at message level undercounts them
     // (observed rx=0 while dec=30 in the bench repro).
-    if (unittype === 1 || unittype === 5) {
+    if (isDelta || isKey) {
         const _now = Date.now();
         if (m.lastArrivalAt !== 0) {
             const gap = _now - m.lastArrivalAt;
@@ -637,7 +861,7 @@ function videoMagic(dat){
         m.totalRxFrames++;
     }
     const _dt0 = Date.now();
-    if (unittype === 1) {
+    if (isDelta) {
         if(decoder !== null) {
             if (decoder.state === 'closed') {
                 switchToBroadway('decoder-closed-P');
@@ -669,7 +893,7 @@ function videoMagic(dat){
         return;
     }
 
-    if (unittype === 5) {
+    if (isKey) {
         // An IDR cannot be decoded without SPS/PPS; after a reconnect sps is
         // cleared and repopulated by the resent codec config (#80). If the
         // keyframe somehow arrives first, drop it rather than crash on
@@ -719,22 +943,21 @@ function videoMagic(dat){
 }
 
 function headerMagic(dat) {
+    // Detect the codec from the first parameter-set NAL we see (sticky thereafter).
+    if (streamCodec === null) {
+        const detected = detectCodecFromNal(dat);
+        if (detected) {
+            streamCodec = detected;
+            debugLog('stream codec detected from wire: ' + detected);
+        }
+    }
+    if (streamCodec === 'h265') { headerMagicH265(dat); return; }
+
     let unittype = (dat[4] & 0x1f);
 
     if (unittype === 7) {
-        let config = {
-            codec: "avc1.",
-            codedHeight: height,
-            codedWidth: width,
-        }
-        for (let i = 5; i < 8; ++i) {
-            var h = dat[i].toString(16);
-            if (h.length < 2) {
-                h = '0' + h;
-            }
-            config.codec += h;
-        }
         sps = dat;
+        const config = buildCodecConfig(); // "avc1." + hex(sps[5..7]) — unchanged
         if(decoder !== null) {
             try {
                 decoder.configure(config);
@@ -1166,6 +1389,12 @@ function resetStreamStateForReconnect() {
     // The Broadway fallback has no VideoDecoder to recreate — it re-syncs on the
     // next SPS+IDR once pendingFrames and sps are cleared.
     sps = undefined;
+    // Re-detect the codec from the wire after a reconnect: the developer codec
+    // setting could have changed (its toggle restarts the phone service, which is
+    // what triggers this reconnect), and the phone re-sends fresh parameter sets.
+    streamCodec = null;
+    h265vps = null; h265sps = null; h265pps = null;
+    h265Unsupported = false; h265RecoverCount = 0; h265ConfiguredCodec = null;
     if (broadwayDecoder === null) {
         if (decoder && decoder.state !== 'closed') {
             try { decoder.close(); } catch (e) { /* already closed */ }
@@ -1717,27 +1946,11 @@ self.addEventListener('message', async (message) => {
         // Mettre à jour la configuration du décodeur si nous utilisons WebCodec
         if(decoder !== null && decoder.state !== 'closed') {
             try {
-                // Reconfigurer le décodeur avec les nouvelles dimensions
-                let config = {
-                    codec: "avc1.",
-                    codedHeight: height,
-                    codedWidth: width,
-                };
-                
-                // Ajouter le codec spécifique si nous l'avons déjà
-                if (sps && sps.length > 7) {
-                    for (let i = 5; i < 8; ++i) {
-                        var h = sps[i].toString(16);
-                        if (h.length < 2) {
-                            h = '0' + h;
-                        }
-                        config.codec += h;
-                    }
-                } else {
-                    // Codec par défaut si on n'a pas encore reçu de SPS
-                    config.codec += "42002a";
-                }
-                
+                // Reconfigure with the new dimensions. buildCodecConfig() picks the
+                // codec string from the current stream (avc1 from the H.264 SPS, or
+                // hev1 from the H.265 SPS), falling back to avc1.42002a pre-SPS.
+                const config = buildCodecConfig();
+
                 console.log("Reconfiguring decoder with:", config);
                 decoder.configure(config);
                 // Same contract as headerMagic: after configure() a key frame is
