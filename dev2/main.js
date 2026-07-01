@@ -1,0 +1,1511 @@
+// Cache-busting : lit le "?v=N" depuis l'URL de CE script (defini dans
+// index.html) et le propage au worker, qui le repropagera a ses importScripts.
+// => un seul endroit a bumper pour tout invalider : la version dans index.html.
+// Si le script est charge sans "?v=", ASSET_VERSION vaut "" (comportement
+// identique a avant : aucune regression).
+const ASSET_VERSION = (function () {
+    try {
+        const scriptSrc = document.currentScript && document.currentScript.src;
+        const v = scriptSrc ? new URL(scriptSrc).searchParams.get('v') : null;
+        return v ? ('?v=' + v) : '';
+    } catch (e) {
+        return '';
+    }
+})();
+const demuxDecodeWorker = new Worker("./async_decoder.js" + ASSET_VERSION),
+    latestVersion = 2,
+    logElement = document.getElementById('log'),
+    warningElement = document.getElementById('warning'),
+    canvasElement = document.querySelector('canvas'),
+    bodyElement = document.querySelector('body'),
+    waitingMessageElement = document.getElementById('waiting-message'),
+    errorOverlay = document.getElementById('error-overlay'),
+    errorMessage = document.getElementById('error-message'),
+    supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
+    DEFAULT_HTTPS_PORT = 8081,
+    MAX_PORT_RETRIES = 5;
+
+let zoom = Math.max(1, window.innerHeight / 1080),
+    appVersion = 0,
+    offscreen = null,
+    forcedRefreshCounter = 0,
+    debug = false,
+    usebt = true,
+    width,
+    height,
+    widthMargin,
+    heightMargin,
+    controller,
+    socket,
+    port,
+    drageventCounter=0,
+    videoFrameReceived = false,
+    timeoutId,
+    isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
+    step2TimeoutId = null,
+    isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
+
+canvasElement.style.display = "none";
+
+/**
+ * 🚨 NOUVEAU: Affiche un message d'erreur dans l'overlay permanent
+ * @param {string} message - Le message à afficher
+ */
+function showErrorOverlay(message) {
+    if (errorOverlay && errorMessage) {
+        errorMessage.textContent = message;
+        errorOverlay.style.display = "flex";
+    } else {
+        console.error('Error overlay elements not found');
+    }
+}
+
+/**
+ * 🚨 NOUVEAU: Cache l'overlay d'erreur
+ */
+function hideErrorOverlay() {
+    if (errorOverlay) {
+        errorOverlay.style.display = "none";
+    }
+}
+
+/**
+ * Vérifie si le serveur est accessible
+ * @returns {Promise<boolean>} True si le serveur est accessible
+ */
+async function checkServerReachability() {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+        // Essayer de ping le serveur principal
+        const response = await fetch(`https://app.taada.top`, {
+            method: 'HEAD',
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+        return response.ok;
+    } catch (error) {
+        console.log('Server not reachable:', error.message);
+        return false;
+    }
+}
+
+/**
+ * Attend que la connexion internet revienne
+ * @returns {Promise<void>} Se résout quand la connexion est rétablie
+ */
+function waitForConnection() {
+    return new Promise((resolve) => {
+        console.log('Waiting for internet connection...');
+        showErrorOverlay("No internet connection. Waiting to reconnect...");
+
+        let checkInterval;
+        let isChecking = false;
+
+        // Fonction pour vérifier la connexion
+        const checkConnection = async () => {
+            // Éviter les vérifications concurrentes
+            if (isChecking) return;
+            isChecking = true;
+
+            console.log('Checking connection... navigator.onLine =', navigator.onLine);
+
+            if (navigator.onLine) {
+                const isReachable = await checkServerReachability();
+                console.log('Server reachable:', isReachable);
+
+                if (isReachable) {
+                    // Connexion rétablie !
+                    if (checkInterval) {
+                        clearInterval(checkInterval);
+                    }
+                    window.removeEventListener('online', checkConnection);
+                    showErrorOverlay("Connection restored. Reloading...");
+                    resolve();
+                }
+            }
+
+            isChecking = false;
+        };
+
+        // Vérifier périodiquement toutes les 2 secondes
+        checkInterval = setInterval(checkConnection, 2000);
+
+        // Écouter aussi l'événement 'online' du navigateur pour réagir rapidement
+        window.addEventListener('online', checkConnection);
+
+        // Faire une première vérification immédiate
+        checkConnection();
+    });
+}
+
+/**
+ * Recharge la page seulement quand internet est disponible
+ * Attend si nécessaire que la connexion revienne
+ * @param {string} reason - Raison du rechargement (pour les logs)
+ */
+async function reloadWhenOnline(reason = 'Unknown') {
+    console.log(`Reload requested: ${reason}`);
+
+    // 🚨 Marquer qu'on est en attente de reload
+    isWaitingForReload = true;
+
+    // Vérifier d'abord si nous sommes en ligne
+    if (navigator.onLine) {
+        // Faire un ping réel au serveur pour confirmer
+        const isReachable = await checkServerReachability();
+
+        if (isReachable) {
+            console.log('Internet available, reloading page');
+            location.reload();
+            return;
+        }
+    }
+
+    // Pas de connexion ou serveur injoignable, attendre
+    console.log('No connection or server unreachable, waiting...');
+    await waitForConnection();
+
+    // Une fois la connexion rétablie, attendre 1 seconde puis recharger
+    setTimeout(() => {
+        console.log('Connection restored, reloading page');
+        location.reload();
+    }, 1000);
+}
+
+/**
+ * Updates the connection progress indicator with step-by-step status
+ * @param {number} step - Current step (1, 2, or 3)
+ * @param {string} message - Status message to display
+ */
+function updateConnectionProgress(step, message) {
+    const statusText = document.getElementById('connection-status-text');
+    const stepElements = {
+        1: document.getElementById('step-1'),
+        2: document.getElementById('step-2'),
+        3: document.getElementById('step-3')
+    };
+
+    if (statusText) {
+        statusText.textContent = message;
+    }
+
+    // Update step indicators
+    for (let i = 1; i <= 3; i++) {
+        const stepElement = stepElements[i];
+        if (!stepElement) continue;
+
+        if (i < step) {
+            // Previous steps are completed
+            stepElement.classList.remove('active');
+            stepElement.classList.add('completed');
+        } else if (i === step) {
+            // Current step is active
+            stepElement.classList.remove('completed');
+            stepElement.classList.add('active');
+        } else {
+            // Future steps are inactive
+            stepElement.classList.remove('active', 'completed');
+        }
+    }
+
+    // Troubleshoot message logic for step 2
+    const troubleshootEl = document.getElementById('troubleshoot-message');
+    if (troubleshootEl) {
+        if (step === 2) {
+            if (step2TimeoutId) clearTimeout(step2TimeoutId);
+            troubleshootEl.style.display = 'none';
+            step2TimeoutId = setTimeout(() => {
+                troubleshootEl.style.display = 'block';
+            }, 20000);
+        } else {
+            if (step2TimeoutId) {
+                clearTimeout(step2TimeoutId);
+                step2TimeoutId = null;
+            }
+            troubleshootEl.style.display = 'none';
+        }
+    }
+
+}
+
+/**
+ * Converts screen coordinates to canvas coordinates, accounting for canvas position, scaling,
+ * and image margins within the canvas
+ * @param {number} screenX - The X coordinate on the screen
+ * @param {number} screenY - The Y coordinate on the screen
+ * @returns {{x: number, y: number}} The converted coordinates relative to the canvas
+ */
+function convertToCanvasCoordinates(screenX, screenY) {
+    // Get the canvas's bounding rectangle, which includes any CSS transformations
+    const canvasRect = canvasElement.getBoundingClientRect();
+    
+    // Calculate the position relative to the canvas's top-left corner
+    const canvasRelativeX = screenX - canvasRect.left;
+    const canvasRelativeY = screenY - canvasRect.top;
+    
+    // Taille réelle de l'image (sans les marges internes du canvas)
+    const imageWidth = width - (widthMargin || 0);
+    const imageHeight = height - (heightMargin || 0);
+    
+    // Calculer les facteurs de zoom appliqués (même logique que updateCanvasSize)
+    const zoomFactorWidth = window.innerWidth / imageWidth;
+    const zoomFactorHeight = window.innerHeight / imageHeight;
+    const actualZoomFactor = Math.min(zoomFactorWidth, zoomFactorHeight);
+    
+    // Taille réelle de l'image affichée après zoom
+    const displayedImageWidth = imageWidth * actualZoomFactor;
+    const displayedImageHeight = imageHeight * actualZoomFactor;
+    
+    // Calculer les marges d'affichage (bandes noires) autour de l'image
+    const displayMarginX = (canvasRect.width - displayedImageWidth) / 2;
+    const displayMarginY = (canvasRect.height - displayedImageHeight) / 2;
+    
+    // Position relative à l'image affichée (en excluant les marges d'affichage)
+    const imageRelativeX = canvasRelativeX - displayMarginX;
+    const imageRelativeY = canvasRelativeY - displayMarginY;
+    
+    // Calculer les pourcentages par rapport à la taille de l'image affichée
+    const percentX = imageRelativeX / displayedImageWidth;
+    const percentY = imageRelativeY / displayedImageHeight;
+    
+    // Appliquer les pourcentages aux dimensions réelles du canvas et ajouter l'offset des marges internes
+    // La marge interne est divisée par 2 car elle est répartie des deux côtés
+    const x = Math.floor((widthMargin || 0) / 2 + (percentX * imageWidth));
+    const y = Math.floor((heightMargin || 0) / 2 + (percentY * imageHeight));
+    
+    return { x, y };
+}
+
+function handlepossition(possition){
+    demuxDecodeWorker.postMessage({
+        action: "GPS",
+        accuracy: possition.coords.accuracy,
+        latitude: possition.coords.latitude,
+        longitude: possition.coords.longitude,
+        altitude: possition.coords.altitude,
+        heading: possition.coords.heading,
+        speed: possition.coords.speed
+    });
+}
+
+function abortFetching() {
+    console.log('Now aborting');
+    if (controller) {
+        controller.abort();
+    }
+}
+
+/**
+ * Essaie de se connecter à un port spécifique
+ * @param {number} port - Le port à tester
+ * @param {AbortController} controller - Le contrôleur d'abandon
+ * @returns {Promise} Promise qui se résout avec les données ou se rejette
+ */
+async function tryPort(port, controller) {
+    const urlToFetch = `https://taada.top:${port}/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
+    
+    console.log(`Trying port ${port}...`);
+    
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            reject(new Error(`Timeout on port ${port}`));
+        }, 3000); // Timeout plus court par port
+        
+        fetch(urlToFetch, {method: 'get', signal: controller.signal})
+            .then(response => {
+                clearTimeout(timeout);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status} on port ${port}`);
+                }
+                return response.text();
+            })
+            .then(data => {
+                if (isJson(data)) {
+                    console.log(`Successfully connected to port ${port}`);
+                    resolve({data, port});
+                } else {
+                    reject(new Error(`Invalid response from port ${port}`));
+                }
+            })
+            .catch(error => {
+                clearTimeout(timeout);
+                reject(error);
+            });
+    });
+}
+
+/**
+ * Teste plusieurs ports successivement jusqu'à trouver un serveur
+ */
+async function checkPhone() {
+    console.log('Starting server discovery...');
+
+    // Step 1/3: Server Discovery
+    updateConnectionProgress(1, '1/3 - Discovering server...');
+
+    controller = new AbortController();
+
+    try {
+        // Essayer chaque port successivement
+        for (let i = 0; i < MAX_PORT_RETRIES; i++) {
+            const port = DEFAULT_HTTPS_PORT + i;
+            
+            try {
+                const result = await tryPort(port, controller);
+                
+                // Vérifier si la page est cachée avant de traiter
+                if (document.hidden) {
+                    setTimeout(() => {
+                        checkPhone();
+                    }, 2000);
+                    return;
+                }
+                
+                // Serveur trouvé, traiter la réponse
+                const json = JSON.parse(result.data);
+
+                // Ajouter le port utilisé aux logs pour information
+                console.log(`Server found on port ${result.port}, processing response...`);
+
+                // Update progress: Server found, moving to next step
+                updateConnectionProgress(1, '1/3 - Server found!');
+
+                postWorkerMessages(json);
+                return; // Succès, arrêter la recherche
+                
+            } catch (error) {
+                console.log(`Port ${port} failed: ${error.message}`);
+                
+                // Continuer avec le port suivant
+                if (i === MAX_PORT_RETRIES - 1) {
+                    // C'était la dernière tentative
+                    throw new Error(`No server found after testing ports ${DEFAULT_HTTPS_PORT} to ${DEFAULT_HTTPS_PORT + MAX_PORT_RETRIES - 1}`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Server discovery failed:', error);
+        
+        // Afficher un message d'erreur à l'utilisateur
+        /*if (warningElement) {
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = "Unable to connect to server. Please check that TaaDa is running.";
+        }*/
+        
+        // Réessayer après un délai
+        setTimeout(() => {
+            /*if (warningElement) {
+                warningElement.style.display = "none";
+                logElement.style.display = "block";
+            }*/
+            checkPhone();
+        }, 5000);
+    }
+}
+
+function findGetParameter(parameterName) {
+    var result = null,
+        tmp = [];
+    location.search
+        .substring(1)
+        .split("&")
+        .forEach(function (item) {
+            tmp = item.split("=");
+            if (tmp[0] === parameterName) result = decodeURIComponent(tmp[1]);
+        });
+    return result;
+}
+
+/**
+ * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
+ */
+function updateCanvasSize() {
+    // Taille réelle de l'image dans le canvas (sans les marges)
+    const imageWidth = width - (widthMargin || 0);
+    const imageHeight = height - (heightMargin || 0);
+    
+    // Calculer les facteurs de zoom nécessaires pour chaque dimension
+    const zoomFactorWidth = window.innerWidth / imageWidth;
+    const zoomFactorHeight = window.innerHeight / imageHeight;
+    
+    // Choisir le facteur de zoom le plus petit pour que l'image soit entièrement visible
+    // (comportement "contain" - l'image remplit au maximum une dimension sans déborder)
+    if (zoomFactorWidth <= zoomFactorHeight) {
+        // On zoom en largeur : l'image remplira horizontalement, des bandes noires possibles verticalement
+        canvasElement.style.width = `${width * zoomFactorWidth}px`;
+        canvasElement.style.height = '';
+    } else {
+        // On zoom en hauteur : l'image remplira verticalement, des bandes noires possibles horizontalement
+        canvasElement.style.height = `${height * zoomFactorHeight}px`;
+        canvasElement.style.width = '';
+    }
+}
+
+function postWorkerMessages(json) {  
+    if (json.hasOwnProperty("resolutionChanged")) {
+        console.log("Resolution adjusted dynamically to " + json.width + "x" + json.height);
+        
+        // Ajuster le canvas sans recharger la page
+        width = json.width;
+        height = json.height;
+
+        widthMargin = json.widthMargin;
+        heightMargin = json.heightMargin;
+        
+        // Seul le worker peut mettre à jour le canvas après transferControlToOffscreen
+        // Envoyer les deux messages séparément pour plus de clarté
+        
+        // 1. Informer le worker de la nouvelle résolution du décodeur
+        demuxDecodeWorker.postMessage({
+            action: "RESIZE", 
+            width: width, 
+            height: height
+        });
+        
+        // 2. Demander une nouvelle keyframe pour obtenir la bonne résolution
+        demuxDecodeWorker.postMessage({
+            action: "CLEAR_BUFFERS"
+        });
+                
+        // Afficher un message temporaire
+        warningElement.style.display = "block";
+        logElement.style.display = "none";
+        warningElement.innerText = "Résolution ajustée à " + width + "x" + height;
+        setTimeout(function() {
+            warningElement.style.display = "none";
+            logElement.style.display = "block";
+        }, 3000);
+    }
+    if (json.hasOwnProperty("debug")) {
+        debug = json.debug;
+    }
+    if (json.hasOwnProperty("usebt")) {
+        usebt = json.usebt;
+    }
+    port = json.port;
+    // B1 control-channel discovery: a build-66+ phone advertises a SECOND
+    // WebSocket port dedicated to PING/PONG + touch, so those small control
+    // messages no longer queue behind bulk H.264 video (head-of-line blocking).
+    // Absent/null on older phones → controlChannelPort stays falsy and the worker
+    // keeps everything on the single video socket (byte-identical legacy path).
+    const controlChannelPort = json.controlChannelPort || null;
+    if (json.resolution === 2) {
+        width = 1920;
+        height = 1080;
+        
+        // Valeurs par défaut pour les marges si non spécifiées
+        widthMargin = json.widthMargin || 0;
+        heightMargin = json.heightMargin || 0;
+        
+        updateCanvasSize();
+    } else if (json.resolution === 1) {
+        width = 1280;
+        height = 720;
+        
+        // Valeurs par défaut pour les marges si non spécifiées
+        widthMargin = json.widthMargin || 0;
+        heightMargin = json.heightMargin || 0;
+        
+        updateCanvasSize();
+    } else {
+        width = 800;
+        height = 480;
+        
+        // Valeurs par défaut pour les marges si non spécifiées
+        widthMargin = json.widthMargin || 0;
+        heightMargin = json.heightMargin || 0;
+        
+        updateCanvasSize();
+    }
+
+    if (json.hasOwnProperty("buildversion")) {
+        appVersion = parseInt(json.buildversion);
+        if (latestVersion > parseInt(json.buildversion)) {
+            if (parseInt(localStorage.getItem("showupdate")) !== latestVersion) {
+                alert("There is a new version in playstore, please update your app.");
+                localStorage.setItem("showupdate", latestVersion);
+            }
+        }
+    }
+
+    // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
+    if (appVersion < 65) {
+        alert("You need to run TaaDa build 65 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+        //return;
+    }
+
+    const forceBroadway = findGetParameter("broadway") === "1";
+    // ?webcodec=1: force WebCodecs and disable the Broadway demotion (diagnostic).
+    const forceWebCodec = findGetParameter("webcodec") === "1";
+
+
+    canvasElement.width = width;
+    canvasElement.height = height;
+    
+    // Appliquer la transformation d'échelle au conteneur
+    //canvasElement.style.transform = "scale(" + zoom + ")";
+
+    // Transfert du contrôle au worker
+    offscreen = canvasElement.transferControlToOffscreen();
+    
+    // Initialiser le worker avec le canvas offscreen
+    demuxDecodeWorker.postMessage(
+        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height},
+        [offscreen]
+    );
+
+    if (!usebt) //If useBT is disabled start 2 websockets for PCM audio and create audio context
+    {
+        usebt = json.usebt;
+        //document.getElementById("muteicon").style.display="block";
+    }
+
+    // Show the waiting message after socket port is retrieved
+    canvasElement.style.display = "block";
+    document.getElementById("info").style.display = "none";
+
+    // Vérifier que waitingMessageElement existe
+    if (waitingMessageElement) {
+        console.log("Showing waiting message");
+        waitingMessageElement.style.display = "flex";
+        // Step 2/3: Socket connection will be handled by worker
+        updateConnectionProgress(2, '2/3 - Connecting to stream...');
+    } else {
+        console.error("waitingMessageElement is null, trying to get it again");
+        waitingMessageElement = document.getElementById('waiting-message');
+        if (waitingMessageElement) {
+            console.log("Got waitingMessageElement, showing it");
+            waitingMessageElement.style.display = "flex";
+            updateConnectionProgress(2, '2/3 - Connecting to stream...');
+        } else {
+            console.error("waitingMessageElement still not found");
+        }
+    }
+
+    demuxDecodeWorker.addEventListener("message", function (e) {
+
+        // 🚨 NOUVEAU: Gérer le shutdown du serveur EN PREMIER (priorité maximale)
+        if (e.data.hasOwnProperty('serverShutdown')) {
+            console.warn('Server shutdown detected:', e.data.reason);
+
+            // Marquer le flag pour éviter les actions en double
+            isServerShuttingDown = true;
+
+            // Cacher le message waiting
+            if (waitingMessageElement) {
+                waitingMessageElement.style.display = "none";
+            }
+
+            // 🚨 Afficher l'overlay d'erreur permanent
+            showErrorOverlay("Server disconnected. Checking connection...");
+
+            setTimeout(() => {
+                reloadWhenOnline('Server shutdown');
+            }, 3000);
+
+            return;
+        }
+
+        // 🚨 NOUVEAU: Ignorer tous les autres messages si le serveur est en shutdown
+        if (isServerShuttingDown) {
+            console.log('Server is shutting down, ignoring message:', e.data);
+            return;
+        }
+
+        if (e.data.hasOwnProperty('error')) {
+            console.error('Socket error received:', e.data.error);
+            forcedRefreshCounter++;
+
+            // Transient connection errors recover via the worker's in-place
+            // WebSocket reconnect — never reload the page. The page is hosted
+            // remotely (app.taada.top), so a reload hangs in a no-coverage zone.
+            // serverShutdown stays the only legitimate reload path.
+            warningElement.style.display = "block";
+            logElement.style.display = "none";
+            warningElement.innerText = "Error detected: " + e.data.error;
+            setTimeout(function() {
+                warningElement.style.display = "none";
+                logElement.style.display = "block";
+            }, 5000);
+            return;
+        }
+
+        // 🚨 NOUVEAU: Gérer la perte de connexion
+        if (e.data.hasOwnProperty('connectionLost')) {
+            console.error('Connection lost to server:', e.data.reason);
+
+            // Cacher le message waiting
+            if (waitingMessageElement) {
+                waitingMessageElement.style.display = "none";
+            }
+
+            // 🚨 Ne pas afficher l'overlay si on est déjà en attente de reload
+            // (notre fonction reloadWhenOnline gère déjà l'affichage)
+            if (!isWaitingForReload) {
+                // Keep the overlay visible until the stream is confirmed live
+                // again (hidden by videoFrameReceived). No timed auto-hide:
+                // reconnection backoff can outlast any fixed delay, so hiding on
+                // a timer flickers the overlay and masks a still-down connection.
+                showErrorOverlay("Connection lost: " + e.data.reason + ". Reconnecting...");
+            }
+
+            return;
+        }
+
+        // 🚨 Reconnexion: le worker a re-découvert la résolution du téléphone
+        // après une coupure et a pu redimensionner le décodeur et le canvas.
+        // Ré-appliquer la géométrie gérée par le thread principal — le
+        // dimensionnement CSS (letterbox) et la conversion des coordonnées
+        // tactiles — pour qu'un changement de résolution survive à la coupure.
+        if (e.data.hasOwnProperty('resolutionUpdate')) {
+            const update = e.data.resolutionUpdate;
+            console.log(`Reconnect resolution update: ${update.width}x${update.height}, margins ${update.widthMargin}x${update.heightMargin}`);
+            width = update.width;
+            height = update.height;
+            widthMargin = update.widthMargin;
+            heightMargin = update.heightMargin;
+            updateCanvasSize();
+            return;
+        }
+
+        if (e.data.hasOwnProperty('warning')) {
+            warningElement.style.display="block";
+            logElement.style.display="none";
+            warningElement.innerText=e.data.warning;
+            setTimeout(function (){
+                warningElement.style.display="none";
+                logElement.style.display="block";
+            },2000);
+        }
+
+        // Handle AA status updates from worker
+        // Handle connection progress updates from worker
+        if (e.data.hasOwnProperty('connectionProgress')) {
+            const progress = e.data.connectionProgress;
+            updateConnectionProgress(progress.step, progress.message);
+        }
+
+        // Hide the waiting message when first video frame is received
+        if (e.data.hasOwnProperty('videoFrameReceived')) {
+            console.log("Video frame received message received!", e.data);
+            videoFrameReceived = true;
+
+            // Stream is live again — clear any reconnecting overlay.
+            hideErrorOverlay();
+
+            // Update to step 3/3 - Stream ready
+            updateConnectionProgress(3, '3/3 - Stream ready!');
+
+            // Hide the waiting message after a short delay to show completion
+            setTimeout(() => {
+                if (waitingMessageElement) {
+                    waitingMessageElement.style.display = "none";
+                    console.log("Hiding waiting message");
+                } else {
+                    console.error("waitingMessageElement not found");
+                }
+            }, 1000);
+        }
+
+        if (debug) {
+            logElement.innerText = `${height}p - FPS ${e.data.fps}, decoder que: ${e.data.decodeQueueSize}, pendingFrame: ${e.data.pendingFrames}, forced refresh counter: ${forcedRefreshCounter}`;
+        }
+
+    });
+
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        demuxDecodeWorker.postMessage({action: "NIGHT", value: true});
+    } else {
+        demuxDecodeWorker.postMessage({action: "NIGHT", value: false});
+    }
+
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+        demuxDecodeWorker.postMessage({action: "NIGHT", value: event.matches});
+    });
+
+    // Relay page visibility to the worker. A Worker cannot observe
+    // document.visibilityState, yet it is the only reliable way to tell a REAL
+    // backgrounding (phone call → timers frozen, re-prime on resume) from a
+    // CPU-starved event loop (timers late but page visible → the liveness
+    // watchdogs must keep running, see workerWasSuspended()).
+    document.addEventListener('visibilitychange', () => {
+        demuxDecodeWorker.postMessage({action: "VISIBILITY", hidden: document.visibilityState === 'hidden'});
+    });
+
+    //setInterval(function(){navigator.geolocation.getCurrentPosition(handlepossition);},500);
+}
+
+function getLocation() {
+    navigator.geolocation.getCurrentPosition(getPosition);
+}
+
+function getPosition(pos) {
+    clearTimeout(timeoutId);
+    socket.send(JSON.stringify({
+        action: "GPS",
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+        altitude: pos.coords.altitude,
+        accuracy: pos.coords.accuracy,
+        heading: pos.coords.heading,
+        speed: pos.coords.speed
+    }));
+    timeoutId = setTimeout(getLocation, 250);
+}
+
+function isJson(item) {
+    item = typeof item !== "string"
+        ? JSON.stringify(item)
+        : item;
+    try {
+        item = JSON.parse(item);
+    } catch (e) {
+        return false;
+    }
+    return typeof item === "object" && item !== null;
+}
+
+// Ajout de variables pour la gestion optimisée des événements tactiles multitouch
+let activeTouches = new Map(); // Suivi des touches actives avec leurs IDs
+let touchMovePending = false;
+let latestTouchData = null;  // Stocke les données converties, pas l'événement
+// 4ms (250Hz) → plus fluide mais plus gourmand en ressources
+// 8ms (120Hz) → bon équilibre entre fluidité et performance
+// 16ms (60Hz) → économie supplémentaire de ressources mais un peu moins fluide
+
+/**
+ * Convertit une TouchList en tableau de coordonnées avec leurs IDs
+ * @param {TouchList} touchList - Liste des touches
+ * @returns {Array} Tableau d'objets {id, x, y}
+ */
+function convertTouchListToCoords(touchList) {
+    const coords = [];
+    for (let i = 0; i < touchList.length; i++) {
+        const touch = touchList[i];
+        const canvasCoords = convertToCanvasCoordinates(touch.clientX, touch.clientY);
+        coords.push({
+            id: touch.identifier,
+            x: canvasCoords.x,
+            y: canvasCoords.y
+        });
+    }
+    return coords;
+}
+
+/**
+ * Initialise l'audio au premier contact tactile si nécessaire
+ */
+function initializeAudioOnFirstTouch() {
+    // TEMPORAIREMENT DESACTIVE : Empêche l'avertissement "Vidéo bridée" sur le navigateur Tesla (2026.2.6.1) dû à la détection de l'AudioContext
+    return;
+
+    if (!audiostart && !usebt) {
+        mediaPCM = new PCMPlayer({
+            encoding: '16bitInt',
+            channels: 2,
+            sampleRate: 48000
+        });
+        ttsPCM = new PCMPlayer({
+            encoding: '16bitInt',
+            channels: 1,
+            sampleRate: 16000
+        });
+        const muteIcon = document.getElementById("muteicon");
+        if (muteIcon) {
+            muteIcon.remove();
+        }
+        startAudio();
+        audiostart = true;
+    }
+}
+
+/**
+ * Gère l'événement touchstart
+ * @param {TouchEvent} event - L'événement tactile
+ */
+function handleTouchStart(event) {
+    event.preventDefault();
+    initializeAudioOnFirstTouch();
+
+    const newTouches = convertTouchListToCoords(event.changedTouches);
+    newTouches.forEach(touch => activeTouches.set(touch.id, touch));
+
+    const allTouches = convertTouchListToCoords(event.touches);
+
+    // DEBUG: Logs détaillés pour comprendre le problème
+    //console.log('[MULTITOUCH_DOWN] event.changedTouches.length:', event.changedTouches.length);
+    //console.log('[MULTITOUCH_DOWN] event.touches.length:', event.touches.length);
+    //console.log('[MULTITOUCH_DOWN] newTouches:', JSON.stringify(newTouches));
+    //console.log('[MULTITOUCH_DOWN] allTouches:', JSON.stringify(allTouches));
+    //console.log('[MULTITOUCH_DOWN] activeTouches.size:', activeTouches.size);
+
+    // Envoyer l'événement multitouch principal
+    demuxDecodeWorker.postMessage({
+        action: "MULTITOUCH_DOWN",
+        touches: newTouches,
+        allTouches: allTouches,
+        timestamp: performance.now()
+    });
+
+    // Note: Les événements legacy (DOWN) ont été supprimés car MULTITOUCH_DOWN
+    // gère maintenant à la fois le single touch et le multitouch
+}
+
+bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false });
+
+/**
+ * Gère les événements touchend et touchcancel
+ * @param {TouchEvent} event - L'événement tactile
+ */
+function handleTouchEnd(event) {
+    event.preventDefault();
+
+    // CRITIQUE: Annuler tout MULTITOUCH_MOVE en attente pour éviter le bug "sticky touch"
+    // Si un touchmove a programmé un requestAnimationFrame qui n'a pas encore été exécuté,
+    // on doit l'empêcher de traiter les anciennes données de touch
+    latestTouchData = null;
+
+    const endedTouches = convertTouchListToCoords(event.changedTouches);
+    endedTouches.forEach(touch => activeTouches.delete(touch.id));
+
+    const allTouches = convertTouchListToCoords(event.touches);
+    const action = event.type === 'touchend' ? 'MULTITOUCH_UP' : 'MULTITOUCH_CANCEL';
+
+    // DEBUG: Logs pour MULTITOUCH_UP/CANCEL
+    //console.log('[' + action + '] event.changedTouches.length:', event.changedTouches.length);
+    //console.log('[' + action + '] event.touches.length:', event.touches.length);
+    //console.log('[' + action + '] endedTouches:', JSON.stringify(endedTouches));
+    //console.log('[' + action + '] allTouches:', JSON.stringify(allTouches));
+    //console.log('[' + action + '] activeTouches.size:', activeTouches.size);
+
+    // Envoyer l'événement multitouch principal
+    demuxDecodeWorker.postMessage({
+        action: action,
+        touches: endedTouches,
+        allTouches: allTouches,
+        timestamp: performance.now()
+    });
+
+    // Note: Les événements legacy (UP) ont été supprimés car MULTITOUCH_UP
+    // gère maintenant à la fois le single touch et le multitouch
+}
+
+bodyElement.addEventListener('touchend', handleTouchEnd, { passive: false });
+bodyElement.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+
+/**
+ * Boucle de mise à jour optimisée avec requestAnimationFrame
+ * N'envoie que le dernier événement tactile avant le prochain rendu du navigateur
+ */
+function processTouchMove() {
+    if (!latestTouchData) {
+        touchMovePending = false;
+        return;
+    }
+
+    const movingTouches = latestTouchData.touches;
+    const timestamp = latestTouchData.timestamp;
+
+    // Mettre à jour le suivi des touches actives
+    movingTouches.forEach(touch => {
+        activeTouches.set(touch.id, touch);
+    });
+
+    // DEBUG: Logs pour MULTITOUCH_MOVE
+    //console.log('[MULTITOUCH_MOVE] movingTouches.length:', movingTouches.length);
+    //console.log('[MULTITOUCH_MOVE] movingTouches:', JSON.stringify(movingTouches));
+    //console.log('[MULTITOUCH_MOVE] activeTouches.size:', activeTouches.size);
+
+    // Envoyer l'événement multitouch optimisé
+    demuxDecodeWorker.postMessage({
+        action: "MULTITOUCH_MOVE",
+        touches: movingTouches,
+        allTouches: movingTouches,  // CRUCIAL pour le multitouch en binaire !
+        timestamp: timestamp
+    });
+
+    // Note: Les événements legacy (DRAG) ont été supprimés car MULTITOUCH_MOVE
+    // gère maintenant à la fois le single touch et le multitouch
+
+    latestTouchData = null;
+    touchMovePending = false;
+}
+
+bodyElement.addEventListener('touchmove', (event) => {
+    // Convertir les données tactiles IMMÉDIATEMENT pour éviter la mutation de l'événement
+    // (le navigateur peut réutiliser l'objet TouchEvent pour des raisons de performance)
+    latestTouchData = {
+        touches: convertTouchListToCoords(event.touches),
+        timestamp: performance.now()
+    };
+
+    // Si une mise à jour n'est pas déjà en attente, en programmer une
+    if (!touchMovePending) {
+        touchMovePending = true;
+        requestAnimationFrame(processTouchMove);
+    }
+});
+
+// Ajouter un écouteur d'événement pour le redimensionnement de la fenêtre
+window.addEventListener('resize', () => {
+    if (width && height) {
+        updateCanvasSize();
+    }
+});
+
+/**
+ * Fonction de test pour simuler des événements multitouch
+ * Utilisable depuis la console du navigateur
+ */
+window.simulateMultitouch = function(testType = 'basic') {
+    console.log(`🟢 Simulating multitouch event: ${testType}`);
+    
+    if (testType === 'basic') {
+        // Test basique avec 2 touches
+        const touches = [
+            { id: 0, x: 100, y: 100 },
+            { id: 1, x: 200, y: 200 }
+        ];
+        
+        console.log('📝 Sending MULTITOUCH_DOWN with 2 touches');
+        demuxDecodeWorker.postMessage({
+            action: "MULTITOUCH_DOWN",
+            touches: touches,
+            allTouches: touches,
+            timestamp: performance.now()
+        });
+        
+        // Simuler un mouvement après 500ms
+        setTimeout(() => {
+            const movedTouches = [
+                { id: 0, x: 150, y: 150 },
+                { id: 1, x: 250, y: 250 }
+            ];
+            console.log('📝 Sending MULTITOUCH_MOVE');
+            demuxDecodeWorker.postMessage({
+                action: "MULTITOUCH_MOVE",
+                touches: movedTouches,
+                allTouches: movedTouches,
+                timestamp: performance.now()
+            });
+        }, 500);
+        
+        // Simuler la fin après 1000ms
+        setTimeout(() => {
+            console.log('📝 Sending MULTITOUCH_UP');
+            demuxDecodeWorker.postMessage({
+                action: "MULTITOUCH_UP",
+                touches: touches,
+                allTouches: [],
+                timestamp: performance.now()
+            });
+        }, 1000);
+        
+    } else if (testType === 'pinch') {
+        // Test de pincement (zoom)
+        console.log('📝 Simulating pinch gesture');
+        const startTouches = [
+            { id: 0, x: 200, y: 200 },
+            { id: 1, x: 300, y: 300 }
+        ];
+        
+        demuxDecodeWorker.postMessage({
+            action: "MULTITOUCH_DOWN",
+            touches: startTouches,
+            allTouches: startTouches,
+            timestamp: performance.now()
+        });
+        
+        // Simuler le rapprochement des doigts
+        let step = 0;
+        const pinchInterval = setInterval(() => {
+            step++;
+            const distance = 100 + (50 - step * 5); // Réduire la distance
+            const centerX = 250;
+            const centerY = 250;
+            
+            const pinchTouches = [
+                { id: 0, x: centerX - distance/2, y: centerY - distance/2 },
+                { id: 1, x: centerX + distance/2, y: centerY + distance/2 }
+            ];
+            
+            console.log(`📝 Pinch step ${step}, distance: ${distance}`);
+            demuxDecodeWorker.postMessage({
+                action: "MULTITOUCH_MOVE",
+                touches: pinchTouches,
+                allTouches: pinchTouches,
+                timestamp: performance.now()
+            });
+            
+            if (step >= 10) {
+                clearInterval(pinchInterval);
+                demuxDecodeWorker.postMessage({
+                    action: "MULTITOUCH_UP",
+                    touches: pinchTouches,
+                    allTouches: [],
+                    timestamp: performance.now()
+                });
+                console.log('📝 Pinch gesture completed');
+            }
+        }, 100);
+    }
+    
+    return true;
+};
+
+// Function to display email address only on user click to prevent bot detection
+function setupContactLink() {
+    const link = document.getElementById('contact-link');
+    if (link) {
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            const email = 'seb.duboc.dev' + '@' + 'gmail.com';
+            this.href = 'mailto:' + email;
+            this.textContent = email;
+            this.style.textDecoration = 'underline'; // Add underline to the email
+            // Remove the click listener to allow normal link behavior
+            this.removeEventListener('click', arguments.callee);
+        });
+    }
+}
+
+// Call the function when the page loads
+document.addEventListener('DOMContentLoaded', setupContactLink);
+
+// Wire up the Reset AA Profile button in the troubleshoot message
+document.addEventListener('DOMContentLoaded', () => {
+    const btnResetAA = document.getElementById('btn-reset-aa-profile');
+    const confirmEl = document.getElementById('reset-aa-confirm');
+    if (btnResetAA) {
+        btnResetAA.addEventListener('click', () => {
+            btnResetAA.disabled = true;
+            if (confirmEl) confirmEl.style.display = 'block';
+            demuxDecodeWorker.postMessage({ action: 'RESET_AA_PROFILE' });
+        });
+    }
+});
+checkPhone();
+
+let audiostart=false;
+let mediaPCM;
+let ttsPCM;
+let mediaPCMSocket;
+let ttsPCMSocket;
+
+
+function startAudio(){
+    // Note: port est maintenant le port HTTPS découvert dynamiquement
+    // Les ports audio restent relatifs à ce port de base
+    mediaPCMSocket = new WebSocket(`wss://taada.top:${port+1}`);
+    mediaPCMSocket.binaryType = "arraybuffer";
+    mediaPCMSocket.addEventListener('open', () => {
+        mediaPCMSocket.binaryType = "arraybuffer";
+        console.log(`Media audio connected to port ${port+1}`);
+    });
+    mediaPCMSocket.addEventListener('message', event =>
+    {
+        var data = new Uint8Array(event.data);
+        mediaPCM.feed(data);
+    });
+
+    ttsPCMSocket = new WebSocket(`wss://taada.top:${port+2}`);
+    ttsPCMSocket.binaryType = "arraybuffer";
+    ttsPCMSocket.addEventListener('open', () => {
+        ttsPCMSocket.binaryType = "arraybuffer";
+        console.log(`TTS audio connected to port ${port+2}`);
+    });
+    ttsPCMSocket.addEventListener('message', event =>
+    {
+        var data = new Uint8Array(event.data);
+        ttsPCMSocket.send(JSON.stringify({action:"ACK"}));
+        ttsPCM.feed(data);
+    });
+}
+
+// ===================== Debug log panel (?debug) =====================
+// Connection / reconnection diagnostics are relayed from the worker (which has
+// no localStorage) and persisted HERE so they survive a page refresh. Logs are
+// ALWAYS recorded — even without ?debug — because the events are rare (open,
+// close, reconnect, shutdown) and cost a few KB at most. ?debug only controls
+// whether the on-screen panel is shown, so a tester who hit the bug can simply
+// reload with ?debug to read what happened. The panel is capped and collapsible
+// so it never covers Android Auto, and it swallows its own touches so a tap on
+// it is never injected into the stream.
+const DEBUG_LOG_KEY = 'taada_debug_logs';
+const DEBUG_LOG_MAX = 400;                       // hard cap on stored entries (~50 KB)
+const DEBUG_LOG_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;   // drop entries older than 14 days
+const debugPanelEnabled = /[?&]debug(=|&|$)/.test(location.search);
+let debugLogs = loadDebugLogs();
+let debugPanelBody = null;
+let debugMetricsLine = null;
+// Open by default under ?debug: the whole point is for the tester to SEE the
+// logs and photograph the Tesla screen (no devtools in the car). The "—" button
+// minimises it to a small pill to free Android Auto when needed.
+let debugPanelCollapsed = false;
+
+function loadDebugLogs() {
+    try {
+        const raw = localStorage.getItem(DEBUG_LOG_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(parsed)) return [];
+        return TaadaDebugLogUtils.pruneDebugLogs(parsed, Date.now(), DEBUG_LOG_MAX_AGE_MS, DEBUG_LOG_MAX);
+    } catch (e) {
+        return [];
+    }
+}
+
+function persistDebugLogs() {
+    try {
+        debugLogs = TaadaDebugLogUtils.pruneDebugLogs(debugLogs, Date.now(), DEBUG_LOG_MAX_AGE_MS, DEBUG_LOG_MAX);
+        localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLogs));
+    } catch (e) {
+        // Quota / private-mode failure: shed the oldest half and retry once, then
+        // give up — diagnostics must never break playback.
+        try {
+            debugLogs = debugLogs.slice(Math.floor(debugLogs.length / 2));
+            localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLogs));
+        } catch (e2) { /* give up silently */ }
+    }
+}
+
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+function pad3(n) { return (n < 10 ? '00' : (n < 100 ? '0' : '')) + n; }
+function formatTs(ts) {
+    const d = new Date(ts);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) + '.' + pad3(d.getMilliseconds());
+}
+
+function appendDebugLog(entry) {
+    if (!entry || !entry.msg) return;
+    const e = { ts: entry.ts || Date.now(), msg: String(entry.msg).slice(0, 1000) };
+    debugLogs.push(e);
+    persistDebugLogs();
+    if (debugPanelEnabled && debugPanelBody) {
+        renderDebugLine(e);
+    }
+    updateDebugPillCount();
+}
+
+// Mirror console.error/warn and uncaught errors into the persisted buffer so a
+// single screenshot tells the whole story (not just the ~9 connection events).
+(function installDebugCapture() {
+    // Only wrap console + error listeners under ?debug. Capturing every
+    // console.error/warn for ALL users means a synchronous localStorage write on
+    // each call (e.g. the 5s connection-retry errors) — needless work on the car's
+    // weak CPU. Rare connection events are still always recorded via the worker.
+    if (!debugPanelEnabled) return;
+    const wrap = (orig, level) => function () {
+        try {
+            const msg = Array.prototype.map.call(arguments, a =>
+                (a && a.stack) ? a.stack : (typeof a === 'object' ? JSON.stringify(a) : String(a))
+            ).join(' ');
+            appendDebugLog({ ts: Date.now(), msg: '[' + level + '] ' + msg });
+        } catch (e) { /* never let logging break the app */ }
+        return orig.apply(this, arguments);
+    };
+    console.error = wrap(console.error.bind(console), 'error');
+    console.warn  = wrap(console.warn.bind(console), 'warn');
+    window.addEventListener('error', (ev) => {
+        appendDebugLog({ ts: Date.now(), msg: '[onerror] ' + (ev.message || '') + ' @ ' + (ev.filename || '') + ':' + (ev.lineno || '') });
+    });
+    window.addEventListener('unhandledrejection', (ev) => {
+        const r = ev && ev.reason;
+        appendDebugLog({ ts: Date.now(), msg: '[unhandledrejection] ' + ((r && r.stack) || String(r)) });
+    });
+})();
+
+function renderDebugLine(e) {
+    const line = document.createElement('div');
+    line.textContent = formatTs(e.ts) + '  ' + e.msg;
+    line.style.cssText = 'padding:1px 0;border-bottom:1px solid rgba(255,255,255,0.06);white-space:pre-wrap;word-break:break-word;';
+    debugPanelBody.appendChild(line);
+    // Cap DOM nodes like the buffer — a long reconnect-error loop would otherwise
+    // grow the panel unbounded and chew memory on the car's browser.
+    while (debugPanelBody.childElementCount > DEBUG_LOG_MAX) {
+        debugPanelBody.removeChild(debugPanelBody.firstChild);
+    }
+    debugPanelBody.scrollTop = debugPanelBody.scrollHeight;   // follow the latest
+}
+
+function makeDebugBtn(label, onClick) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'flex:0 0 auto;background:rgba(255,255,255,0.14);color:#fff;border:0;border-radius:4px;padding:3px 8px;margin-left:4px;font:11px monospace;cursor:pointer;';
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(); });
+    return b;
+}
+
+function ensureDebugPanel() {
+    if (!debugPanelEnabled || document.getElementById('taada-debug-panel')) return;
+
+    const panel = document.createElement('div');
+    panel.id = 'taada-debug-panel';
+    panel.style.cssText = [
+        'position:fixed', 'left:8px', 'bottom:8px', 'z-index:2147483646',
+        'width:440px', 'max-width:46vw', 'max-height:42vh', 'display:flex', 'flex-direction:column',
+        'background:rgba(0,0,0,0.82)', 'color:#9fe3a0', 'font:11px/1.35 monospace',
+        'border:1px solid rgba(159,227,160,0.4)', 'border-radius:6px', 'overflow:hidden'
+    ].join(';');
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;padding:4px 6px;background:rgba(255,255,255,0.08);flex:0 0 auto;';
+    const title = document.createElement('span');
+    title.textContent = 'TaaDa logs' + (ASSET_VERSION ? ' ' + ASSET_VERSION.replace('?v=', 'v') : '');
+    title.style.cssText = 'flex:1 1 auto;font-weight:bold;color:#fff;';
+    header.appendChild(title);
+    header.appendChild(makeDebugBtn('Copy', copyDebugLogs));
+    header.appendChild(makeDebugBtn('Clear', clearDebugLogs));
+    header.appendChild(makeDebugBtn('—', toggleDebugPanel));
+
+    debugPanelBody = document.createElement('div');
+    debugPanelBody.style.cssText = 'flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:4px 6px;-webkit-overflow-scrolling:touch;';
+
+    // Sticky live pipeline metrics line (1 Hz from the worker), always visible
+    // above the scrolling log so a photo of the panel captures the current state.
+    debugMetricsLine = document.createElement('div');
+    debugMetricsLine.style.cssText = 'flex:0 0 auto;padding:3px 6px;background:rgba(255,255,255,0.05);color:#ffd479;white-space:pre-wrap;word-break:break-word;border-bottom:1px solid rgba(255,255,255,0.12);';
+    debugMetricsLine.textContent = 'm: waiting for stream…';
+
+    panel.appendChild(header);
+    panel.appendChild(debugMetricsLine);
+    panel.appendChild(debugPanelBody);
+
+    const pill = document.createElement('button');
+    pill.id = 'taada-debug-pill';
+    pill.style.cssText = [
+        'position:fixed', 'left:8px', 'bottom:8px', 'z-index:2147483646',
+        'background:rgba(0,0,0,0.78)', 'color:#9fe3a0', 'font:11px/1 monospace',
+        'border:1px solid rgba(159,227,160,0.5)', 'border-radius:14px', 'padding:6px 10px'
+    ].join(';');
+    pill.addEventListener('click', toggleDebugPanel);
+
+    // Touch isolation: a tap on the panel or pill must NOT bubble to the body's
+    // stream touch handlers (which would inject it into Android Auto). passive
+    // so the panel body can still scroll on touch.
+    [panel, pill].forEach(el => {
+        ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach(t =>
+            el.addEventListener(t, ev => ev.stopPropagation(), { passive: true }));
+    });
+
+    document.body.appendChild(panel);
+    document.body.appendChild(pill);
+
+    debugLogs.forEach(renderDebugLine);   // replay persisted history
+    applyDebugCollapsedState();
+}
+
+function applyDebugCollapsedState() {
+    const panel = document.getElementById('taada-debug-panel');
+    const pill = document.getElementById('taada-debug-pill');
+    if (!panel || !pill) return;
+    panel.style.display = debugPanelCollapsed ? 'none' : 'flex';
+    pill.style.display = debugPanelCollapsed ? 'block' : 'none';
+    if (!debugPanelCollapsed && debugPanelBody) {
+        debugPanelBody.scrollTop = debugPanelBody.scrollHeight;
+    }
+    updateDebugPillCount();
+}
+
+function toggleDebugPanel() {
+    debugPanelCollapsed = !debugPanelCollapsed;
+    applyDebugCollapsedState();
+}
+
+function updateDebugPillCount() {
+    const pill = document.getElementById('taada-debug-pill');
+    if (pill) pill.textContent = '🐞 ' + debugLogs.length;
+}
+
+function clearDebugLogs() {
+    debugLogs = [];
+    metricsRing = [];
+    try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(METRICS_KEY); } catch (e) { /* ignore */ }
+    if (debugPanelBody) debugPanelBody.innerHTML = '';
+    if (debugMetricsLine) debugMetricsLine.textContent = 'm: cleared';
+    updateDebugPillCount();
+}
+
+function copyDebugLogs() {
+    let text = debugLogs.map(e => formatTs(e.ts) + '  ' + e.msg).join('\n');
+    if (metricsRing.length > 0) {
+        text += '\n--- pipeline metrics (1 Hz, last ' + metricsRing.length + 's) ---\n'
+            + metricsRing.map(mm => formatTs(mm.ts) + '  ' + formatMetrics(mm)).join('\n');
+    }
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => fallbackCopyDebug(text));
+        } else {
+            fallbackCopyDebug(text);
+        }
+    } catch (e) {
+        fallbackCopyDebug(text);
+    }
+}
+
+function fallbackCopyDebug(text) {
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+    } catch (e) { /* ignore — user can still screenshot the panel */ }
+}
+
+// ===================== Pipeline metrics (1 Hz from the worker) ==============
+// Stage-by-stage latency diagnosis: arrival vs decode vs render rate, queue
+// depths, worker event-loop drift, PONG age and PONG deficit (≈ seconds of
+// backlog upstream of the worker). Kept in a ring, persisted so a tester can
+// reproduce the lag, reload with ?debug, and read/copy the history.
+const METRICS_KEY = 'taada_metrics';
+const METRICS_MAX = 900;            // ~15 min of 1 Hz samples (~70 KB)
+let metricsRing = (() => {
+    // Reload the persisted ring so Copy after a reproduce-then-reload still
+    // exports the samples leading up to the incident.
+    try {
+        const parsed = JSON.parse(localStorage.getItem(METRICS_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+})();
+let lastMetricsPersistAt = 0;
+let lastMetricsSummaryAt = 0;
+
+function formatMetrics(mm) {
+    return 'm: rx=' + mm.rxFps + ' dec=' + mm.decFps + ' ren=' + mm.renFps + 'fps'
+        + ' ' + mm.rxKBps + 'KB/s'
+        + ' ' + (mm.path || '?')
+        + ' dq=' + mm.dq + ' pf=' + mm.pf
+        + ' bk=' + mm.backlog + ' pd=' + mm.pongDef
+        + ' gap=' + (mm.gapMax == null ? '?' : mm.gapMax) + 'ms'
+        + ' dec=' + (mm.decMs == null ? '?' : mm.decMs) + 'ms'
+        + ' pongAge=' + mm.pongAge + 'ms'
+        + ' drift=' + mm.drift + 'ms'
+        + ' vf=' + (mm.vfLive == null ? '?' : mm.vfLive)
+        + (mm.glLost ? ' GL=LOST' : '')
+        + heapStr()
+        + (mm.bwSwitches ? ' bwSw=' + mm.bwSwitches + (mm.bwReason ? ' [' + mm.bwReason + ']' : '') : '');
+}
+
+// Main-thread JS heap (Chrome-only, non-standard). A steady climb over a drive
+// = a page-side leak; pairs with the worker `vf` counter (GPU VideoFrames) to
+// tell a JS-heap leak from a GPU-frame leak. '' when the API is unavailable.
+function heapStr() {
+    try {
+        if (performance && performance.memory && performance.memory.usedJSHeapSize) {
+            return ' heap=' + Math.round(performance.memory.usedJSHeapSize / 1048576) + 'MB';
+        }
+    } catch (e) { /* unsupported */ }
+    return '';
+}
+
+function handleWorkerMetrics(mm) {
+    metricsRing.push(mm);
+    if (metricsRing.length > METRICS_MAX) {
+        metricsRing = metricsRing.slice(metricsRing.length - METRICS_MAX);
+    }
+
+    const nowMs = Date.now();
+    if (nowMs - lastMetricsPersistAt > 5000) {
+        lastMetricsPersistAt = nowMs;
+        try {
+            localStorage.setItem(METRICS_KEY, JSON.stringify(metricsRing));
+        } catch (e) {
+            metricsRing = metricsRing.slice(Math.floor(metricsRing.length / 2));
+            try { localStorage.setItem(METRICS_KEY, JSON.stringify(metricsRing)); } catch (e2) { /* give up */ }
+        }
+    }
+
+    if (debugMetricsLine) {
+        debugMetricsLine.textContent = formatMetrics(mm);
+    }
+
+    // Every 30 s, drop a summary into the persistent event log so the saved
+    // history shows the TREND (was the backlog growing before the disconnect?).
+    if (nowMs - lastMetricsSummaryAt > 30000) {
+        lastMetricsSummaryAt = nowMs;
+        appendDebugLog({ ts: nowMs, msg: formatMetrics(mm) });
+    }
+}
+
+// Dedicated worker listener so connection logs and metrics are captured even
+// before the main message handler is wired in postWorkerMessages(). A Worker
+// can have several message listeners; both fire.
+demuxDecodeWorker.addEventListener('message', (e) => {
+    if (e && e.data && e.data.hasOwnProperty('debugLog')) {
+        appendDebugLog(e.data.debugLog);
+    }
+    if (e && e.data && e.data.hasOwnProperty('metrics')) {
+        handleWorkerMetrics(e.data.metrics);
+    }
+});
+
+// Best-effort hardware fingerprint. The browser cannot read the real Tesla
+// "HW2/3/4" label, but the MCU generation (what decides WebCodecs vs Broadway)
+// is inferable: QtCarBrowser/no-WebCodecs = MCU1; the WebGL UNMASKED_RENDERER
+// (Tegra/Intel/AMD) + core count separate MCU1/MCU2/MCU3. Logged once so the
+// field correlates the Broadway/choppy issue with the hardware. All guesses are
+// marked '?' — never asserted as fact.
+function getWebglRenderer() {
+    try {
+        const c = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
+        const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+        if (!gl) return 'no-webgl';
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        if (!ext) return 'renderer-hidden';
+        return gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) + ' | ' + gl.getParameter(ext.UNMASKED_VENDOR_WEBGL);
+    } catch (e) { return 'err:' + e.message; }
+}
+
+function guessMcu(ua, renderer, cores, hasWebCodec) {
+    const r = (renderer || '').toLowerCase();
+    const u = (ua || '').toLowerCase();
+    // MCU1: QtCarBrowser has no WebCodecs; its GPU is the Tegra (NOT a desktop
+    // GeForce). Match 'tegra' specifically so a dev box with a GeForce is not
+    // mislabelled MCU1.
+    if (/qtcarbrowser/.test(u) || !hasWebCodec || /tegra/.test(r)) return 'MCU1?(Tegra/no-WebCodecs)';
+    if (/amd|radeon/.test(r)) return 'MCU3?(Ryzen/HW4)';
+    if (/intel|atom|hd graphics|uhd graphics/.test(r)) return 'MCU2?(Intel)';
+    // Desktop GPUs (dev runs) — Teslas never ship a discrete GeForce.
+    if (/geforce|rtx|gtx|quadro/.test(r)) return 'non-Tesla?(desktop GPU, dev run)';
+    if (cores >= 6) return 'MCU3?(cores=' + cores + ')';
+    if (cores > 0) return 'MCU2?(cores=' + cores + ')';
+    return 'unknown';
+}
+
+function logHardwareFingerprint() {
+    try {
+        const ua = navigator.userAgent || '';
+        const cores = navigator.hardwareConcurrency || 0;
+        const mem = navigator.deviceMemory || '?';
+        const renderer = getWebglRenderer();
+        const hasWebCodec = (typeof VideoDecoder !== 'undefined');
+        const guess = guessMcu(ua, renderer, cores, hasWebCodec);
+        appendDebugLog({ ts: Date.now(), msg: 'hw: ' + guess
+            + ' | cores=' + cores + ' mem=' + mem
+            + ' webcodec=' + (hasWebCodec ? 'yes' : 'no')
+            + ' screen=' + (window.screen ? (screen.width + 'x' + screen.height) : '?')
+            + ' dpr=' + (window.devicePixelRatio ? Math.round(window.devicePixelRatio * 100) / 100 : '?')
+            + ' gpu="' + renderer + '"'
+            + ' ua="' + ua + '"' });
+    } catch (e) { /* fingerprint must never break the page */ }
+}
+
+// Session marker (separates one drive/session from the next in the saved log),
+// then show the panel if ?debug is present.
+appendDebugLog({ ts: Date.now(), msg: '=== page loaded (' + (debugPanelEnabled ? 'debug panel ON' : 'logging only') + ') ===' });
+logHardwareFingerprint();
+if (debugPanelEnabled) {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', ensureDebugPanel);
+    } else {
+        ensureDebugPanel();
+    }
+}
