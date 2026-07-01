@@ -487,6 +487,12 @@ function postWorkerMessages(json) {
         usebt = json.usebt;
     }
     port = json.port;
+    // B1 control-channel discovery: a build-66+ phone advertises a SECOND
+    // WebSocket port dedicated to PING/PONG + touch, so those small control
+    // messages no longer queue behind bulk H.264 video (head-of-line blocking).
+    // Absent/null on older phones → controlChannelPort stays falsy and the worker
+    // keeps everything on the single video socket (byte-identical legacy path).
+    const controlChannelPort = json.controlChannelPort || null;
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
@@ -527,12 +533,14 @@ function postWorkerMessages(json) {
     }
 
     // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
-    if (appVersion < 66) {
-        alert("You need to run TaaDa 2.6.0 (build 66) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+    if (appVersion < 73) {
+        alert("You need to run TaaDa 2.6.4 (build 73) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
         //return;
     }
 
     const forceBroadway = findGetParameter("broadway") === "1";
+    // ?webcodec=1: force WebCodecs and disable the Broadway demotion (diagnostic).
+    const forceWebCodec = findGetParameter("webcodec") === "1";
 
 
     canvasElement.width = width;
@@ -546,7 +554,7 @@ function postWorkerMessages(json) {
     
     // Initialiser le worker avec le canvas offscreen
     demuxDecodeWorker.postMessage(
-        {canvas: offscreen, port: port, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, width: width, height: height}, 
+        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height},
         [offscreen]
     );
 
@@ -717,6 +725,15 @@ function postWorkerMessages(json) {
 
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
         demuxDecodeWorker.postMessage({action: "NIGHT", value: event.matches});
+    });
+
+    // Relay page visibility to the worker. A Worker cannot observe
+    // document.visibilityState, yet it is the only reliable way to tell a REAL
+    // backgrounding (phone call → timers frozen, re-prime on resume) from a
+    // CPU-starved event loop (timers late but page visible → the liveness
+    // watchdogs must keep running, see workerWasSuspended()).
+    document.addEventListener('visibilitychange', () => {
+        demuxDecodeWorker.postMessage({action: "VISIBILITY", hidden: document.visibilityState === 'hidden'});
     });
 
     //setInterval(function(){navigator.geolocation.getCurrentPosition(handlepossition);},500);
@@ -1120,9 +1137,11 @@ function startAudio(){
 // it is never injected into the stream.
 const DEBUG_LOG_KEY = 'taada_debug_logs';
 const DEBUG_LOG_MAX = 400;                       // hard cap on stored entries (~50 KB)
+const DEBUG_LOG_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;   // drop entries older than 14 days
 const debugPanelEnabled = /[?&]debug(=|&|$)/.test(location.search);
 let debugLogs = loadDebugLogs();
 let debugPanelBody = null;
+let debugMetricsLine = null;
 // Open by default under ?debug: the whole point is for the tester to SEE the
 // logs and photograph the Tesla screen (no devtools in the car). The "—" button
 // minimises it to a small pill to free Android Auto when needed.
@@ -1132,7 +1151,8 @@ function loadDebugLogs() {
     try {
         const raw = localStorage.getItem(DEBUG_LOG_KEY);
         const parsed = raw ? JSON.parse(raw) : [];
-        return Array.isArray(parsed) ? parsed : [];
+        if (!Array.isArray(parsed)) return [];
+        return TaadaDebugLogUtils.pruneDebugLogs(parsed, Date.now(), DEBUG_LOG_MAX_AGE_MS, DEBUG_LOG_MAX);
     } catch (e) {
         return [];
     }
@@ -1140,9 +1160,7 @@ function loadDebugLogs() {
 
 function persistDebugLogs() {
     try {
-        if (debugLogs.length > DEBUG_LOG_MAX) {
-            debugLogs = debugLogs.slice(debugLogs.length - DEBUG_LOG_MAX);
-        }
+        debugLogs = TaadaDebugLogUtils.pruneDebugLogs(debugLogs, Date.now(), DEBUG_LOG_MAX_AGE_MS, DEBUG_LOG_MAX);
         localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLogs));
     } catch (e) {
         // Quota / private-mode failure: shed the oldest half and retry once, then
@@ -1163,7 +1181,7 @@ function formatTs(ts) {
 
 function appendDebugLog(entry) {
     if (!entry || !entry.msg) return;
-    const e = { ts: entry.ts || Date.now(), msg: String(entry.msg) };
+    const e = { ts: entry.ts || Date.now(), msg: String(entry.msg).slice(0, 1000) };
     debugLogs.push(e);
     persistDebugLogs();
     if (debugPanelEnabled && debugPanelBody) {
@@ -1172,11 +1190,44 @@ function appendDebugLog(entry) {
     updateDebugPillCount();
 }
 
+// Mirror console.error/warn and uncaught errors into the persisted buffer so a
+// single screenshot tells the whole story (not just the ~9 connection events).
+(function installDebugCapture() {
+    // Only wrap console + error listeners under ?debug. Capturing every
+    // console.error/warn for ALL users means a synchronous localStorage write on
+    // each call (e.g. the 5s connection-retry errors) — needless work on the car's
+    // weak CPU. Rare connection events are still always recorded via the worker.
+    if (!debugPanelEnabled) return;
+    const wrap = (orig, level) => function () {
+        try {
+            const msg = Array.prototype.map.call(arguments, a =>
+                (a && a.stack) ? a.stack : (typeof a === 'object' ? JSON.stringify(a) : String(a))
+            ).join(' ');
+            appendDebugLog({ ts: Date.now(), msg: '[' + level + '] ' + msg });
+        } catch (e) { /* never let logging break the app */ }
+        return orig.apply(this, arguments);
+    };
+    console.error = wrap(console.error.bind(console), 'error');
+    console.warn  = wrap(console.warn.bind(console), 'warn');
+    window.addEventListener('error', (ev) => {
+        appendDebugLog({ ts: Date.now(), msg: '[onerror] ' + (ev.message || '') + ' @ ' + (ev.filename || '') + ':' + (ev.lineno || '') });
+    });
+    window.addEventListener('unhandledrejection', (ev) => {
+        const r = ev && ev.reason;
+        appendDebugLog({ ts: Date.now(), msg: '[unhandledrejection] ' + ((r && r.stack) || String(r)) });
+    });
+})();
+
 function renderDebugLine(e) {
     const line = document.createElement('div');
     line.textContent = formatTs(e.ts) + '  ' + e.msg;
     line.style.cssText = 'padding:1px 0;border-bottom:1px solid rgba(255,255,255,0.06);white-space:pre-wrap;word-break:break-word;';
     debugPanelBody.appendChild(line);
+    // Cap DOM nodes like the buffer — a long reconnect-error loop would otherwise
+    // grow the panel unbounded and chew memory on the car's browser.
+    while (debugPanelBody.childElementCount > DEBUG_LOG_MAX) {
+        debugPanelBody.removeChild(debugPanelBody.firstChild);
+    }
     debugPanelBody.scrollTop = debugPanelBody.scrollHeight;   // follow the latest
 }
 
@@ -1203,7 +1254,7 @@ function ensureDebugPanel() {
     const header = document.createElement('div');
     header.style.cssText = 'display:flex;align-items:center;padding:4px 6px;background:rgba(255,255,255,0.08);flex:0 0 auto;';
     const title = document.createElement('span');
-    title.textContent = 'TaaDa logs';
+    title.textContent = 'TaaDa logs' + (ASSET_VERSION ? ' ' + ASSET_VERSION.replace('?v=', 'v') : '');
     title.style.cssText = 'flex:1 1 auto;font-weight:bold;color:#fff;';
     header.appendChild(title);
     header.appendChild(makeDebugBtn('Copy', copyDebugLogs));
@@ -1213,7 +1264,14 @@ function ensureDebugPanel() {
     debugPanelBody = document.createElement('div');
     debugPanelBody.style.cssText = 'flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:4px 6px;-webkit-overflow-scrolling:touch;';
 
+    // Sticky live pipeline metrics line (1 Hz from the worker), always visible
+    // above the scrolling log so a photo of the panel captures the current state.
+    debugMetricsLine = document.createElement('div');
+    debugMetricsLine.style.cssText = 'flex:0 0 auto;padding:3px 6px;background:rgba(255,255,255,0.05);color:#ffd479;white-space:pre-wrap;word-break:break-word;border-bottom:1px solid rgba(255,255,255,0.12);';
+    debugMetricsLine.textContent = 'm: waiting for stream…';
+
     panel.appendChild(header);
+    panel.appendChild(debugMetricsLine);
     panel.appendChild(debugPanelBody);
 
     const pill = document.createElement('button');
@@ -1264,13 +1322,20 @@ function updateDebugPillCount() {
 
 function clearDebugLogs() {
     debugLogs = [];
+    metricsRing = [];
     try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(METRICS_KEY); } catch (e) { /* ignore */ }
     if (debugPanelBody) debugPanelBody.innerHTML = '';
+    if (debugMetricsLine) debugMetricsLine.textContent = 'm: cleared';
     updateDebugPillCount();
 }
 
 function copyDebugLogs() {
-    const text = debugLogs.map(e => formatTs(e.ts) + '  ' + e.msg).join('\n');
+    let text = debugLogs.map(e => formatTs(e.ts) + '  ' + e.msg).join('\n');
+    if (metricsRing.length > 0) {
+        text += '\n--- pipeline metrics (1 Hz, last ' + metricsRing.length + 's) ---\n'
+            + metricsRing.map(mm => formatTs(mm.ts) + '  ' + formatMetrics(mm)).join('\n');
+    }
     try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(text).catch(() => fallbackCopyDebug(text));
@@ -1295,18 +1360,148 @@ function fallbackCopyDebug(text) {
     } catch (e) { /* ignore — user can still screenshot the panel */ }
 }
 
-// Dedicated worker listener so connection logs are captured even before the main
-// message handler is wired in postWorkerMessages(). A Worker can have several
-// message listeners; both fire.
+// ===================== Pipeline metrics (1 Hz from the worker) ==============
+// Stage-by-stage latency diagnosis: arrival vs decode vs render rate, queue
+// depths, worker event-loop drift, PONG age and PONG deficit (≈ seconds of
+// backlog upstream of the worker). Kept in a ring, persisted so a tester can
+// reproduce the lag, reload with ?debug, and read/copy the history.
+const METRICS_KEY = 'taada_metrics';
+const METRICS_MAX = 900;            // ~15 min of 1 Hz samples (~70 KB)
+let metricsRing = (() => {
+    // Reload the persisted ring so Copy after a reproduce-then-reload still
+    // exports the samples leading up to the incident.
+    try {
+        const parsed = JSON.parse(localStorage.getItem(METRICS_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+})();
+let lastMetricsPersistAt = 0;
+let lastMetricsSummaryAt = 0;
+
+function formatMetrics(mm) {
+    return 'm: rx=' + mm.rxFps + ' dec=' + mm.decFps + ' ren=' + mm.renFps + 'fps'
+        + ' ' + mm.rxKBps + 'KB/s'
+        + ' ' + (mm.path || '?')
+        + ' dq=' + mm.dq + ' pf=' + mm.pf
+        + ' bk=' + mm.backlog + ' pd=' + mm.pongDef
+        + ' gap=' + (mm.gapMax == null ? '?' : mm.gapMax) + 'ms'
+        + ' dec=' + (mm.decMs == null ? '?' : mm.decMs) + 'ms'
+        + ' pongAge=' + mm.pongAge + 'ms'
+        + ' drift=' + mm.drift + 'ms'
+        + ' vf=' + (mm.vfLive == null ? '?' : mm.vfLive)
+        + (mm.glLost ? ' GL=LOST' : '')
+        + heapStr()
+        + (mm.bwSwitches ? ' bwSw=' + mm.bwSwitches + (mm.bwReason ? ' [' + mm.bwReason + ']' : '') : '');
+}
+
+// Main-thread JS heap (Chrome-only, non-standard). A steady climb over a drive
+// = a page-side leak; pairs with the worker `vf` counter (GPU VideoFrames) to
+// tell a JS-heap leak from a GPU-frame leak. '' when the API is unavailable.
+function heapStr() {
+    try {
+        if (performance && performance.memory && performance.memory.usedJSHeapSize) {
+            return ' heap=' + Math.round(performance.memory.usedJSHeapSize / 1048576) + 'MB';
+        }
+    } catch (e) { /* unsupported */ }
+    return '';
+}
+
+function handleWorkerMetrics(mm) {
+    metricsRing.push(mm);
+    if (metricsRing.length > METRICS_MAX) {
+        metricsRing = metricsRing.slice(metricsRing.length - METRICS_MAX);
+    }
+
+    const nowMs = Date.now();
+    if (nowMs - lastMetricsPersistAt > 5000) {
+        lastMetricsPersistAt = nowMs;
+        try {
+            localStorage.setItem(METRICS_KEY, JSON.stringify(metricsRing));
+        } catch (e) {
+            metricsRing = metricsRing.slice(Math.floor(metricsRing.length / 2));
+            try { localStorage.setItem(METRICS_KEY, JSON.stringify(metricsRing)); } catch (e2) { /* give up */ }
+        }
+    }
+
+    if (debugMetricsLine) {
+        debugMetricsLine.textContent = formatMetrics(mm);
+    }
+
+    // Every 30 s, drop a summary into the persistent event log so the saved
+    // history shows the TREND (was the backlog growing before the disconnect?).
+    if (nowMs - lastMetricsSummaryAt > 30000) {
+        lastMetricsSummaryAt = nowMs;
+        appendDebugLog({ ts: nowMs, msg: formatMetrics(mm) });
+    }
+}
+
+// Dedicated worker listener so connection logs and metrics are captured even
+// before the main message handler is wired in postWorkerMessages(). A Worker
+// can have several message listeners; both fire.
 demuxDecodeWorker.addEventListener('message', (e) => {
     if (e && e.data && e.data.hasOwnProperty('debugLog')) {
         appendDebugLog(e.data.debugLog);
     }
+    if (e && e.data && e.data.hasOwnProperty('metrics')) {
+        handleWorkerMetrics(e.data.metrics);
+    }
 });
+
+// Best-effort hardware fingerprint. The browser cannot read the real Tesla
+// "HW2/3/4" label, but the MCU generation (what decides WebCodecs vs Broadway)
+// is inferable: QtCarBrowser/no-WebCodecs = MCU1; the WebGL UNMASKED_RENDERER
+// (Tegra/Intel/AMD) + core count separate MCU1/MCU2/MCU3. Logged once so the
+// field correlates the Broadway/choppy issue with the hardware. All guesses are
+// marked '?' — never asserted as fact.
+function getWebglRenderer() {
+    try {
+        const c = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
+        const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+        if (!gl) return 'no-webgl';
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        if (!ext) return 'renderer-hidden';
+        return gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) + ' | ' + gl.getParameter(ext.UNMASKED_VENDOR_WEBGL);
+    } catch (e) { return 'err:' + e.message; }
+}
+
+function guessMcu(ua, renderer, cores, hasWebCodec) {
+    const r = (renderer || '').toLowerCase();
+    const u = (ua || '').toLowerCase();
+    // MCU1: QtCarBrowser has no WebCodecs; its GPU is the Tegra (NOT a desktop
+    // GeForce). Match 'tegra' specifically so a dev box with a GeForce is not
+    // mislabelled MCU1.
+    if (/qtcarbrowser/.test(u) || !hasWebCodec || /tegra/.test(r)) return 'MCU1?(Tegra/no-WebCodecs)';
+    if (/amd|radeon/.test(r)) return 'MCU3?(Ryzen/HW4)';
+    if (/intel|atom|hd graphics|uhd graphics/.test(r)) return 'MCU2?(Intel)';
+    // Desktop GPUs (dev runs) — Teslas never ship a discrete GeForce.
+    if (/geforce|rtx|gtx|quadro/.test(r)) return 'non-Tesla?(desktop GPU, dev run)';
+    if (cores >= 6) return 'MCU3?(cores=' + cores + ')';
+    if (cores > 0) return 'MCU2?(cores=' + cores + ')';
+    return 'unknown';
+}
+
+function logHardwareFingerprint() {
+    try {
+        const ua = navigator.userAgent || '';
+        const cores = navigator.hardwareConcurrency || 0;
+        const mem = navigator.deviceMemory || '?';
+        const renderer = getWebglRenderer();
+        const hasWebCodec = (typeof VideoDecoder !== 'undefined');
+        const guess = guessMcu(ua, renderer, cores, hasWebCodec);
+        appendDebugLog({ ts: Date.now(), msg: 'hw: ' + guess
+            + ' | cores=' + cores + ' mem=' + mem
+            + ' webcodec=' + (hasWebCodec ? 'yes' : 'no')
+            + ' screen=' + (window.screen ? (screen.width + 'x' + screen.height) : '?')
+            + ' dpr=' + (window.devicePixelRatio ? Math.round(window.devicePixelRatio * 100) / 100 : '?')
+            + ' gpu="' + renderer + '"'
+            + ' ua="' + ua + '"' });
+    } catch (e) { /* fingerprint must never break the page */ }
+}
 
 // Session marker (separates one drive/session from the next in the saved log),
 // then show the panel if ?debug is present.
 appendDebugLog({ ts: Date.now(), msg: '=== page loaded (' + (debugPanelEnabled ? 'debug panel ON' : 'logging only') + ') ===' });
+logHardwareFingerprint();
 if (debugPanelEnabled) {
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', ensureDebugPanel);

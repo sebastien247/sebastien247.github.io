@@ -22,17 +22,95 @@ let pendingFrames = [],
     runtime = 0,
     frameCounter = 0,
     sps, decoder = null, socket, height, width, port, gl, heart = 0,
+    glCanvas = null, // OffscreenCanvas ref, kept so the GL context can be re-fetched after a loss
+    glContextLost = false, // True between webglcontextlost and webglcontextrestored — render is paused
+    glContextLostAt = 0, // Wall-clock of the last context loss (for the restore-latency log + watchdog)
+    // B1 control channel: when the phone advertises controlChannelPort (build 66+),
+    // a SECOND WebSocket carries PING/PONG + binary touch so they don't queue behind
+    // bulk H.264 video. Both stay falsy/null on older phones ⇒ single-socket legacy path.
+    controlChannelPort = null, controlSocket = null,
     frameCounterTimer = 0,
     broadwayDecoder = null,
     lastheart = 0, pongtimer, frameRate,
     lastPongAt = 0, // Timestamp of the last server PONG sentinel (unittype 31)
     lastFrameAt = 0, // Timestamp of the last decoded video frame (unittype 1/5)
     lastHeartbeatAt = 0, // Wall-clock of the last heartbeat() tick — detects Worker suspension (WebView backgrounded during a call)
+    pageHidden = false, // Mirror of document.visibilityState, relayed by main.js (action VISIBILITY)
+    lastVisibilityHiddenAt = 0, // Wall-clock of the last hidden transition — corroborates a suspension
+    resumeStrikes = 0, // Consecutive resumeAfterSuspend re-primes that produced NO fresh PONG
+    lastResumeAt = 0, // Wall-clock of the last resumeAfterSuspend re-prime
+    skippingStale = false, // True while draining+dropping the post-suspend backlog (skip-to-latest)
+    skipStaleStartAt = 0, // Wall-clock when the current skip-to-latest drain began
+    skipStaleDropped = 0, // Frames dropped during the current skip-to-latest drain
+    lastSkipArrivalAt = 0, // Wall-clock of the last frame seen while skipping (live-cadence probe)
     connectTimeout = null, // Watchdog handle for a WebSocket stuck in CONNECTING
     isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
     firstVideoFrameReceived = false; // Flag to track first video frame
 
 const texturePool = [];
+
+// ── Pipeline metrics (1 Hz sampler, relayed to main.js → ?debug panel) ──────
+// Answers WHERE display latency accumulates, stage by stage:
+//   rxFrames/rxBytes   arrival rate into the worker (counted at message entry)
+//   decOut             frames the decoder actually output
+//   rendered           frames drawn to the canvas
+//   dq / pf gauges     decoder internal queue / pendingFrames render queue
+//   tickDriftMax       worker event-loop health (heartbeat lateness beyond 1 s)
+//   pingsSent-pongsRx  PONG deficit. PINGs go uplink (uncongested), the phone
+//                      replies immediately, and PONGs are FIFO with video on the
+//                      downlink — so at 1 ping/s the deficit ≈ SECONDS of backlog
+//                      sitting upstream of the worker (phone outQueue + TCP
+//                      buffers + worker inbox). The single number that separates
+//                      "lag lives upstream" from "lag lives in decode/render".
+const m = {
+    rxFrames: 0, rxBytes: 0, decOut: 0, rendered: 0,
+    totalRxFrames: 0, totalRendered: 0,
+    pingsSent: 0, pongsRx: 0,
+    tickDriftMax: 0,
+    // Stage discriminators (upstream stall vs browser decode bottleneck):
+    //   gapMax   longest silence between two arriving frames in the window. Big
+    //            gap = the SOURCE stalled (phone throttled / TCP), then bursts.
+    //   decMs    synchronous ms the worker spent inside decode() this window.
+    //            ~0 on WebCodecs (async submit), real on Broadway (software,
+    //            on-thread) → a big decMs with a big drift = browser-bound.
+    //   so a burst with gapMax≈0 + decMs high = browser can't keep up; a burst
+    //            with gapMax in the seconds = frames batched upstream.
+    gapMax: 0, decMs: 0, lastArrivalAt: 0,
+    // Net WebCodecs VideoFrame balance (created minus closed). A VideoFrame is
+    // GPU-backed and MUST be closed; if this climbs over time it is a frame leak
+    // (the prime suspect for a Tesla resource-watchdog tab suspend/kill). Stays
+    // ~0 in steady state; surfaced as `vf=` in the ?debug line.
+    vfLive: 0,
+};
+
+// Diagnostic flag (?webcodec=1): force WebCodecs and DISABLE the Broadway
+// demotion — on any decoder error, recreate the hardware decoder instead of
+// falling to software. Lets us A/B whether Broadway is the cause of the field
+// choppiness, and doubles as the prototype of the real "recoverable fallback".
+let forceWebCodec = false;
+let wcRecoverAt = 0, wcRecoverCount = 0;
+
+// WebCodecs frame-ordering gate. A VideoDecoder MUST receive configure() (from
+// the SPS) and then a key frame (IDR) before any delta (P) frame, or decode()
+// throws "Cannot call 'decode' on an unconfigured codec" / "A key frame is
+// required after configure()". On a reconnect the stream resumes mid-GOP, so
+// in-flight P-frames arrive before the re-sent SPS+IDR. Without this gate those
+// P-frames crash the hardware decoder and we wrongly demote to Broadway (the
+// field root cause). true = drop P-frames and pull a keyframe until the first
+// IDR after (re)configure has decoded.
+let awaitingKeyframe = true;
+let lastKeyframeReqAt = 0;
+
+function maybeRequestKeyframe() {
+    const now = Date.now();
+    if (now - lastKeyframeReqAt < 1000) { return; }   // the phone caps at 2s anyway
+    lastKeyframeReqAt = now;
+    try {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.sendObject({action: "REQUEST_KEYFRAME"});
+        }
+    } catch (e) { /* next drop retries */ }
+}
 
 /**
  * Relays one connection-lifecycle log line to the main thread. A Worker has no
@@ -63,11 +141,38 @@ const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
 // takes this long to be noticed, but the in-place reconnect is fast once fired.
 const NO_DATA_TIMEOUT = 3000; //8000; // No binary data at all (video OR PONG) for this long ⇒ reconnect (was 3000)
 const PONG_TIMEOUT = 6000; //12000;   // No PONG sentinel for this long ⇒ dead control channel (was 6000)
-// If heartbeat() hasn't ticked for this long, the Worker was suspended/throttled
-// (the WebView was backgrounded during a phone call), NOT the channel dying. The
-// data/PONG gap is sleep time, so we re-prime the live socket instead of forcing
-// a false reconnect. Must exceed normal heartbeat jitter (~1-2s).
-const SUSPEND_THRESHOLD = 2000;
+// Suspension detection (WebView backgrounded during a phone call: timers freeze,
+// the PONG/data gap is sleep time, so we re-prime instead of reconnecting).
+// Two tiers, because heartbeat-tick drift alone CANNOT distinguish a frozen
+// Worker from a CPU-starved-but-alive one — and a starved loop under heavy
+// decode routinely shows 2-4 s of drift. Treating that as "suspended" suppressed
+// every liveness watchdog while latency piled up (the 2.6.0 field regression):
+// - drift > SUSPEND_THRESHOLD_HIDDEN AND main.js reported the page hidden
+//   during the gap ⇒ trust it, it is a real backgrounding.
+// - no visibility signal ⇒ only a drift > SUSPEND_THRESHOLD is credible
+//   (a real freeze lasts the duration of the call, far beyond any decode stall).
+const SUSPEND_THRESHOLD_HIDDEN = 2000;
+const SUSPEND_THRESHOLD = 8000;
+// A re-prime is only believable if the previous one actually revived the channel
+// (a fresh PONG arrived since). After this many consecutive re-primes without
+// one, stop assuming "suspension" and force the in-place reconnect — that drop
+// is also what discards the stale video queued in the TCP buffers, resetting
+// any accumulated display latency.
+const SUSPEND_RESUME_MAX_STRIKES = 2;
+
+// Skip-to-latest after a suspension. The phone NEVER flow-controls the browser
+// (MediaSocketServer.send is fire-and-forget — confirmed in the Android source),
+// so a worker freeze leaves a backlog of stale frames piled in the phone's WS
+// out-queue + TCP buffers. Plainly re-priming REPLAYS that backlog: the worker
+// decodes+draws seconds of stale video (a visible fast-forward on a fast decoder,
+// and permanent lag on a decode-bound MCU that can't outrun the live 30 fps).
+// The backlog carries periodic IDRs, so an awaitingKeyframe gate alone clears on
+// the first stale IDR and replays the rest. Instead we DROP every arriving frame
+// while they stream back-to-back (the backlog drains far faster than live), then
+// resume the moment arrivals slow to the live cadence and pull one fresh keyframe.
+const SKIP_LIVE_GAP_MS = 25;     // inter-arrival gap meaning "caught up to live" (live ≈ 33 ms @30 fps; backlog ≈ sub-10 ms)
+const SKIP_MIN_DROPPED = 5;      // require a short back-to-back burst before trusting a live-gap (ignore a lone first frame)
+const SKIP_MAX_MS = 2000;        // safety cap: never drop longer than this, even if the cadence never settles
 
 // The phone re-randomises the WebSocket port on every service start; the stable
 // HTTP discovery endpoint is served on this fixed port range.
@@ -124,6 +229,34 @@ function updateFrameCounter() {
     frameTimes[runtime] = frameCounter;
     frameRate = Math.round((frameCounter - frameTimes[runtime - 10]) / 10);
     runtime++;
+
+    // 1 Hz pipeline sample for the ?debug panel. Cheap: a handful of integers.
+    const nowMs = Date.now();
+    try {
+        self.postMessage({ metrics: {
+            ts: nowMs,
+            rxFps: m.rxFrames,
+            decFps: m.decOut,
+            renFps: m.rendered,
+            rxKBps: Math.round(m.rxBytes / 1024),
+            dq: decoder !== null ? decoder.decodeQueueSize : -1,
+            pf: pendingFrames.length,
+            backlog: m.totalRxFrames - m.totalRendered,
+            pongDef: m.pingsSent - m.pongsRx,
+            pongAge: lastPongAt ? (nowMs - lastPongAt) : -1,
+            frameAge: lastFrameAt ? (nowMs - lastFrameAt) : -1,
+            drift: m.tickDriftMax,
+            path: decoder !== null ? 'wc' : (broadwayDecoder !== null ? 'bw' : '-'),
+            gapMax: m.gapMax,
+            decMs: m.decMs,
+            bwSwitches: m.bwSwitches || 0,
+            bwReason: m.bwReason || '',
+            vfLive: m.vfLive,
+            glLost: glContextLost,
+        }});
+    } catch (e) { /* metrics must never break the stream */ }
+    m.rxFrames = 0; m.rxBytes = 0; m.decOut = 0; m.rendered = 0;
+    m.tickDriftMax = 0; m.gapMax = 0; m.decMs = 0;
 }
 
 function getFrameStats() {
@@ -168,6 +301,7 @@ function drawImageToCanvas(image) {
 
     if (image.close) {
         image.close();
+        m.vfLive--;
     }
 }
 
@@ -183,13 +317,49 @@ function createShader(gl, type, source) {
     gl.deleteShader(shader);
 }
 
-function switchToBroadway() {
-    console.log("Switching to broadway decoder");
-    debugLog('decoder fallback → Broadway (WebCodecs error)');
+// reason: WHICH of the WebCodecs->Broadway demotion gates fired. Logged + kept
+// so the field tells us why a capable browser dropped to software decode (the
+// fallback is one-way and sticky until reload — see #latency-regression-260).
+function switchToBroadway(reason) {
+    const why = reason || 'unspecified';
+
+    // ?webcodec=1: never demote to software. Recreate the hardware decoder and
+    // pull a fresh keyframe instead. A storm guard (>8 recoveries / 10 s) lets a
+    // genuinely broken WebCodecs fall through to Broadway so the tab is not
+    // bricked. Only when WebCodecs exists at all (MCU1 has none).
+    if (forceWebCodec && typeof VideoDecoder !== 'undefined') {
+        const now = Date.now();
+        if (now - wcRecoverAt > 10000) { wcRecoverCount = 0; }
+        wcRecoverAt = now;
+        wcRecoverCount++;
+        if (wcRecoverCount <= 8) {
+            debugLog('wc-recover #' + wcRecoverCount + ' (forceWebCodec): ' + why);
+            m.bwReason = 'wc-recover: ' + why;
+            try {
+                if (decoder && decoder.state !== 'closed') { try { decoder.close(); } catch (e) { /* already closed */ } }
+                sps = undefined;
+                createVideoDecoder();
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.sendObject({action: "REQUEST_KEYFRAME"});
+                }
+                return;
+            } catch (e) {
+                debugLog('wc-recover failed, allowing Broadway: ' + (e && e.message ? e.message : e));
+            }
+        } else {
+            debugLog('wc-recover storm (' + wcRecoverCount + '/10s) — allowing Broadway');
+        }
+    }
+
+    console.log("Switching to broadway decoder: " + why);
+    debugLog('decoder fallback → Broadway: ' + why);
+    m.bwReason = why;
+    m.bwSwitches = (m.bwSwitches || 0) + 1;
     decoder = null;
 
     broadwayDecoder = new Decoder({rgb: true});
     broadwayDecoder.onPictureDecoded = function (buffer){
+        m.decOut++;
         pendingFrames.push(buffer)
         if(underflow) {
             renderFrame();
@@ -203,26 +373,29 @@ function switchToBroadway() {
  * drop would otherwise stay wedged after it.
  */
 function createVideoDecoder() {
+    // A fresh decoder is unconfigured and needs SPS (configure) then an IDR
+    // before any P-frame — gate P-frames until that first keyframe lands.
+    awaitingKeyframe = true;
     decoder = new VideoDecoder({
         output: (frame) => {
+            m.decOut++;
+            m.vfLive++;   // GPU-backed; must be closed in drawImageToCanvas/reset
             pendingFrames.push(frame);
             if (underflow) {
                 renderFrame();
             }
         },
         error: (e) => {
-            switchToBroadway()
+            switchToBroadway('error-cb: ' + (e && e.message ? e.message : e))
         },
     });
 }
 
-function initCanvas(canvas, forceBroadway) {
-
-    height = canvas.height;
-    width = canvas.width;
-
-    gl = canvas.getContext('webgl2');
-
+// Rebuild the entire WebGL pipeline (shaders, program, buffers, attribs) on the
+// CURRENT `gl`. Extracted from initCanvas so the webglcontextrestored handler can
+// re-run it on a fresh context after a loss (the shaders/buffers/textures of the
+// lost context are all invalid). Texture pool is cleared by the caller.
+function setupGlPipeline() {
     const vertexSource = `
         attribute vec2 a_position;
         attribute vec2 a_texCoord;
@@ -269,16 +442,66 @@ function initCanvas(canvas, forceBroadway) {
     gl.enableVertexAttribArray(texcoordLocation);
     gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
     gl.vertexAttribPointer(texcoordLocation, 2, gl.FLOAT, false, 0, 0);
+}
+
+// WebGL context loss recovery. The Tesla browser drops the GL context under GPU
+// memory pressure; WITHOUT preventDefault on the lost event the context is never
+// restored, so renderFrame's draws silently no-op forever (data/PONG keep
+// flowing, so no watchdog fires) and the picture freezes until the user reloads
+// — the exact "freezes, never recovers, reload fixes it, but the log looks
+// healthy" field symptom. preventDefault makes the loss recoverable; the restored
+// handler rebuilds the pipeline and pulls a fresh keyframe so video resumes.
+function installGlContextHandlers(canvas) {
+    glCanvas = canvas;
+    canvas.addEventListener('webglcontextlost', (e) => {
+        e.preventDefault();              // REQUIRED — without it the context never restores
+        glContextLost = true;
+        glContextLostAt = Date.now();
+        texturePool.length = 0;          // textures belong to the lost context
+        debugLog('WebGL context LOST — render paused, awaiting restore (reload-free recovery)');
+    }, false);
+    canvas.addEventListener('webglcontextrestored', () => {
+        try {
+            gl = canvas.getContext('webgl2');
+            setupGlPipeline();
+            glContextLost = false;
+            awaitingKeyframe = true;     // request a clean IDR; nothing valid to paint yet
+            maybeRequestKeyframe();
+            debugLog('WebGL context RESTORED after ' + (Date.now() - glContextLostAt) + 'ms — render resumed');
+        } catch (err) {
+            debugLog('WebGL restore failed: ' + (err && err.message ? err.message : err));
+        }
+    }, false);
+    // Dormant test hook (bench only — nothing in the field invokes it): lets the
+    // render repro force a context loss to validate the handlers. The extension
+    // ref is grabbed from the LIVE context and kept, because getExtension() on an
+    // already-lost context returns null (so restore must use the stored ref).
+    let __glLoseExt = null;
+    try { __glLoseExt = gl.getExtension('WEBGL_lose_context'); } catch (e) { /* unsupported */ }
+    self.__debugLoseContext = () => { try { if (__glLoseExt) __glLoseExt.loseContext(); } catch (e) { /* ignore */ } };
+    self.__debugRestoreContext = () => { try { if (__glLoseExt) __glLoseExt.restoreContext(); } catch (e) { /* ignore */ } };
+}
+
+function initCanvas(canvas, forceBroadway) {
+
+    height = canvas.height;
+    width = canvas.width;
+
+    gl = canvas.getContext('webgl2');
+    installGlContextHandlers(canvas);
+    setupGlPipeline();
 
     if(!forceBroadway) {
         try {
             createVideoDecoder();
         } catch(e) {
-            switchToBroadway();
+            switchToBroadway('init-ctor-threw: ' + (e && e.message ? e.message : e));
         }
     } else {
         console.log("Forcing to broadway decoder")
-        switchToBroadway();
+        // forceBroadway=true means INIT chose Broadway: either ?broadway=1 (MCU1)
+        // or the isWebCodecsWorkingWithDecode() probe failed/ timed out at startup.
+        switchToBroadway('init-forced (probe-fail or ?broadway=1)');
     }
 
     startSocket();
@@ -292,7 +515,31 @@ async function renderFrame() {
         return;
     }
     const frame = pendingFrames.shift();
-    drawImageToCanvas(frame);
+    let painted = false;
+    if (glContextLost || (gl && gl.isContextLost && gl.isContextLost())) {
+        // Context is gone: drawing would silently no-op. Drop the frame (consume +
+        // close it so it never leaks) without counting it as painted, so `ren`
+        // truthfully reads 0 while the picture is frozen — the signal that used to
+        // be hidden by counting failed draws as rendered.
+        if (frame && frame.close) { try { frame.close(); m.vfLive--; } catch (e2) { /* already closed */ } }
+    } else {
+        try {
+            drawImageToCanvas(frame);
+            painted = true;
+        } catch (e) {
+            // A WebGL throw (e.g. context lost mid-draw) must NOT wedge the drain
+            // loop: that would stop renderFrame while the decoder keeps producing
+            // VideoFrames, leaking GPU memory until the tab is killed. Close the
+            // frame here so it is never leaked, log once.
+            if (frame && frame.close) { try { frame.close(); m.vfLive--; } catch (e2) { /* already closed */ } }
+            console.error("drawImageToCanvas failed", e);
+        }
+    }
+    // rendered = frames actually PAINTED (fps gauge stays honest when render dies);
+    // totalRendered = frames CONSUMED from the queue (backlog math — a dropped
+    // frame is consumed, so it counts here either way).
+    if (painted) { m.rendered++; }
+    m.totalRendered++;
 
     if (pendingFrames.length < 5) {
         socket.sendObject({action: "ACK"});
@@ -325,31 +572,100 @@ function separateNalUnits(event){
         .map(dat => Uint8Array.from(dat));
 }
 
+/**
+ * Promote the connection overlay to stage 3 and dismiss it — fired ONCE, the
+ * first time an IDR keyframe is actually handed to a decoder. This lives here
+ * (not in handleVideoMessage) on purpose: a message-level first-NAL sniff misses
+ * the keyframe whenever the encoder packs SPS/PPS/AUD ahead of the IDR in the
+ * SAME WebSocket message (observed on Redmi/PixelOS/LineageOS MediaCodec). Such a
+ * message reaches the IDR through separateNalUnits→headerMagic→videoMagic, so
+ * firing from videoMagic covers BOTH framings (IDR-as-own-message and SPS-led
+ * keyframe) — the same blind spot the rx metric was moved here to fix (see the
+ * "rx=0 while dec=30" note above).
+ */
+function notifyFirstVideoFrame() {
+    if (firstVideoFrameReceived) return;
+    firstVideoFrameReceived = true;
+    console.log("First IDR keyframe decoded, notifying main thread");
+    debugLog('stream live — first IDR keyframe decoded');
+    self.postMessage({
+        connectionProgress: {
+            step: 3,
+            message: '3/3 - First frame received!'
+        }
+    });
+    self.postMessage({videoFrameReceived: true});
+}
+
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
+    // Skip-to-latest drain: after a suspension we drop the stale backlog while it
+    // streams back-to-back (sub-SKIP_LIVE_GAP_MS apart). The instant arrivals slow
+    // to the live cadence we have caught up — stop dropping, force a keyframe and
+    // gate P-frames until it decodes (a live P referencing dropped frames would
+    // throw and demote to Broadway, so awaitingKeyframe here is load-bearing).
+    if (skippingStale && (unittype === 1 || unittype === 5)) {
+        const _n = Date.now();
+        const gap = lastSkipArrivalAt ? (_n - lastSkipArrivalAt) : 0;
+        lastSkipArrivalAt = _n;
+        const drainedToLive = skipStaleDropped >= SKIP_MIN_DROPPED && gap >= SKIP_LIVE_GAP_MS;
+        const capped = (_n - skipStaleStartAt) > SKIP_MAX_MS;
+        if (!drainedToLive && !capped) {
+            skipStaleDropped++;
+            return; // drop this stale backlog frame — do NOT decode or count it
+        }
+        skippingStale = false;
+        awaitingKeyframe = true;
+        debugLog('skip-to-latest: dropped ' + skipStaleDropped + ' stale frames ('
+            + (capped ? 'cap ' + SKIP_MAX_MS + 'ms' : 'live gap=' + gap + 'ms') + ') — resuming at live');
+        maybeRequestKeyframe();
+        // fall through: this first live frame is handled normally below (a P is
+        // held by awaitingKeyframe; an IDR decodes and clears the gate).
+    }
+    // Arrival metric counted HERE, not in handleVideoMessage: messages whose
+    // first NAL is SPS/PPS/filler reach the decodable AU through headerMagic →
+    // videoMagic, and a first-NAL sniff at message level undercounts them
+    // (observed rx=0 while dec=30 in the bench repro).
+    if (unittype === 1 || unittype === 5) {
+        const _now = Date.now();
+        if (m.lastArrivalAt !== 0) {
+            const gap = _now - m.lastArrivalAt;
+            if (gap > m.gapMax) { m.gapMax = gap; }
+        }
+        m.lastArrivalAt = _now;
+        m.rxFrames++;
+        m.totalRxFrames++;
+    }
+    const _dt0 = Date.now();
     if (unittype === 1) {
         if(decoder !== null) {
-            let chunk = new EncodedVideoChunk({
-                type: 'delta',
-                timestamp: 0,
-                duration: 0,
-                data: dat
-            });
-            if (decoder.state !== 'closed') {
+            if (decoder.state === 'closed') {
+                switchToBroadway('decoder-closed-P');
+            } else if (decoder.state !== 'configured' || awaitingKeyframe) {
+                // P-frame before configure()/first keyframe (e.g. mid-GOP after a
+                // reconnect). Decoding it would throw and demote us to Broadway —
+                // drop it and pull a fresh IDR instead.
+                maybeRequestKeyframe();
+            } else {
+                let chunk = new EncodedVideoChunk({
+                    type: 'delta',
+                    timestamp: 0,
+                    duration: 0,
+                    data: dat
+                });
                 try {
                     decoder.decode(chunk);
                 } catch (e) {
                     console.error("Video decoder error", e);
-                    switchToBroadway();
+                    switchToBroadway('decode-threw-P: ' + (e && e.message ? e.message : e));
                 }
-            } else {
-                switchToBroadway();
             }
         }
 
         if(broadwayDecoder !== null) {
             broadwayDecoder.decode(dat)
         }
+        m.decMs += Date.now() - _dt0;
         return;
     }
 
@@ -362,28 +678,43 @@ function videoMagic(dat){
             return;
         }
         let data = appendByteArray(sps, dat);
+        let idrDecoded = false;
         if(decoder !== null) {
-            let chunk = new EncodedVideoChunk({
-                type: 'key',
-                timestamp: 0,
-                duration: 0,
-                data: data
-            });
-            if (decoder.state !== 'closed') {
+            if (decoder.state === 'closed') {
+                switchToBroadway('decoder-closed-IDR');
+            } else if (decoder.state !== 'configured') {
+                // SPS seen but this (just-recreated) decoder is not configured
+                // yet; wait for the configure() the re-sent SPS triggers.
+                maybeRequestKeyframe();
+            } else {
+                let chunk = new EncodedVideoChunk({
+                    type: 'key',
+                    timestamp: 0,
+                    duration: 0,
+                    data: data
+                });
                 try {
                     decoder.decode(chunk);
+                    // First key frame after (re)configure decoded: P-frames may flow.
+                    awaitingKeyframe = false;
+                    idrDecoded = true;
                 } catch (e) {
                     console.error("Video decoder error", e);
-                    switchToBroadway();
+                    switchToBroadway('decode-threw-IDR: ' + (e && e.message ? e.message : e));
                 }
-            } else {
-                switchToBroadway();
             }
         }
 
         if(broadwayDecoder !== null) {
             broadwayDecoder.decode(data)
+            idrDecoded = true;
         }
+        // Dismiss the waiting overlay only on a successfully decoded IDR (never a
+        // P-frame, which decodes green without a preceding keyframe). Fired here
+        // so it works regardless of whether the IDR arrived as its own message or
+        // wrapped behind SPS/PPS in a single message — see notifyFirstVideoFrame.
+        if (idrDecoded) notifyFirstVideoFrame();
+        m.decMs += Date.now() - _dt0;
     }
 }
 
@@ -407,8 +738,11 @@ function headerMagic(dat) {
         if(decoder !== null) {
             try {
                 decoder.configure(config);
+                // After configure() WebCodecs requires a key frame before any
+                // delta frame — hold P-frames until the next IDR decodes.
+                awaitingKeyframe = true;
             } catch (exc) {
-                switchToBroadway();
+                switchToBroadway('configure-threw: ' + (exc && exc.message ? exc.message : exc));
             }
         }
 
@@ -429,7 +763,21 @@ function headerMagic(dat) {
  * is sleep time, not a dead channel. The socket is usually still OPEN on resume.
  */
 function workerWasSuspended() {
-    return lastHeartbeatAt !== 0 && (Date.now() - lastHeartbeatAt) > SUSPEND_THRESHOLD;
+    if (lastHeartbeatAt === 0) {
+        return false;
+    }
+    const drift = Date.now() - lastHeartbeatAt;
+    if (drift <= SUSPEND_THRESHOLD_HIDDEN) {
+        return false;
+    }
+    // Corroborated: main.js saw the page go hidden during this gap (phone call
+    // backgrounded the WebView). The small threshold applies.
+    if (pageHidden || lastVisibilityHiddenAt >= lastHeartbeatAt) {
+        return true;
+    }
+    // Uncorroborated: a CPU-starved-but-alive loop shows 2-4 s drift under heavy
+    // decode; only a much larger gap is a credible freeze.
+    return drift > SUSPEND_THRESHOLD;
 }
 
 /**
@@ -443,17 +791,54 @@ function resumeAfterSuspend(source) {
     const drift = now - lastHeartbeatAt;
     lastHeartbeatAt = now;
     if (socket && socket.readyState === WebSocket.OPEN) {
+        // Strike gate: if the PREVIOUS re-prime produced no fresh PONG, this
+        // "suspension" is really a dead/jammed channel. After
+        // SUSPEND_RESUME_MAX_STRIKES stale re-primes, reconnect in place — the
+        // socket drop also flushes the stale video sitting in the TCP buffers,
+        // so the accumulated display latency resets without a page reload.
+        if (lastResumeAt !== 0 && lastPongAt <= lastResumeAt) {
+            resumeStrikes++;
+        } else {
+            resumeStrikes = 0;
+        }
+        if (resumeStrikes >= SUSPEND_RESUME_MAX_STRIKES) {
+            debugLog('resume strikes exhausted (' + resumeStrikes + ' re-primes, no fresh PONG) — reconnecting');
+            resumeStrikes = 0;
+            lastResumeAt = 0;
+            forceReconnect('suspendStrikes drift=' + drift + 'ms');
+            return;
+        }
+        lastResumeAt = now;
         debugLog('resumed after ' + drift + 'ms (' + source + ', backgrounded during a call?) — socket OPEN, re-prime not reconnect');
         // Fresh baselines so the dead-channel checks don't fire on the sleep gap.
         lastPongAt = now;
         lastheart = now;
         if (pongtimer) { clearTimeout(pongtimer); }
         pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
+        // Skip-to-latest: the stale backlog queued during the freeze is about to
+        // pour in on this same socket. Drop it instead of replaying it (see the
+        // SKIP_* constants). Close the stale decoded frames already buffered so the
+        // render loop can't show the stale tail, and arm the drain in videoMagic.
+        skippingStale = true;
+        skipStaleStartAt = now;
+        skipStaleDropped = 0;
+        lastSkipArrivalAt = now;
+        for (const frame of pendingFrames) {
+            if (frame && frame.close) { try { frame.close(); m.vfLive--; } catch (e) { /* already closed */ } }
+        }
+        pendingFrames = [];
+        underflow = true;
+        // The display latency we are about to discard must not be carried in the
+        // backlog gauge (totalRxFrames - totalRendered) as leftover lag.
+        m.totalRendered = m.totalRxFrames;
         try {
             // The phone's 3s video-off dead-man timer fired while we slept; START
             // re-enables video, REQUEST_KEYFRAME pulls a fresh IDR fast.
             socket.sendObject({action: "START"});
-            socket.sendObject({action: "PING"});
+            // PING on the control socket (when present) for a fast PONG that re-
+            // baselines the watchdog; falls back to the video socket otherwise.
+            m.pingsSent++;
+            controlSendObject({action: "PING"});
             socket.sendObject({action: "REQUEST_KEYFRAME"});
         } catch (e) { /* next heartbeat tick retries */ }
     } else {
@@ -495,7 +880,26 @@ function heartbeat() {
         resumeAfterSuspend('heartbeat');
         return;
     }
+    // Event-loop health: how late is this 1 s tick beyond its schedule.
+    if (lastHeartbeatAt !== 0) {
+        const tickDrift = (Date.now() - lastHeartbeatAt) - 1000;
+        if (tickDrift > m.tickDriftMax) {
+            m.tickDriftMax = tickDrift;
+        }
+    }
     lastHeartbeatAt = Date.now();
+
+    // Silent WebGL context loss: some browsers drop the context without firing the
+    // webglcontextlost event. Catch it here so the flag (and the log) reflect a
+    // frozen picture even when the event never came. Restore still depends on the
+    // browser firing webglcontextrestored; this only ensures detection + honest
+    // metrics (ren=0) instead of a silent freeze that reads healthy.
+    if (!glContextLost && gl && gl.isContextLost && gl.isContextLost()) {
+        glContextLost = true;
+        glContextLostAt = Date.now();
+        texturePool.length = 0;
+        debugLog('WebGL context LOST (silent, no event) — render paused, awaiting restore');
+    }
 
     // Dead control channel: the phone replies to every PING with a PONG sentinel
     // (unittype 31). lastPongAt is updated only by that sentinel, never by video
@@ -526,7 +930,10 @@ function heartbeat() {
     if (typeof frameRate !== 'undefined') {
         pingPayload.fps = frameRate;
     }
-    socket.sendObject(pingPayload);
+    m.pingsSent++;
+    // B1: PING rides the control socket when present so the PONG can come back
+    // without queueing behind video. Falls back to the video socket otherwise.
+    controlSendObject(pingPayload);
 }
 
 
@@ -564,6 +971,9 @@ function handleMessage(event) {
                     pongtimer = null;
                 }
 
+                // B1: tear down the control socket too (no-op on legacy path).
+                closeControlSocket();
+
                 return;
             }
         } catch (e) {
@@ -583,35 +993,23 @@ function handleVideoMessage(dat){
     if (pongtimer !== null) clearTimeout(pongtimer);
     pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
 
+    m.rxBytes += dat.length;
+
     let unittype = (dat[4] & 0x1f);
     if (unittype === 31)
     {
         // Server PONG sentinel — proof the control channel is alive. Tracked
         // separately from video so heartbeat() can detect a half-open channel.
+        m.pongsRx++;
         lastPongAt = Date.now();
         return;
     }
     if (unittype === 1 || unittype === 5) {
         lastFrameAt = Date.now();
         videoMagic(dat);
-
-        // Dismiss the waiting overlay only on a real IDR keyframe (unittype 5),
-        // never on a P-frame: a P-frame with no preceding keyframe decodes to a
-        // green/corrupt image that must not be shown to the user as "ready".
-        if (unittype === 5 && !firstVideoFrameReceived) {
-            firstVideoFrameReceived = true;
-            console.log("First IDR keyframe decoded, notifying main thread");
-            debugLog('stream live — first IDR keyframe decoded');
-
-            // Send progress update and videoFrameReceived notification
-            self.postMessage({
-                connectionProgress: {
-                    step: 3,
-                    message: '3/3 - First frame received!'
-                }
-            });
-            self.postMessage({videoFrameReceived: true});
-        }
+        // Stage 2→3 promotion now fires from videoMagic on a decoded IDR, so it
+        // also covers the else-branch below (a keyframe whose message is led by
+        // SPS/PPS/AUD reaches the IDR via separateNalUnits→headerMagic→videoMagic).
     }
     else
         separateNalUnits(dat).forEach(headerMagic)
@@ -734,6 +1132,20 @@ function resetStreamStateForReconnect() {
     firstVideoFrameReceived = false;
     lastheart = 0;
     lastPongAt = 0;
+    resumeStrikes = 0;
+    lastResumeAt = 0;
+    // A real reconnect already discards the backlog via the socket drop; clear any
+    // in-progress skip-to-latest drain so it can't carry into the fresh stream.
+    skippingStale = false;
+    skipStaleDropped = 0;
+
+    // Re-baseline the pipeline metrics: the reconnect just discarded everything
+    // in flight (TCP buffers, decoder queue, pendingFrames), so carrying the old
+    // backlog / PONG deficit across would misread as leftover lag.
+    m.totalRendered = m.totalRxFrames;
+    m.pingsSent = 0;
+    m.pongsRx = 0;
+    m.lastArrivalAt = 0;   // don't count the reconnect gap as a source stall
 
     if (pongtimer) {
         clearTimeout(pongtimer);
@@ -742,7 +1154,7 @@ function resetStreamStateForReconnect() {
 
     for (const frame of pendingFrames) {
         if (frame && frame.close) {
-            try { frame.close(); } catch (e) { /* frame already closed */ }
+            try { frame.close(); m.vfLive--; } catch (e) { /* frame already closed */ }
         }
     }
     pendingFrames = [];
@@ -761,7 +1173,7 @@ function resetStreamStateForReconnect() {
         try {
             createVideoDecoder();
         } catch (e) {
-            switchToBroadway();
+            switchToBroadway('reconnect-ctor-threw: ' + (e && e.message ? e.message : e));
         }
     }
 }
@@ -788,6 +1200,137 @@ function forceReconnect(reason) {
     } else {
         console.log('Forcing in-place reconnect: socket already closed (' + closeReason + ')');
         socketClose({reason: closeReason});
+    }
+}
+
+// ========== B1 Control Channel (separate WebSocket for PING/PONG + touch) ======
+// When the phone advertises controlChannelPort, low-latency control traffic moves
+// off the video socket so it can never be stuck behind a queued H.264 frame
+// (head-of-line blocking). EVERYTHING here is a no-op when controlChannelPort is
+// falsy: no second socket is opened and every send falls back to the video socket,
+// preserving the legacy single-socket behaviour byte-for-byte.
+
+/** True only when the dedicated control socket exists AND is OPEN. */
+function controlChannelOpen() {
+    return controlSocket !== null && controlSocket.readyState === WebSocket.OPEN;
+}
+
+/**
+ * Routes a control message: onto the control socket when it is open, otherwise
+ * onto the video socket exactly as before. Used for the PING heartbeat and the
+ * binary touch path. Old phone (no controlChannelPort) ⇒ controlChannelOpen() is
+ * always false ⇒ identical to calling socket.* directly.
+ */
+function controlSendObject(obj) {
+    if (controlChannelOpen()) {
+        try {
+            controlSocket.send(JSON.stringify(obj));
+        } catch (e) {
+            // Control socket hiccupped — fall back to the video socket so the PING
+            // still goes out; the control socket's own 'close' will reopen it.
+            try { socket.sendObject(obj); } catch (e2) { self.postMessage({error: e2}); }
+        }
+    } else {
+        socket.sendObject(obj);
+    }
+}
+
+/** Sends raw binary (touch) on the control socket if open, else the video socket. */
+function controlSendBinary(binaryData) {
+    if (controlChannelOpen()) {
+        controlSocket.send(binaryData);
+    } else {
+        socket.send(binaryData);
+    }
+}
+
+/**
+ * Handles a message arriving on the CONTROL socket. The only payload the phone
+ * sends here is the PONG sentinel (unittype 31). It (1) updates lastPongAt (the
+ * PONG_TIMEOUT input the heartbeat reads) AND (2) re-arms the NO_DATA watchdog
+ * (pongtimer). NO_DATA means "no binary AT ALL, video OR PONG" (see NO_DATA_TIMEOUT),
+ * and the PONG is data-from-phone proof the link is alive — so it must re-arm the
+ * watchdog exactly as a video frame does in handleVideoMessage. This mirrors the
+ * ORIGINAL single-socket behaviour (where the PONG arrived on the same socket as
+ * video and re-armed pongtimer) and the validated lab model. It is precisely what
+ * lets B1 RIDE OUT a video head-of-line stall: while video is queued, the PONG keeps
+ * arriving here, re-arms NO_DATA, and we do NOT reconnect. A truly dead link stops
+ * the PONG too, so NO_DATA still fires then — no regression.
+ */
+function handleControlMessage(event) {
+    if (typeof event.data === 'string') {
+        // The control channel only carries the PONG sentinel today; ignore any
+        // unexpected text frame without disturbing stream state.
+        return;
+    }
+    const dat = new Uint8Array(event.data);
+    if ((dat[4] & 0x1f) === 31) {
+        // Count the PONG here too: under B1 the sentinel returns on the control
+        // socket, not the video socket, so without this m.pongsRx never advances
+        // and the pongDef metric climbs ~1/s forever (a false "backlog").
+        m.pongsRx++;
+        lastPongAt = Date.now();
+        // Re-arm NO_DATA: the PONG is proof-of-liveness, just like a video frame.
+        // Without this a video-only stall fires noPong() and reconnects even though
+        // the link is alive on the control channel — which would defeat B1.
+        if (pongtimer !== null) clearTimeout(pongtimer);
+        pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
+    }
+}
+
+/**
+ * Opens (or reopens) the dedicated control socket on controlChannelPort, using the
+ * same wss scheme/host as the video socket. No-op when controlChannelPort is falsy
+ * (old phone). The video socket's reconnect/backoff logic is the source of truth;
+ * this socket only mirrors PING/PONG + touch and reopens itself if it drops alone.
+ */
+function startControlSocket() {
+    if (!controlChannelPort) {
+        return; // Legacy single-socket path: nothing to do.
+    }
+    // Tear down any previous control socket before opening a fresh one (called on
+    // every (re)connect with a possibly-changed port).
+    closeControlSocket();
+
+    controlSocket = new WebSocket(`wss://taada.top:${controlChannelPort}`);
+    controlSocket.binaryType = "arraybuffer";
+
+    controlSocket.addEventListener('open', () => {
+        controlSocket.binaryType = "arraybuffer";
+        debugLog('control WS open (port ' + controlChannelPort + ')');
+    });
+
+    controlSocket.addEventListener('message', event => handleControlMessage(event));
+
+    // If the control socket dies on its own (without the video socket dropping),
+    // reopen it after a short delay. Until it is back, controlSendObject/Binary
+    // transparently fall back to the video socket, so PING/touch keep flowing and
+    // the video-socket watchdog/reconnect is never affected.
+    const reopenIfStale = (ev) => {
+        if (ev && ev.target !== controlSocket) {
+            return; // stale socket event after we already replaced it
+        }
+        if (isServerShuttingDown || isReconnecting || !controlChannelPort) {
+            return; // a full reconnect (or shutdown) will rebuild it via startSocket()
+        }
+        debugLog('control WS closed (port ' + controlChannelPort + ') — reopening');
+        setTimeout(() => {
+            // Only reopen if a full reconnect hasn't taken over in the meantime.
+            if (!isServerShuttingDown && !isReconnecting && controlChannelPort) {
+                startControlSocket();
+            }
+        }, BASE_RECONNECTION_DELAY);
+    };
+    controlSocket.addEventListener('close', reopenIfStale);
+    controlSocket.addEventListener('error', reopenIfStale);
+}
+
+/** Closes and clears the control socket (silent — no reconnect side effects). */
+function closeControlSocket() {
+    if (controlSocket) {
+        const old = controlSocket;
+        controlSocket = null; // null FIRST so reopenIfStale's stale-target guard fires
+        try { old.close(); } catch (e) { /* ignore */ }
     }
 }
 
@@ -848,6 +1391,10 @@ function startSocket() {
 
         console.log('✅ WebSocket connected successfully');
         debugLog('WS open (port ' + port + ')');
+
+        // B1: bring up the dedicated control socket alongside the video socket on
+        // (re)connect. No-op when controlChannelPort is falsy (legacy single-socket).
+        startControlSocket();
 
         // Notify main thread: Socket connected
         self.postMessage({
@@ -928,6 +1475,11 @@ function socketClose(event) {
         clearTimeout(connectTimeout);
         connectTimeout = null;
     }
+    // B1: drop the control socket too; the video socket's reconnect drives the
+    // rebuild. With isReconnecting now true, its reopen handler stays suppressed —
+    // startControlSocket() in the next video 'open' reopens it on the fresh port.
+    // No-op (controlSocket === null) on the legacy single-socket path.
+    closeControlSocket();
 
     // Backoff exponentiel plafonné à 30 s. La reconnexion n'abandonne JAMAIS: le
     // lien Wi-Fi phone↔voiture finit toujours par revenir, et recharger la page
@@ -947,6 +1499,10 @@ function socketClose(event) {
         + ' code=' + closeCode + ' reason="' + closeReason + '"'
         + ' sinceLastPong=' + (lastPongAt ? (Date.now() - lastPongAt) + 'ms' : 'n/a')
         + ' sinceLastFrame=' + (lastFrameAt ? (Date.now() - lastFrameAt) + 'ms' : 'n/a')
+        + ' backlog=' + (m.totalRxFrames - m.totalRendered)
+        + ' pongDef=' + (m.pingsSent - m.pongsRx)
+        + ' dq=' + (decoder !== null ? decoder.decodeQueueSize : -1)
+        + ' pf=' + pendingFrames.length
         + ' retryIn=' + exponentialDelay + 'ms');
 
     // 🚨 NOUVEAU: Notifier le thread principal de la perte de connexion
@@ -985,6 +1541,10 @@ function socketClose(event) {
         if (discovery) {
             const portChanged = discovery.port !== port;
             port = discovery.port;
+            // B1: the phone re-randomises ALL its ports on a service restart, so the
+            // control port can change too. Adopt the fresh one (still null on an old
+            // phone). startControlSocket() in the video 'open' handler picks it up.
+            controlChannelPort = discovery.controlChannelPort || null;
             applyRediscoveredConfig(discovery);
             debugLog('reconnect #' + reconnectionAttempt + ' → discovered port ' + discovery.port
                 + (portChanged ? ' (CHANGED — phone service restarted)' : ' (same — in-place reconnect)'));
@@ -1015,12 +1575,22 @@ async function isWebCodecsWorkingWithDecode() {
             0,0,0,1,103,66,0,42,218,1,224,8,159,150,106,2,2,2,15,20,42,160,0,0,0,1,104,206,13,136,0,0,0,1,101,184,79,255,254,30,66,128,0,128,95,147,21,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,21,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,146,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,228,185,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,57,46,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,78,75,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,147,192
         ]);
         return await new Promise((resolve) => {
+            // settled guard: the 1 s fallback timer fires unconditionally, so
+            // without this it logs "probe timeout → Broadway" even when the probe
+            // already succeeded (the stray log that confused the field reading).
+            let settled = false;
+            const finish = (ok, logMsg) => {
+                if (settled) { return; }
+                settled = true;
+                if (logMsg) { debugLog(logMsg); }
+                resolve(ok);
+            };
             const decoder = new VideoDecoder({
                 output: (frame) => {
                     frame.close();
-                    resolve(true);
+                    finish(true);
                 },
-                error: () => resolve(false)
+                error: (e) => finish(false, 'webcodecs probe error: ' + (e && e.message ? e.message : e))
             });
             decoder.configure({codec: 'avc1.42002a', codedHeight: 1080, codedWidth: 1920});
             const chunk = new EncodedVideoChunk({
@@ -1029,8 +1599,11 @@ async function isWebCodecsWorkingWithDecode() {
                 data: sample
             });
             decoder.decode(chunk);
-            // fallback in case output or error doesn't fire
-            setTimeout(() => resolve(false), 1000);
+            // Fallback if neither output nor error fires. A capable browser can
+            // still miss this 1 s window on a cold GPU decode service, which would
+            // wrongly condemn the whole session to Broadway — logged ONLY when it
+            // is a real timeout (the guard prevents a false log after success).
+            setTimeout(() => finish(false, 'webcodecs probe timeout (1s) → Broadway'), 1000);
         });
     } catch (e) {
         return false;
@@ -1071,12 +1644,15 @@ function messageHandler(message) {
                 // Vérifier que l'encodage a réussi
                 if (!binaryData) {
                     console.error('[BinaryTouch] Encoding failed - falling back to JSON');
-                    socket.sendObject(message.data);
+                    // B1: route on the control socket when present, else video socket.
+                    controlSendObject(message.data);
                     return;
                 }
 
                 // Envoyer directement le buffer binaire
-                socket.send(binaryData);
+                // B1: touch rides the control socket when present so it isn't stuck
+                // behind queued video; falls back to the video socket otherwise.
+                controlSendBinary(binaryData);
 
                 // Log pour debug (contrôlé par BINARY_TOUCH_DEBUG)
                 if (BINARY_TOUCH_DEBUG) {
@@ -1091,8 +1667,8 @@ function messageHandler(message) {
                 }
             } catch (error) {
                 console.error('[BinaryTouch] Encoding error:', error);
-                // Fallback to JSON si erreur
-                socket.sendObject(message.data);
+                // Fallback to JSON si erreur — B1: control socket when present.
+                controlSendObject(message.data);
             }
         } else {
             // Autres messages: envoyer en JSON comme avant
@@ -1104,12 +1680,19 @@ function messageHandler(message) {
 self.addEventListener('message', async (message) => {
     if (message.data.action === 'INIT') {
         port = message.data.port;
+        controlChannelPort = message.data.controlChannelPort || null;
         appVersion=parseInt(message.data.appVersion);
 
 
         let useBroadway = message.data.broadway;
+        forceWebCodec = message.data.forceWebCodec === true;
 
-        if(!useBroadway) {
+        if (forceWebCodec) {
+            // Skip the probe and force WebCodecs; switchToBroadway() now recovers
+            // the hw decoder instead of demoting. Diagnostic A/B for the field.
+            useBroadway = false;
+            debugLog('forceWebCodec=1: probe skipped, Broadway demotion disabled (wc-recover)');
+        } else if(!useBroadway) {
             const codecWorking = await isWebCodecsWorkingWithDecode();
             if(codecWorking) {
                 console.log("webcodec functional");
@@ -1157,13 +1740,17 @@ self.addEventListener('message', async (message) => {
                 
                 console.log("Reconfiguring decoder with:", config);
                 decoder.configure(config);
-                
+                // Same contract as headerMagic: after configure() a key frame is
+                // required before any P-frame — gate P-frames until the next IDR
+                // (the CLEAR_BUFFERS that follows requests one).
+                awaitingKeyframe = true;
+
                 self.postMessage({warning: "Résolution adaptée, en attente d'une nouvelle image clé..."});
             } catch (e) {
                 console.error("Error reconfiguring decoder:", e);
                 self.postMessage({error: "Erreur lors du changement de résolution: " + e.message});
                 // En cas d'erreur, essayer de basculer vers Broadway
-                switchToBroadway();
+                switchToBroadway('resize-reconfigure-threw: ' + (e && e.message ? e.message : e));
             }
         } else if (broadwayDecoder !== null) {
             // Pour Broadway, nous n'avons pas besoin de reconfiguration explicite
@@ -1197,13 +1784,16 @@ self.addEventListener('message', async (message) => {
         // Vider les tampons de frames en attente
         console.log("Clearing pending frames buffer, had " + pendingFrames.length + " frames");
         
-        // Nettoyer en conservant éventuellement la dernière frame pour éviter l'écran noir
+        // Nettoyer en conservant éventuellement la dernière frame pour éviter
+        // l'écran noir. Les frames qu'on jette sont des VideoFrame GPU : il faut
+        // les close() sinon elles fuient (sinon pendingFrames=[] perd la réf sans
+        // libérer le GPU).
         if (pendingFrames.length > 0) {
-            const lastFrame = pendingFrames[pendingFrames.length - 1];
-            pendingFrames = [];
-            if (lastFrame) {
-                pendingFrames.push(lastFrame);
+            const lastFrame = pendingFrames.pop();
+            for (const f of pendingFrames) {
+                if (f && f.close) { try { f.close(); m.vfLive--; } catch (e) { /* already closed */ } }
             }
+            pendingFrames = lastFrame ? [lastFrame] : [];
         } else {
             pendingFrames = [];
         }
@@ -1220,6 +1810,15 @@ self.addEventListener('message', async (message) => {
             console.log("Sending RESET_AA_PROFILE to Android");
             socket.sendObject({action: "RESET_AA_PROFILE"});
         }
+    } else if (message.data.action === 'VISIBILITY') {
+        // Relayed by main.js from document.visibilitychange. A worker cannot see
+        // page visibility itself; this is what lets workerWasSuspended() tell a
+        // REAL backgrounding (phone call) from a CPU-starved event loop.
+        pageHidden = message.data.hidden === true;
+        if (pageHidden) {
+            lastVisibilityHiddenAt = Date.now();
+        }
+        debugLog('page visibility: ' + (pageHidden ? 'hidden' : 'visible'));
     } else if(!initted) {
         postInitJobs.push(message);
     } else {
