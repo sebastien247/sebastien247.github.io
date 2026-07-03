@@ -533,10 +533,10 @@ function postWorkerMessages(json) {
     }
 
     // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
-    if (appVersion < 73) {
-        alert("You need to run TaaDa 2.6.4 (build 73) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
-        //return;
-    }
+    //if (appVersion < 73) {
+    //    alert("You need to run TaaDa 2.6.4 (build 73) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+    //    //return;
+    //}
 
     const forceBroadway = findGetParameter("broadway") === "1";
     // ?webcodec=1: force WebCodecs and disable the Broadway demotion (diagnostic).
