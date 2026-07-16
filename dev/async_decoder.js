@@ -29,11 +29,18 @@ let pendingFrames = [],
     // a SECOND WebSocket carries PING/PONG + binary touch so they don't queue behind
     // bulk H.264 video. Both stay falsy/null on older phones ⇒ single-socket legacy path.
     controlChannelPort = null, controlSocket = null,
+    b1Param = null, // ?b1 override ("1" on / "0" off) relayed by main.js INIT — see the B1 gate below
     frameCounterTimer = 0,
     broadwayDecoder = null,
     lastheart = 0, pongtimer, frameRate,
     lastPongAt = 0, // Timestamp of the last server PONG sentinel (unittype 31)
     lastFrameAt = 0, // Timestamp of the last decoded video frame (unittype 1/5)
+    framesThisConn = 0, // Video frames seen on the CURRENT connection — arms the video-starve watchdog (F1)
+    videoStarveStrikes = 0, // Escalation strikes of the video-starve watchdog (B1 only)
+    controlCycledAt = 0, // Wall-clock of the last zombie-control-socket cycle (F4)
+    debugMode = false, // Relayed by main at INIT (?debug / phone debug flag) — gates per-frame telemetry (R5b)
+    glEscalated = false, // F3: fatalFreeze already posted for the current GL loss
+    controlReopenScheduled = false, // F10: a control-socket reopen timer is already pending
     lastHeartbeatAt = 0, // Wall-clock of the last heartbeat() tick — detects Worker suspension (WebView backgrounded during a call)
     pageHidden = false, // Mirror of document.visibilityState, relayed by main.js (action VISIBILITY)
     lastVisibilityHiddenAt = 0, // Wall-clock of the last hidden transition — corroborates a suspension
@@ -45,22 +52,7 @@ let pendingFrames = [],
     lastSkipArrivalAt = 0, // Wall-clock of the last frame seen while skipping (live-cadence probe)
     connectTimeout = null, // Watchdog handle for a WebSocket stuck in CONNECTING
     isServerShuttingDown = false, // 🚨 Flag pour indiquer que le serveur s'arrête
-    firstVideoFrameReceived = false, // Flag to track first video frame
-    // Video codec of the live stream, sniffed from the first parameter-set NAL
-    // (H.264 SPS 0x67 / PPS 0x68 vs H.265 VPS/SPS/PPS types 32/33/34, which can
-    // never collide). Null until detected. The phone advertises a codec via the
-    // developer setting, but AA may down-negotiate, so the WIRE is authoritative.
-    streamCodec = null,
-    // H.265 parameter sets (kept separate; concatenated into `sps` as the IDR
-    // prelude VPS+SPS+PPS so a keyframe access unit is self-contained).
-    h265vps = null, h265sps = null, h265pps = null,
-    // True once HEVC is proven unsupported on this browser/head unit. There is NO
-    // software HEVC path (Broadway is H.264-only), so we stop decoding and surface
-    // a clear error rather than loop or render garbage.
-    h265Unsupported = false, h265RecoverAt = 0, h265RecoverCount = 0,
-    // Codec string the H.265 decoder is currently configured for — skips redundant
-    // per-GOP reconfigure (the param sets repeat each GOP).
-    h265ConfiguredCodec = null;
+    firstVideoFrameReceived = false; // Flag to track first video frame
 
 const texturePool = [];
 
@@ -156,6 +148,7 @@ const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
 // takes this long to be noticed, but the in-place reconnect is fast once fired.
 const NO_DATA_TIMEOUT = 3000; //8000; // No binary data at all (video OR PONG) for this long ⇒ reconnect (was 3000)
 const PONG_TIMEOUT = 6000; //12000;   // No PONG sentinel for this long ⇒ dead control channel (was 6000)
+const VIDEO_STARVE_TIMEOUT = 4000;    // B1 only: frames stopped this long (PONG still fresh) ⇒ re-prime, then reconnect (F1)
 // Suspension detection (WebView backgrounded during a phone call: timers freeze,
 // the PONG/data gap is sleep time, so we re-prime instead of reconnecting).
 // Two tiers, because heartbeat-tick drift alone CANNOT distinguish a frozen
@@ -238,174 +231,14 @@ function appendByteArray(buffer1, buffer2) {
     return tmp;
 }
 
-// ========== Codec Detection & H.265 Support ==========
-
-/** Two-hex-digit string for a byte, e.g. 0x9 -> "09". */
-function hexByte(b) {
-    const h = (b & 0xff).toString(16);
-    return h.length < 2 ? '0' + h : h;
-}
-
-/**
- * Sniff the codec from a single Annex-B NAL (start code + header). The parameter
- * sets are unambiguous between the two codecs:
- *   H.264  SPS = type 7 (0x67), PPS = type 8 (0x68)   — nal_unit_type = byte & 0x1f
- *   H.265  VPS = 32, SPS = 33, PPS = 34               — nal_unit_type = (byte>>1) & 0x3f
- * The H.265 param-set header bytes (0x40/0x42/0x44) never collide with the H.264
- * ones, so the first param set we see decides the parser. Returns 'h264' | 'h265'
- * | null (a VCL/other NAL we can't classify yet).
- */
-function detectCodecFromNal(dat) {
-    if (!dat || dat.length < 5) return null;
-    const h265t = (dat[4] >> 1) & 0x3f;
-    if (h265t === 32 || h265t === 33 || h265t === 34) return 'h265'; // VPS/SPS/PPS
-    const h264t = dat[4] & 0x1f;
-    if (h264t === 7 || h264t === 8) return 'h264';                   // SPS/PPS
-    return null;
-}
-
-/** H.265 nal_unit_type from an Annex-B NAL (header at dat[4..5]). */
-function h265NalType(dat) { return (dat[4] >> 1) & 0x3f; }
-
-/**
- * Strip H.264/H.265 emulation-prevention bytes (00 00 03 -> 00 00) from a NAL's
- * RBSP, starting AFTER the start code + NAL header. Needed before bit-parsing the
- * SPS, where 00 00 00 runs in the profile_tier_level can carry an inserted 0x03.
- */
-function rbspNoEmulation(dat, startOffset) {
-    const out = [];
-    let zeros = 0;
-    for (let i = startOffset; i < dat.length; i++) {
-        const b = dat[i];
-        if (zeros >= 2 && b === 0x03) { zeros = 0; continue; } // drop emulation byte
-        out.push(b);
-        zeros = (b === 0x00) ? zeros + 1 : 0;
-    }
-    return out;
-}
-
-/**
- * Derive the WebCodecs HEVC codec string (e.g. "hev1.1.6.L93.B0") from an H.265
- * SPS NAL, per ISO 14496-15. Layout after the 2-byte NAL header:
- *   sps_video_parameter_set_id u(4) | sps_max_sub_layers_minus1 u(3) | nesting u(1)  [1 byte]
- *   profile_tier_level():
- *     general_profile_space u(2) | general_tier_flag u(1) | general_profile_idc u(5) [1 byte]
- *     general_profile_compatibility_flag[32]                                          [4 bytes]
- *     constraint indicator flags                                                      [6 bytes]
- *     general_level_idc u(8)                                                          [1 byte]
- * The compatibility flags are emitted reversed-bit-order; constraint trailing zero
- * bytes are dropped. Falls back to a generic Main/L3.1 string if the SPS is short.
- */
-function hevcCodecString(spsNal) {
-    try {
-        const r = rbspNoEmulation(spsNal, 6); // skip 4-byte start code + 2-byte NAL header
-        const ptl = 1;                        // after the vps_id/sub_layers/nesting byte
-        const b0 = r[ptl];
-        const profileSpace = (b0 >> 6) & 0x3;
-        const tier = (b0 >> 5) & 0x1;
-        const profileIdc = b0 & 0x1f;
-        const compat = ((r[ptl + 1] << 24) | (r[ptl + 2] << 16) | (r[ptl + 3] << 8) | r[ptl + 4]) >>> 0;
-        const constraint = r.slice(ptl + 5, ptl + 11);
-        const levelIdc = r[ptl + 11];
-        if (levelIdc === undefined) throw new Error('SPS too short');
-
-        const spacePrefix = profileSpace === 0 ? '' : String.fromCharCode('A'.charCodeAt(0) + profileSpace - 1);
-        const A = spacePrefix + profileIdc;
-        let rev = 0;
-        for (let i = 0; i < 32; i++) { rev = (rev << 1) | ((compat >>> i) & 1); }
-        const B = (rev >>> 0).toString(16).toUpperCase();
-        const C = (tier ? 'H' : 'L') + levelIdc;
-        const d = constraint.map(hexByte);
-        while (d.length && d[d.length - 1] === '00') d.pop();
-        const D = d.map((x) => x.toUpperCase()).join('.');
-        return 'hev1.' + A + '.' + B + '.' + C + (D ? '.' + D : '');
-    } catch (e) {
-        debugLog('hevcCodecString parse failed (' + (e && e.message ? e.message : e) + '), using generic Main/L3.1');
-        return 'hev1.1.6.L93.B0';
-    }
-}
-
-/**
- * Build the VideoDecoder configure() argument for the current stream. Unifies the
- * three former inline avc1 sites (headerMagic, RESIZE, default) and adds the H.265
- * branch. H.264 string is byte-identical to the previous inline logic.
- */
-function buildCodecConfig() {
-    const cfg = { codedHeight: height, codedWidth: width };
-    if (streamCodec === 'h265' && h265sps) {
-        cfg.codec = hevcCodecString(h265sps);
-    } else if (sps && sps.length > 7) {
-        cfg.codec = 'avc1.' + hexByte(sps[5]) + hexByte(sps[6]) + hexByte(sps[7]);
-    } else {
-        cfg.codec = 'avc1.42002a';
-    }
-    return cfg;
-}
-
-/**
- * Configure the decoder for H.265. isConfigSupported() gives a DETERMINISTIC
- * answer to the on-car crux ("does this head unit's Chromium decode HEVC?"): if it
- * is false we surface a clear error and stop, instead of feeding NAL into a decoder
- * that will async-error forever (Broadway can't take over — it is H.264-only).
- */
-async function configureH265() {
-    if (decoder === null || !h265sps || h265Unsupported) return;
-    const cfg = buildCodecConfig();
-    // A real AA stream re-sends VPS/SPS/PPS each GOP (and our keyframe-loop test
-    // every frame). Skip the (async) reconfigure when the decoder is already
-    // configured for this exact codec string — avoids per-GOP churn + a needless
-    // awaitingKeyframe re-arm. Dimension changes go through the RESIZE path.
-    if (decoder.state === 'configured' && h265ConfiguredCodec === cfg.codec) return;
-    try {
-        if (typeof VideoDecoder !== 'undefined' && VideoDecoder.isConfigSupported) {
-            const support = await VideoDecoder.isConfigSupported(cfg);
-            if (!support || !support.supported) {
-                h265Unsupported = true;
-                debugLog('HEVC unsupported here: ' + cfg.codec);
-                self.postMessage({ error: 'HEVC (H.265) is not supported by this browser/head unit. Switch the developer Video codec setting back to H.264.' });
-                return;
-            }
-        }
-        if (decoder.state !== 'closed') {
-            decoder.configure(cfg);
-            h265ConfiguredCodec = cfg.codec;
-            awaitingKeyframe = true;
-            debugLog('H265 decoder configured: ' + cfg.codec);
-        }
-    } catch (e) {
-        debugLog('H265 configure threw: ' + (e && e.message ? e.message : e));
-        switchToBroadway('h265-configure-threw: ' + (e && e.message ? e.message : e));
-    }
-}
-
-/**
- * H.265 per-NAL handler (mirror of headerMagic for H.264). VPS/SPS/PPS are stored
- * and concatenated into `sps` (the IDR prelude). Everything else (VCL slices, SEI,
- * AUD) flows to videoMagic, which classifies key vs delta by HEVC nal_unit_type.
- */
-function headerMagicH265(dat) {
-    const t = h265NalType(dat);
-    if (t === 32) { h265vps = dat; rebuildH265Prelude(); return; }       // VPS
-    if (t === 33) { h265sps = dat; rebuildH265Prelude(); configureH265(); return; } // SPS
-    if (t === 34) { h265pps = dat; rebuildH265Prelude(); return; }       // PPS
-    videoMagic(dat);
-}
-
-/** Concatenate the latest VPS+SPS+PPS into `sps`, prepended to each IDR. */
-function rebuildH265Prelude() {
-    let blob = null;
-    for (const ps of [h265vps, h265sps, h265pps]) {
-        if (!ps) continue;
-        blob = blob === null ? ps : appendByteArray(blob, ps);
-    }
-    if (blob !== null) sps = blob;
-}
-
 // ========== Frame Functions ==========
 
 function updateFrameCounter() {
     frameTimes[runtime] = frameCounter;
     frameRate = Math.round((frameCounter - frameTimes[runtime - 10]) / 10);
+    // F7: only runtime and runtime-10 are ever read — drop the older entries so
+    // the array stops growing ~36k entries per 10h drive.
+    delete frameTimes[runtime - 11];
     runtime++;
 
     // 1 Hz pipeline sample for the ?debug panel. Cheap: a handful of integers.
@@ -500,37 +333,6 @@ function createShader(gl, type, source) {
 // fallback is one-way and sticky until reload — see #latency-regression-260).
 function switchToBroadway(reason) {
     const why = reason || 'unspecified';
-
-    // H.265 has NO software fallback — Broadway decodes H.264 only. Demoting would
-    // feed HEVC NAL to an H.264 decoder and paint garbage. Recreate the hardware
-    // decoder and pull a keyframe; if it keeps failing (HEVC truly unsupported on
-    // this head unit), give up after a few tries and surface a clear error so the
-    // tester flips the codec back to H.264 — never silently render trash.
-    if (streamCodec === 'h265') {
-        const now = Date.now();
-        if (now - h265RecoverAt > 10000) { h265RecoverCount = 0; }
-        h265RecoverAt = now;
-        h265RecoverCount++;
-        if (h265RecoverCount <= 4 && !h265Unsupported) {
-            debugLog('h265-recover #' + h265RecoverCount + ': ' + why);
-            m.bwReason = 'h265-recover: ' + why;
-            try {
-                if (decoder && decoder.state !== 'closed') { try { decoder.close(); } catch (e) { /* already closed */ } }
-                createVideoDecoder();
-                configureH265();
-                if (socket && socket.readyState === WebSocket.OPEN) {
-                    socket.sendObject({action: "REQUEST_KEYFRAME"});
-                }
-            } catch (e) {
-                debugLog('h265-recover failed: ' + (e && e.message ? e.message : e));
-            }
-        } else {
-            h265Unsupported = true;
-            debugLog('h265-recover storm — declaring HEVC unsupported');
-            self.postMessage({ error: 'HEVC (H.265) failed to decode on this browser/head unit. Switch the developer Video codec setting back to H.264.' });
-        }
-        return;
-    }
 
     // ?webcodec=1: never demote to software. Recreate the hardware decoder and
     // pull a fresh keyframe instead. A storm guard (>8 recoveries / 10 s) lets a
@@ -674,6 +476,7 @@ function installGlContextHandlers(canvas) {
             gl = canvas.getContext('webgl2');
             setupGlPipeline();
             glContextLost = false;
+            glEscalated = false;
             awaitingKeyframe = true;     // request a clean IDR; nothing valid to paint yet
             maybeRequestKeyframe();
             debugLog('WebGL context RESTORED after ' + (Date.now() - glContextLostAt) + 'ms — render resumed');
@@ -754,7 +557,11 @@ async function renderFrame() {
         socket.sendObject({action: "ACK"});
     }
     try {
-        self.postMessage({
+        // R5b (audit 2026-07-07): this per-frame postMessage crossed the
+        // worker->main boundary 30-60x/s for the whole drive, and main's only
+        // consumer is the ?debug log line. The 1 Hz metrics pipeline carries
+        // diagnostics for everyone else.
+        if (debugMode) self.postMessage({
             fps: getFrameStats(),
             decodeQueueSize: decoder !== null ? decoder.decodeQueueSize : 0,
             pendingFrames: pendingFrames.length
@@ -807,28 +614,23 @@ function notifyFirstVideoFrame() {
 }
 
 function videoMagic(dat){
-    // Classify this NAL as keyframe / delta independent of codec. For H.264 these
-    // map exactly to the legacy unittype===5 / ===1 checks (behaviour unchanged).
-    // For H.265, key = IRAP slices (BLA/IDR/CRA, types 16..23) and delta = other
-    // VCL slices (types 0..15); non-VCL NALs (>31: SEI/AUD/EOS/FD) decode nothing.
-    let isKey, isDelta;
-    if (streamCodec === 'h265') {
-        if (h265Unsupported) return; // no software HEVC fallback — stop, error already surfaced
-        const t = h265NalType(dat);
-        if (t > 31) return;          // non-VCL — handled in headerMagicH265 or skipped
-        isKey = (t >= 16 && t <= 23);
-        isDelta = !isKey;
-    } else {
-        const unittype = (dat[4] & 0x1f);
-        isKey = (unittype === 5);
-        isDelta = (unittype === 1);
+    let unittype = (dat[4] & 0x1f);
+    // Liveness anchor for the F1 video-starve watchdog (and the frameAge
+    // metric): every real video NAL lands here, whether its message was led by
+    // the IDR itself or by SPS/PPS/AUD (separateNalUnits→headerMagic path).
+    // Counted even while skip-to-latest drops the backlog — arriving stale
+    // frames still prove the video socket is alive.
+    if (unittype === 1 || unittype === 5) {
+        lastFrameAt = Date.now();
+        framesThisConn++;
+        videoStarveStrikes = 0;
     }
     // Skip-to-latest drain: after a suspension we drop the stale backlog while it
     // streams back-to-back (sub-SKIP_LIVE_GAP_MS apart). The instant arrivals slow
     // to the live cadence we have caught up — stop dropping, force a keyframe and
     // gate P-frames until it decodes (a live P referencing dropped frames would
     // throw and demote to Broadway, so awaitingKeyframe here is load-bearing).
-    if (skippingStale && (isDelta || isKey)) {
+    if (skippingStale && (unittype === 1 || unittype === 5)) {
         const _n = Date.now();
         const gap = lastSkipArrivalAt ? (_n - lastSkipArrivalAt) : 0;
         lastSkipArrivalAt = _n;
@@ -850,7 +652,7 @@ function videoMagic(dat){
     // first NAL is SPS/PPS/filler reach the decodable AU through headerMagic →
     // videoMagic, and a first-NAL sniff at message level undercounts them
     // (observed rx=0 while dec=30 in the bench repro).
-    if (isDelta || isKey) {
+    if (unittype === 1 || unittype === 5) {
         const _now = Date.now();
         if (m.lastArrivalAt !== 0) {
             const gap = _now - m.lastArrivalAt;
@@ -861,7 +663,7 @@ function videoMagic(dat){
         m.totalRxFrames++;
     }
     const _dt0 = Date.now();
-    if (isDelta) {
+    if (unittype === 1) {
         if(decoder !== null) {
             if (decoder.state === 'closed') {
                 switchToBroadway('decoder-closed-P');
@@ -893,7 +695,7 @@ function videoMagic(dat){
         return;
     }
 
-    if (isKey) {
+    if (unittype === 5) {
         // An IDR cannot be decoded without SPS/PPS; after a reconnect sps is
         // cleared and repopulated by the resent codec config (#80). If the
         // keyframe somehow arrives first, drop it rather than crash on
@@ -943,21 +745,22 @@ function videoMagic(dat){
 }
 
 function headerMagic(dat) {
-    // Detect the codec from the first parameter-set NAL we see (sticky thereafter).
-    if (streamCodec === null) {
-        const detected = detectCodecFromNal(dat);
-        if (detected) {
-            streamCodec = detected;
-            debugLog('stream codec detected from wire: ' + detected);
-        }
-    }
-    if (streamCodec === 'h265') { headerMagicH265(dat); return; }
-
     let unittype = (dat[4] & 0x1f);
 
     if (unittype === 7) {
+        let config = {
+            codec: "avc1.",
+            codedHeight: height,
+            codedWidth: width,
+        }
+        for (let i = 5; i < 8; ++i) {
+            var h = dat[i].toString(16);
+            if (h.length < 2) {
+                h = '0' + h;
+            }
+            config.codec += h;
+        }
         sps = dat;
-        const config = buildCodecConfig(); // "avc1." + hex(sps[5..7]) — unchanged
         if(decoder !== null) {
             try {
                 decoder.configure(config);
@@ -1036,6 +839,10 @@ function resumeAfterSuspend(source) {
         // Fresh baselines so the dead-channel checks don't fire on the sleep gap.
         lastPongAt = now;
         lastheart = now;
+        // F1: same grace for the video-starve watchdog — the frame gap was sleep
+        // time, not a dead video socket (distorts one frameAge metric sample).
+        if (lastFrameAt !== 0) { lastFrameAt = now; }
+        videoStarveStrikes = 0;
         if (pongtimer) { clearTimeout(pongtimer); }
         pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
         // Skip-to-latest: the stale backlog queued during the freeze is about to
@@ -1123,6 +930,17 @@ function heartbeat() {
         texturePool.length = 0;
         debugLog('WebGL context LOST (silent, no event) — render paused, awaiting restore');
     }
+    // F3 escalation (audit 2026-07-07): a SILENT loss never fires
+    // webglcontextlost, so per spec webglcontextrestored never comes either —
+    // detection alone left a permanent freeze with healthy watchdogs. 15s with
+    // no restore (either path) means this context is not coming back: ask the
+    // main thread for a reload-when-online.
+    if (glContextLost && glContextLostAt !== 0 && !glEscalated
+        && (Date.now() - glContextLostAt) > 15000) {
+        glEscalated = true;
+        debugLog('WebGL context lost >15s with no restore — requesting page reload');
+        try { self.postMessage({ fatalFreeze: 'gl context lost, no restore in 15s' }); } catch (e) { /* ignore */ }
+    }
 
     // Dead control channel: the phone replies to every PING with a PONG sentinel
     // (unittype 31). lastPongAt is updated only by that sentinel, never by video
@@ -1130,9 +948,53 @@ function heartbeat() {
     // caught here — independently of video flow.
     if (lastPongAt !== 0 && (Date.now() - lastPongAt) > PONG_TIMEOUT) {
         const gap = Date.now() - lastPongAt;
-        console.warn('No PONG from phone for ' + gap + 'ms — forcing in-place reconnect');
-        forceReconnect('pongTimeout gap=' + gap + 'ms rs=' + (socket ? socket.readyState : -1));
-        return;
+        // F4 (audit 2026-07-07): a ZOMBIE control socket (readyState OPEN but a
+        // half-open TCP) swallows the PINGs, so the PONG gap says nothing about
+        // the video link. While frames are demonstrably fresh, cycle the control
+        // socket and route one PING via the video socket instead of dropping a
+        // healthy stream. The 5s guard (< PONG_TIMEOUT) lets the cycle repeat if
+        // the fresh control socket zombifies again; a video that is ALSO stale
+        // exits through the reconnect below or the F1/noData watchdogs.
+        if (controlChannelOpen() && lastFrameAt !== 0 && (Date.now() - lastFrameAt) < 5000
+            && (Date.now() - controlCycledAt) > 5000) {
+            controlCycledAt = Date.now();
+            debugLog('PONG gap ' + gap + 'ms but video fresh (frameAge=' + (Date.now() - lastFrameAt) + 'ms) — cycling zombie control socket (F4)');
+            lastPongAt = Date.now();
+            try { startControlSocket(); } catch (e) { /* next tick falls through to reconnect */ }
+            try { socket.sendObject({action: 'PING'}); } catch (e) { /* video send error → next tick */ }
+        } else {
+            console.warn('No PONG from phone for ' + gap + 'ms — forcing in-place reconnect');
+            forceReconnect('pongTimeout gap=' + gap + 'ms rs=' + (socket ? socket.readyState : -1));
+            return;
+        }
+    }
+
+    // Video-starve watchdog (F1, audit 2026-07-07): under B1 the PONG rides its
+    // own socket, so a dead/half-open VIDEO socket keeps NO_DATA and PONG_TIMEOUT
+    // fed while the picture freezes forever (bench/browser/repro-video-starve.js).
+    // Watch the video flow itself. Armed only when (a) B1 carries the PONGs and
+    // (b) frames have flowed on THIS connection — so a phone that legitimately
+    // projects nothing never trips it, and a reconnect that still gets no video
+    // disarms it instead of looping. Strike 1 re-primes the video socket (START
+    // is idempotent phone-side, REQUEST_KEYFRAME pulls a fresh IDR); if that
+    // brings no frame within ~2 s the socket is dead — reconnect.
+    if (controlChannelOpen() && framesThisConn > 0 && lastFrameAt !== 0
+        && socket && socket.readyState === WebSocket.OPEN
+        && (Date.now() - lastFrameAt) > VIDEO_STARVE_TIMEOUT) {
+        videoStarveStrikes++;
+        if (videoStarveStrikes === 1) {
+            debugLog('video starved ' + (Date.now() - lastFrameAt) + 'ms with fresh PONG — re-priming (strike 1)');
+            try {
+                socket.sendObject({action: 'START'});
+                socket.sendObject({action: 'REQUEST_KEYFRAME'});
+            } catch (e) {
+                forceReconnect('videoStarvedSendError ' + (e && e.message ? e.message : e));
+                return;
+            }
+        } else if (videoStarveStrikes >= 3) {
+            forceReconnect('videoStarved ' + (Date.now() - lastFrameAt) + 'ms (PONG alive, B1 masking)');
+            return;
+        }
     }
 
     if (lastheart !== 0) {
@@ -1228,7 +1090,10 @@ function handleVideoMessage(dat){
         return;
     }
     if (unittype === 1 || unittype === 5) {
-        lastFrameAt = Date.now();
+        // lastFrameAt/framesThisConn now update inside videoMagic: anchoring them
+        // on THIS message-level first-NAL sniff missed every SPS-led AU framing
+        // (Redmi/PixelOS MediaCodec), starving the F1 watchdog on those devices
+        // while video flowed (found by the repro's embedded synthetic source).
         videoMagic(dat);
         // Stage 2→3 promotion now fires from videoMagic on a decoded IDR, so it
         // also covers the else-branch below (a keyframe whose message is led by
@@ -1236,22 +1101,6 @@ function handleVideoMessage(dat){
     }
     else
         separateNalUnits(dat).forEach(headerMagic)
-}
-
-/**
- * Réinitialise les compteurs de reconnexion (appelé au démarrage initial)
- * Permet de réessayer après avoir atteint la limite de tentatives
- */
-function resetReconnectionState() {
-    isReconnecting = false;
-    reconnectionAttempt = 0;
-
-    if (reconnectionTimeout) {
-        clearTimeout(reconnectionTimeout);
-        reconnectionTimeout = null;
-    }
-
-    console.log('🔄 Reconnection state reset');
 }
 
 /**
@@ -1269,7 +1118,7 @@ async function rediscoverPort() {
         try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 3000);
-            const url = `https://taada.top:${discoveryPort}/getsocketport?w=${width}&h=${height}&webcodec=true&reconnect=true`;
+            const url = `https://taada.top:${discoveryPort}/getsocketport?w=${width}&h=${height}&webcodec=${typeof VideoDecoder !== 'undefined'}&reconnect=true`;
             const response = await fetch(url, {method: 'get', signal: controller.signal});
             clearTimeout(timeout);
             if (!response.ok) {
@@ -1389,12 +1238,6 @@ function resetStreamStateForReconnect() {
     // The Broadway fallback has no VideoDecoder to recreate — it re-syncs on the
     // next SPS+IDR once pendingFrames and sps are cleared.
     sps = undefined;
-    // Re-detect the codec from the wire after a reconnect: the developer codec
-    // setting could have changed (its toggle restarts the phone service, which is
-    // what triggers this reconnect), and the phone re-sends fresh parameter sets.
-    streamCodec = null;
-    h265vps = null; h265sps = null; h265pps = null;
-    h265Unsupported = false; h265RecoverCount = 0; h265ConfiguredCodec = null;
     if (broadwayDecoder === null) {
         if (decoder && decoder.state !== 'closed') {
             try { decoder.close(); } catch (e) { /* already closed */ }
@@ -1438,6 +1281,12 @@ function forceReconnect(reason) {
 // (head-of-line blocking). EVERYTHING here is a no-op when controlChannelPort is
 // falsy: no second socket is opened and every send falls back to the video socket,
 // preserving the legacy single-socket behaviour byte-for-byte.
+
+// HOTFIX 2026-07-12: builds 66-70 carry the B1 server without the dead-man re-arm
+// (Fix A, vc71+), so B1 is gated on the advertised buildversion. Applied on the
+// in-worker rediscovery path; the INIT path is gated by main.js. ?b1=1 forces on,
+// ?b1=0 forces off. Keep in sync with main.js.
+const B1_MIN_BUILDVERSION = 71;
 
 /** True only when the dedicated control socket exists AND is OPEN. */
 function controlChannelOpen() {
@@ -1542,8 +1391,13 @@ function startControlSocket() {
         if (isServerShuttingDown || isReconnecting || !controlChannelPort) {
             return; // a full reconnect (or shutdown) will rebuild it via startSocket()
         }
+        if (controlReopenScheduled) {
+            return; // F10: error+close both fire — one reopen timer is enough
+        }
+        controlReopenScheduled = true;
         debugLog('control WS closed (port ' + controlChannelPort + ') — reopening');
         setTimeout(() => {
+            controlReopenScheduled = false;
             // Only reopen if a full reconnect hasn't taken over in the meantime.
             if (!isServerShuttingDown && !isReconnecting && controlChannelPort) {
                 startControlSocket();
@@ -1617,6 +1471,11 @@ function startSocket() {
         // slow (backoff) reconnect is not mistaken for a Worker suspension.
         lastPongAt = Date.now();
         lastHeartbeatAt = Date.now();
+        // F1: the video-starve watchdog only arms once frames flow on THIS
+        // connection — a reconnect that gets no video stays disarmed (no loop
+        // when the phone legitimately projects nothing).
+        framesThisConn = 0;
+        videoStarveStrikes = 0;
 
         console.log('✅ WebSocket connected successfully');
         debugLog('WS open (port ' + port + ')');
@@ -1773,7 +1632,11 @@ function socketClose(event) {
             // B1: the phone re-randomises ALL its ports on a service restart, so the
             // control port can change too. Adopt the fresh one (still null on an old
             // phone). startControlSocket() in the video 'open' handler picks it up.
-            controlChannelPort = discovery.controlChannelPort || null;
+            // HOTFIX 2026-07-12: same B1 buildversion gate as main.js — without it the
+            // first in-worker rediscovery would silently re-adopt the control port.
+            const b1Enabled = b1Param === "1"
+                || (b1Param !== "0" && parseInt(discovery.buildversion) >= B1_MIN_BUILDVERSION);
+            controlChannelPort = b1Enabled ? (discovery.controlChannelPort || null) : null;
             applyRediscoveredConfig(discovery);
             debugLog('reconnect #' + reconnectionAttempt + ' → discovered port ' + discovery.port
                 + (portChanged ? ' (CHANGED — phone service restarted)' : ' (same — in-place reconnect)'));
@@ -1910,7 +1773,9 @@ self.addEventListener('message', async (message) => {
     if (message.data.action === 'INIT') {
         port = message.data.port;
         controlChannelPort = message.data.controlChannelPort || null;
+        b1Param = message.data.b1Param || null;
         appVersion=parseInt(message.data.appVersion);
+        debugMode = message.data.debug === true;
 
 
         let useBroadway = message.data.broadway;
@@ -1946,11 +1811,27 @@ self.addEventListener('message', async (message) => {
         // Mettre à jour la configuration du décodeur si nous utilisons WebCodec
         if(decoder !== null && decoder.state !== 'closed') {
             try {
-                // Reconfigure with the new dimensions. buildCodecConfig() picks the
-                // codec string from the current stream (avc1 from the H.264 SPS, or
-                // hev1 from the H.265 SPS), falling back to avc1.42002a pre-SPS.
-                const config = buildCodecConfig();
-
+                // Reconfigurer le décodeur avec les nouvelles dimensions
+                let config = {
+                    codec: "avc1.",
+                    codedHeight: height,
+                    codedWidth: width,
+                };
+                
+                // Ajouter le codec spécifique si nous l'avons déjà
+                if (sps && sps.length > 7) {
+                    for (let i = 5; i < 8; ++i) {
+                        var h = sps[i].toString(16);
+                        if (h.length < 2) {
+                            h = '0' + h;
+                        }
+                        config.codec += h;
+                    }
+                } else {
+                    // Codec par défaut si on n'a pas encore reçu de SPS
+                    config.codec += "42002a";
+                }
+                
                 console.log("Reconfiguring decoder with:", config);
                 decoder.configure(config);
                 // Same contract as headerMagic: after configure() a key frame is

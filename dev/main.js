@@ -21,7 +21,9 @@ const demuxDecodeWorker = new Worker("./async_decoder.js" + ASSET_VERSION),
     waitingMessageElement = document.getElementById('waiting-message'),
     errorOverlay = document.getElementById('error-overlay'),
     errorMessage = document.getElementById('error-message'),
-    supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
+    // F8: report the REAL capability — hardcoded true made the phone size the
+    // stream for a hardware decoder even when the worker falls back to Broadway.
+    supportedWebCodec = (typeof VideoDecoder !== 'undefined'),
     DEFAULT_HTTPS_PORT = 8081,
     MAX_PORT_RETRIES = 5;
 
@@ -40,6 +42,7 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     port,
     drageventCounter=0,
     videoFrameReceived = false,
+    cachedCanvasRect = null, // R5a: canvas rect cache, invalidated on resize/updateCanvasSize
     timeoutId,
     isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
     step2TimeoutId = null,
@@ -68,6 +71,30 @@ function hideErrorOverlay() {
         errorOverlay.style.display = "none";
     }
 }
+
+// F2 (audit 2026-07-07): a Worker that dies — importScripts failing on a flaky
+// car network (Decoder.js is 290 KB), or an uncaught exception outside the
+// worker's own try/catch — previously died SILENTLY: no watchdogs, no
+// reconnect, the UI parked on "2/3" forever and only a manual reload
+// recovered. Reload (when online) up to twice per tab session; a third crash
+// is deterministic, so surface it instead of reload-looping.
+const WORKER_CRASH_KEY = 'taada_worker_crashes';
+demuxDecodeWorker.addEventListener('error', (e) => {
+    const detail = (e && e.message) ? e.message
+        : ('script error' + (e && e.filename ? ' @ ' + e.filename + ':' + (e.lineno || '?') : ''));
+    appendDebugLog({ ts: Date.now(), msg: '[worker-crash] ' + detail });
+    let crashes = 1;
+    try {
+        crashes = parseInt(sessionStorage.getItem(WORKER_CRASH_KEY) || '0', 10) + 1;
+        sessionStorage.setItem(WORKER_CRASH_KEY, String(crashes));
+    } catch (err) { /* storage unavailable: treat as first crash */ }
+    if (crashes <= 2) {
+        reloadWhenOnline('worker crashed: ' + detail);
+    } else {
+        showErrorOverlay('Video engine failed to load repeatedly (' + detail
+            + '). Check the phone connection, then tap Reload.');
+    }
+});
 
 /**
  * Vérifie si le serveur est accessible
@@ -239,8 +266,14 @@ function updateConnectionProgress(step, message) {
  * @returns {{x: number, y: number}} The converted coordinates relative to the canvas
  */
 function convertToCanvasCoordinates(screenX, screenY) {
-    // Get the canvas's bounding rectangle, which includes any CSS transformations
-    const canvasRect = canvasElement.getBoundingClientRect();
+    // R5a (audit 2026-07-07): getBoundingClientRect ran PER TOUCH (up to 2N per
+    // touchstart, N per native touchmove at 60-120 Hz) — a forced layout each
+    // time any DOM mutation (warning banner, debug panel) left layout dirty.
+    // The canvas only moves on resize/updateCanvasSize, so read once and cache.
+    if (!cachedCanvasRect) {
+        cachedCanvasRect = canvasElement.getBoundingClientRect();
+    }
+    const canvasRect = cachedCanvasRect;
     
     // Calculate the position relative to the canvas's top-left corner
     const canvasRelativeX = screenX - canvasRect.left;
@@ -424,6 +457,7 @@ function findGetParameter(parameterName) {
  * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
  */
 function updateCanvasSize() {
+    cachedCanvasRect = null; // canvas geometry is about to change (R5a cache)
     // Taille réelle de l'image dans le canvas (sans les marges)
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
@@ -492,7 +526,7 @@ function postWorkerMessages(json) {
     // messages no longer queue behind bulk H.264 video (head-of-line blocking).
     // Absent/null on older phones → controlChannelPort stays falsy and the worker
     // keeps everything on the single video socket (byte-identical legacy path).
-    const controlChannelPort = json.controlChannelPort || null;
+    const advertisedControlChannelPort = json.controlChannelPort || null;
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
@@ -532,15 +566,31 @@ function postWorkerMessages(json) {
         }
     }
 
-    // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
-    if (appVersion < 65) {
-        alert("You need to run TaaDa build 65 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+    // Build 73+ is the floor the DEPLOYED Pages bundle already enforces — this line
+    // was edited directly in the io repo and is repatriated here (F14, audit
+    // 2026-07-07) so a redeploy from this repo no longer regresses the gate to 65.
+    if (appVersion < 73) {
+        alert("You need to run TaaDa build 73 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
         //return;
     }
 
     const forceBroadway = findGetParameter("broadway") === "1";
     // ?webcodec=1: force WebCodecs and disable the Broadway demotion (diagnostic).
     const forceWebCodec = findGetParameter("webcodec") === "1";
+
+    // HOTFIX 2026-07-12: builds 66-70 ship the B1 server WITHOUT the dead-man
+    // re-arm (Fix A, vc71+), so once the 03/07 root deploy activated B1 their
+    // video-focus stopped tracking browser liveness and AA closes the session
+    // ("AA needs you" window). Gate B1 on the advertised buildversion so those
+    // APKs fall back to the proven single-socket path; vc71+ keep B1 (the
+    // dominant window mode measured on 12/07 happens with NO browser attached,
+    // so disabling B1 fleet-wide would not help and would re-create PONG
+    // head-of-line stalls). ?b1=1 forces B1 on, ?b1=0 forces it off (A/B
+    // diagnostics). Keep the constant in sync with async_decoder.js.
+    const B1_MIN_BUILDVERSION = 71;
+    const b1Param = findGetParameter("b1");
+    const b1Enabled = b1Param === "1" || (b1Param !== "0" && appVersion >= B1_MIN_BUILDVERSION);
+    const controlChannelPort = b1Enabled ? advertisedControlChannelPort : null;
 
 
     canvasElement.width = width;
@@ -554,7 +604,7 @@ function postWorkerMessages(json) {
     
     // Initialiser le worker avec le canvas offscreen
     demuxDecodeWorker.postMessage(
-        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height},
+        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, b1Param: b1Param, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height, debug: debug || debugPanelEnabled},
         [offscreen]
     );
 
@@ -689,6 +739,14 @@ function postWorkerMessages(json) {
             updateConnectionProgress(progress.step, progress.message);
         }
 
+        // F3: the worker declared the GL context unrecoverable (silent loss, no
+        // restore for 15s). Only a page reload rebuilds the canvas pipeline.
+        if (e.data.hasOwnProperty('fatalFreeze')) {
+            appendDebugLog({ ts: Date.now(), msg: '[fatal-freeze] ' + e.data.fatalFreeze });
+            reloadWhenOnline('fatal freeze: ' + e.data.fatalFreeze);
+            return;
+        }
+
         // Hide the waiting message when first video frame is received
         if (e.data.hasOwnProperty('videoFrameReceived')) {
             console.log("Video frame received message received!", e.data);
@@ -696,6 +754,9 @@ function postWorkerMessages(json) {
 
             // Stream is live again — clear any reconnecting overlay.
             hideErrorOverlay();
+
+            // Healthy stream: forget past worker crashes (F2 reload budget resets).
+            try { sessionStorage.removeItem(WORKER_CRASH_KEY); } catch (err) { /* ignore */ }
 
             // Update to step 3/3 - Stream ready
             updateConnectionProgress(3, '3/3 - Stream ready!');
@@ -745,7 +806,10 @@ function getLocation() {
 
 function getPosition(pos) {
     clearTimeout(timeoutId);
-    socket.send(JSON.stringify({
+    // F9a: `socket` is never assigned in main.js — the old direct send was a
+    // guaranteed TypeError if the commented GPS poll ever came back. Route via
+    // the worker like the live handlepossition path.
+    demuxDecodeWorker.postMessage({
         action: "GPS",
         latitude: pos.coords.latitude,
         longitude: pos.coords.longitude,
@@ -753,7 +817,7 @@ function getPosition(pos) {
         accuracy: pos.coords.accuracy,
         heading: pos.coords.heading,
         speed: pos.coords.speed
-    }));
+    });
     timeoutId = setTimeout(getLocation, 250);
 }
 
@@ -828,6 +892,16 @@ function initializeAudioOnFirstTouch() {
  * @param {TouchEvent} event - L'événement tactile
  */
 function handleTouchStart(event) {
+    if (!videoFrameReceived) {
+        // F5/F11 (audit 2026-07-07): while the landing page is visible, an
+        // unconditional preventDefault killed the compatibility click events —
+        // Play Store badge, email reveal, reset button were dead to touch. And
+        // touches converted before INIT used undefined width/height (NaN -> 0),
+        // then got REPLAYED to Android Auto as ghost taps at (0,0) once the
+        // stream came up. No stream on screen = nothing to send, keep native
+        // semantics.
+        return;
+    }
     event.preventDefault();
     initializeAudioOnFirstTouch();
 
@@ -862,6 +936,9 @@ bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false })
  * @param {TouchEvent} event - L'événement tactile
  */
 function handleTouchEnd(event) {
+    if (!videoFrameReceived) {
+        return; // F5/F11: same gate as handleTouchStart
+    }
     event.preventDefault();
 
     // CRITIQUE: Annuler tout MULTITOUCH_MOVE en attente pour éviter le bug "sticky touch"
@@ -936,6 +1013,9 @@ function processTouchMove() {
 }
 
 bodyElement.addEventListener('touchmove', (event) => {
+    if (!videoFrameReceived) {
+        return; // F5/F11: same gate as handleTouchStart
+    }
     // Convertir les données tactiles IMMÉDIATEMENT pour éviter la mutation de l'événement
     // (le navigateur peut réutiliser l'objet TouchEvent pour des raisons de performance)
     latestTouchData = {
@@ -952,6 +1032,7 @@ bodyElement.addEventListener('touchmove', (event) => {
 
 // Ajouter un écouteur d'événement pour le redimensionnement de la fenêtre
 window.addEventListener('resize', () => {
+    cachedCanvasRect = null; // R5a cache: viewport changed even if canvas size math doesn't run
     if (width && height) {
         updateCanvasSize();
     }
@@ -1388,7 +1469,22 @@ function formatMetrics(mm) {
         + ' dec=' + (mm.decMs == null ? '?' : mm.decMs) + 'ms'
         + ' pongAge=' + mm.pongAge + 'ms'
         + ' drift=' + mm.drift + 'ms'
+        + ' vf=' + (mm.vfLive == null ? '?' : mm.vfLive)
+        + (mm.glLost ? ' GL=LOST' : '')
+        + heapStr()
         + (mm.bwSwitches ? ' bwSw=' + mm.bwSwitches + (mm.bwReason ? ' [' + mm.bwReason + ']' : '') : '');
+}
+
+// Main-thread JS heap (Chrome-only, non-standard). A steady climb over a drive
+// = a page-side leak; pairs with the worker `vf` counter (GPU VideoFrames) to
+// tell a JS-heap leak from a GPU-frame leak. '' when the API is unavailable.
+function heapStr() {
+    try {
+        if (performance && performance.memory && performance.memory.usedJSHeapSize) {
+            return ' heap=' + Math.round(performance.memory.usedJSHeapSize / 1048576) + 'MB';
+        }
+    } catch (e) { /* unsupported */ }
+    return '';
 }
 
 function handleWorkerMetrics(mm) {
