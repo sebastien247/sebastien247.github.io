@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Caméra Tesla</title>
+    <style>
+        /* Réinitialisation pour prendre 100% de l'écran */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000; /* Fond noir pour se fondre avec l'interface Tesla */
+            overflow: hidden; /* Empêche le scroll */
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: white;
+        }
+        
+        /* Conteneur principal */
+        #video-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        /* La vidéo en plein écran */
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* Remplit tout l'écran, peut rogner un peu les bords */
+            /* Utilisez "object-fit: contain;" si vous voulez voir toute l'image sans rognage, mais avec des bandes noires */
+        }
+        
+        /* Couche d'interface utilisateur (Menu) */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 10;
+            text-align: center;
+            padding: 20px;
+            box-sizing: border-box;
+            transition: opacity 0.5s ease;
+        }
+        
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+        
+        p {
+            font-size: 1.1rem;
+            margin-bottom: 30px;
+            color: #ccc;
+        }
+
+        /* Bouton rouge style Tesla */
+        button {
+            padding: 15px 40px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            background-color: #e82127; 
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 20px;
+            transition: background 0.3s;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        
+        button:hover {
+            background-color: #c01a20;
+        }
+        
+        #status {
+            font-size: 1.1rem;
+            max-width: 600px;
+            line-height: 1.5;
+            color: #ffaa00;
+        }
+        
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+
+<div id="video-container">
+    <!-- autoplay, playsinline et muted sont recommandés pour forcer la lecture sur navigateur embarqué/mobile -->
+    <video id="tesla-cam" autoplay playsinline muted></video>
+    
+    <div id="ui-layer">
+        <h1>Test Caméra Intérieure Tesla</h1>
+        <p>Assurez-vous que le véhicule est <strong>à l'arrêt (Mode Park)</strong>.</p>
+        <button id="start-btn">Activer la Caméra</button>
+        <div id="status"></div>
+    </div>
+</div>
+
+<script>
+    const videoElement = document.getElementById('tesla-cam');
+    const startBtn = document.getElementById('start-btn');
+    const uiLayer = document.getElementById('ui-layer');
+    const statusDiv = document.getElementById('status');
+
+    startBtn.addEventListener('click', async () => {
+        statusDiv.textContent = "Demande d'autorisation en cours...";
+        
+        try {
+            // L'API web standard pour accéder à la caméra
+            // Note: On demande uniquement la vidéo ici pour un test visuel simple.
+            // Pour de la visio, il faudra mettre audio: true.
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    facingMode: "user" // Indique qu'on veut la caméra de face/cabine
+                }, 
+                audio: false 
+            });
+
+            // Lier le flux vidéo à la balise <video> HTML
+            videoElement.srcObject = stream;
+            
+            // Cacher le menu une fois la caméra activée
+            uiLayer.style.opacity = '0';
+            setTimeout(() => {
+                uiLayer.classList.add('hidden');
+            }, 500); // Laisse le temps à la transition CSS de s'exécuter
+            
+        } catch (err) {
+            console.error("Erreur d'accès à la caméra: ", err);
+            
+            // Gestion des erreurs spécifiques
+            if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
+                statusDiv.innerHTML = "❌ <strong>Autorisation refusée.</strong><br>Veuillez autoriser l'accès à la caméra dans le navigateur de la Tesla, et vérifiez que la voiture est bien en mode Park.";
+            } else if (err.name === 'NotFoundError') {
+                statusDiv.innerHTML = "❌ <strong>Aucune caméra détectée.</strong><br>Votre système ne semble pas exposer de caméra (Problème de version ou matériel incompatible).";
+            } else {
+                statusDiv.innerHTML = "❌ <strong>Erreur:</strong> " + err.message;
+            }
+        }
+    });
+
+    // Optionnel : si on clique sur la vidéo en plein écran, on réaffiche le menu
+    videoElement.addEventListener('click', () => {
+        if (uiLayer.classList.contains('hidden')) {
+            uiLayer.classList.remove('hidden');
+            uiLayer.style.opacity = '1';
+            startBtn.textContent = "Fermer le menu";
+            statusDiv.textContent = "";
+        }
+    });
+</script>
+
+</body>
+</html>
