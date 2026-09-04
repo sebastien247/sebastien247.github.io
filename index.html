@@ -27,9 +27,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
     <!-- <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/> -->
-    <link rel="icon" href="favicon.ico?v=14"/>
-    <link rel="stylesheet" href="styles.css?v=14">
-    <link rel="stylesheet" href="feedback.css?v=14">
+    <link rel="icon" href="favicon.ico?v=15"/>
+    <link rel="stylesheet" href="styles.css?v=15">
+    <link rel="stylesheet" href="feedback.css?v=15">
     <!-- Firebase SDK (compat version for simpler integration) -->
     <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore-compat.js"></script>
@@ -57,6 +57,24 @@
             </div>
         </div>
         <div class="loading-indicator"></div>
+        <!-- Android Auto >= 17.4: the session can only start through AA's developer head
+             unit server, which the user must switch on. Shown INSTEAD of the generic
+             troubleshooting advice, because that advice cannot unblock this case. -->
+        <div id="headunit-server-message" class="headunit-server-message" style="display: none;">
+            <p class="hus-title">📱 Take your phone, 30 seconds and you're done</p>
+            <p class="hus-intro">A recent Android Auto update added a switch you have to turn on. Your phone is showing the same steps.</p>
+            <ol class="hus-steps">
+                <li>Unlock your phone. <strong>TaaDa</strong> shows a screen with a blue button at the very bottom. Tap it to open the Android Auto settings.</li>
+                <li>Find the line on the screen that shows <strong>Version</strong> at the very bottom, going through the <strong>⚙️ gear at the top right</strong> or the <strong>Additional settings</strong> line if needed. It depends on your phone.</li>
+                <li>Tap <strong>Version</strong> <strong>10 times</strong> in a row, until a message says developer mode is on. <em>⚠️ The first tap only unfolds the line to show the version number. That is normal, keep tapping.</em></li>
+                <li>Finally, top right, tap the <strong>⋮</strong> (three dots), then <strong>Start head unit server</strong>.</li>
+            </ol>
+            <p class="hus-outro">That's it. This screen starts by itself, nothing to tap here, nothing to restart.</p>
+            <div class="troubleshoot-divider"></div>
+            <p class="hus-support">Can't find the settings? Open your phone's <strong>Settings</strong>, type <strong>Android Auto</strong> in the search box, and open the result. This works on every phone.</p>
+            <p class="hus-support">Still stuck? Write to <strong>seb.duboc.dev@gmail.com</strong> and we'll walk you through it.</p>
+        </div>
+
         <div id="troubleshoot-message" class="troubleshoot-message" style="display: none;">
             <p class="troubleshoot-title">Waiting for Android Auto stream is taking longer than expected.</p>
             <p>If this step takes too long, please try the following:</p>
@@ -142,14 +160,14 @@
 </body>
 <!-- <script src="pcm-player.min.js"></script> -->
 <!-- Debug log helpers must load before main.js (used by the ?debug panel buffer). -->
-<script src="debug-log-utils.js?v=14"></script>
-<script src="main.js?v=14"></script>
+<script src="debug-log-utils.js?v=15"></script>
+<script src="main.js?v=15"></script>
 
 <!-- Feedback System Modules -->
-<script src="firebase-config.js?v=14"></script>
-<script src="feedback-service.js?v=14"></script>
-<script src="feedback-dialog.js?v=14"></script>
-<script src="feedback-snackbar.js?v=14"></script>
+<script src="firebase-config.js?v=15"></script>
+<script src="feedback-service.js?v=15"></script>
+<script src="feedback-dialog.js?v=15"></script>
+<script src="feedback-snackbar.js?v=15"></script>
 <script>
     // Initialize Firebase when page loads
     document.addEventListener('DOMContentLoaded', function() {

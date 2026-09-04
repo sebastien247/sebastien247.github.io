@@ -618,3 +618,96 @@ canvas, video {
         padding: 15px;
     }
 }
+
+/* ── Android Auto >= 17.4: head unit server instructions ──────────────────────
+   Shown on the Tesla screen when the phone reports that the legacy wireless
+   startup is gone. Deliberately larger and higher-contrast than the generic
+   troubleshooting box: this is read at arm's length, often by someone who has
+   no idea what a "head unit server" is, and it is the ONLY thing that unblocks
+   the session, so it has to be impossible to miss and impossible to misread. */
+.headunit-server-message {
+    max-width: 720px;
+    margin-top: 25px;
+    padding: 24px 30px;
+    background: rgba(0, 178, 255, 0.12);
+    border: 2px solid rgba(0, 178, 255, 0.55);
+    border-radius: 14px;
+    text-align: center;
+    animation: fadeIn 0.5s ease;
+}
+
+.headunit-server-message .hus-title {
+    font-size: 1.45em !important;
+    font-weight: 700;
+    color: #4fc3f7 !important;
+    margin-bottom: 10px;
+    text-shadow: none;
+}
+
+.headunit-server-message .hus-intro,
+.headunit-server-message .hus-outro,
+.headunit-server-message .hus-support {
+    font-size: 1.05em !important;
+    color: rgba(255, 255, 255, 0.92) !important;
+    line-height: 1.6;
+    margin-bottom: 10px;
+    text-shadow: none;
+}
+
+.headunit-server-message .hus-outro {
+    font-weight: 600;
+    color: #81c784 !important;
+}
+
+.headunit-server-message .hus-support {
+    margin-bottom: 0;
+}
+
+.hus-steps {
+    text-align: left;
+    margin: 18px auto 14px;
+    padding-left: 8px;
+    list-style: none;
+    counter-reset: hus;
+    max-width: 620px;
+}
+
+.hus-steps li {
+    font-size: 1.15em;
+    color: #ffffff;
+    line-height: 1.65;
+    margin-bottom: 16px;
+    counter-increment: hus;
+    padding-left: 46px;
+    position: relative;
+    text-shadow: none;
+}
+
+.hus-steps li::before {
+    content: counter(hus);
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 32px;
+    height: 32px;
+    line-height: 32px;
+    text-align: center;
+    border-radius: 50%;
+    background: #00b2ff;
+    color: #05121a;
+    font-weight: 800;
+    font-size: 1em;
+}
+
+.hus-steps li:last-child {
+    margin-bottom: 0;
+}
+
+.hus-steps strong {
+    color: #4fc3f7;
+}
+
+.hus-steps em {
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 0.92em;
+}

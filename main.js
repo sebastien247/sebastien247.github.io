@@ -43,6 +43,9 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     timeoutId,
     isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
     step2TimeoutId = null,
+    // Set from the phone's discovery response: true when the installed Android Auto
+    // (>= 17.4) can only start through its developer head unit server.
+    aaHeadunitServerRequired = false,
     isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
 
 canvasElement.style.display = "none";
@@ -213,20 +216,25 @@ function updateConnectionProgress(step, message) {
 
     // Troubleshoot message logic for step 2
     const troubleshootEl = document.getElementById('troubleshoot-message');
-    if (troubleshootEl) {
-        if (step === 2) {
-            if (step2TimeoutId) clearTimeout(step2TimeoutId);
-            troubleshootEl.style.display = 'none';
-            step2TimeoutId = setTimeout(() => {
-                troubleshootEl.style.display = 'block';
-            }, 20000);
-        } else {
-            if (step2TimeoutId) {
-                clearTimeout(step2TimeoutId);
-                step2TimeoutId = null;
-            }
-            troubleshootEl.style.display = 'none';
-        }
+    const husEl = document.getElementById('headunit-server-message');
+    // On Android Auto >= 17.4 the generic advice ("clear the cache", "restart your
+    // phone") is simply wrong and step 2 will never clear on its own, so show the
+    // head unit server instructions instead, and show them fast: a driver staring at a
+    // frozen screen for 20 s has already given up.
+    const stalledEl = aaHeadunitServerRequired ? husEl : troubleshootEl;
+    const stallDelayMs = aaHeadunitServerRequired ? 6000 : 20000;
+
+    if (step2TimeoutId) {
+        clearTimeout(step2TimeoutId);
+        step2TimeoutId = null;
+    }
+    if (troubleshootEl) troubleshootEl.style.display = 'none';
+    if (husEl) husEl.style.display = 'none';
+
+    if (step === 2 && stalledEl) {
+        step2TimeoutId = setTimeout(() => {
+            stalledEl.style.display = 'block';
+        }, stallDelayMs);
     }
 
 }
@@ -485,6 +493,13 @@ function postWorkerMessages(json) {
     }
     if (json.hasOwnProperty("usebt")) {
         usebt = json.usebt;
+    }
+    // Android Auto >= 17.4 removed the wireless-startup path, so the session can only
+    // come up through AA's developer head unit server, which the user has to switch on
+    // by hand. The driver is looking at THIS screen, not at the phone, so remember the
+    // flag here and show the two taps instead of the generic "step 2 is slow" advice.
+    if (json.hasOwnProperty("aaHeadunitServerRequired")) {
+        aaHeadunitServerRequired = json.aaHeadunitServerRequired === true;
     }
     port = json.port;
     // B1 control-channel discovery: a build-66+ phone advertises a SECOND
