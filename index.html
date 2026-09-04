@@ -27,9 +27,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
     <!-- <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/> -->
-    <link rel="icon" href="favicon.ico?v=15"/>
-    <link rel="stylesheet" href="styles.css?v=15">
-    <link rel="stylesheet" href="feedback.css?v=15">
+    <link rel="icon" href="favicon.ico?v=16"/>
+    <link rel="stylesheet" href="styles.css?v=16">
+    <link rel="stylesheet" href="feedback.css?v=16">
     <!-- Firebase SDK (compat version for simpler integration) -->
     <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore-compat.js"></script>
@@ -59,20 +59,21 @@
         <div class="loading-indicator"></div>
         <!-- Android Auto >= 17.4: the session can only start through AA's developer head
              unit server, which the user must switch on. Shown INSTEAD of the generic
-             troubleshooting advice, because that advice cannot unblock this case. -->
+             troubleshooting advice, because that advice cannot unblock this case.
+             Sized to fit the Tesla browser viewport (1180x919) without scrolling:
+             bench/browser/test-aa174-guidance.js asserts it. -->
         <div id="headunit-server-message" class="headunit-server-message" style="display: none;">
-            <p class="hus-title">📱 Take your phone, 30 seconds and you're done</p>
-            <p class="hus-intro">A recent Android Auto update added a switch you have to turn on. Your phone is showing the same steps.</p>
+            <p class="hus-title">📱 Android Auto 17.4 or newer: one switch to turn on, on your phone</p>
+            <p class="hus-intro">Since Android Auto 17.4, the connection only works through Android Auto's built-in <strong>head unit server</strong>. Turn it on once, then this screen connects by itself.</p>
             <ol class="hus-steps">
-                <li>Unlock your phone. <strong>TaaDa</strong> shows a screen with a blue button at the very bottom. Tap it to open the Android Auto settings.</li>
-                <li>Find the line on the screen that shows <strong>Version</strong> at the very bottom, going through the <strong>⚙️ gear at the top right</strong> or the <strong>Additional settings</strong> line if needed. It depends on your phone.</li>
-                <li>Tap <strong>Version</strong> <strong>10 times</strong> in a row, until a message says developer mode is on. <em>⚠️ The first tap only unfolds the line to show the version number. That is normal, keep tapping.</em></li>
-                <li>Finally, top right, tap the <strong>⋮</strong> (three dots), then <strong>Start head unit server</strong>.</li>
+                <li>On your phone, open <strong>Settings</strong>, type <strong>Android Auto</strong> in the search box and open the Android Auto settings.</li>
+                <li>Scroll to the very bottom, to the line <strong>Version</strong> (or <strong>Version and permission info</strong>).</li>
+                <li>Tap <strong>Version 10 times</strong> in a row, until a message says developer settings are on. <em>The first tap only unfolds the line: keep tapping.</em></li>
+                <li>Top right, tap <strong>⋮</strong> (three dots), then <strong>Start head unit server</strong>.</li>
+                <li>Back in <strong>TaaDa</strong>, tap <strong>Start</strong>. When Android Auto shows its welcome screen on the phone, tap <strong>Continue</strong> (bottom right), never Exit.</li>
             </ol>
-            <p class="hus-outro">That's it. This screen starts by itself, nothing to tap here, nothing to restart.</p>
-            <div class="troubleshoot-divider"></div>
-            <p class="hus-support">Can't find the settings? Open your phone's <strong>Settings</strong>, type <strong>Android Auto</strong> in the search box, and open the result. This works on every phone.</p>
-            <p class="hus-support">Still stuck? Write to <strong>seb.duboc.dev@gmail.com</strong> and we'll walk you through it.</p>
+            <p class="hus-outro">After a phone restart, only step 4 is needed again.</p>
+            <p class="hus-support">🎬 Video guide: <strong>taada.top/aa17</strong> &nbsp;·&nbsp; Still stuck? <strong>seb.duboc.dev@gmail.com</strong></p>
         </div>
 
         <div id="troubleshoot-message" class="troubleshoot-message" style="display: none;">
@@ -160,14 +161,14 @@
 </body>
 <!-- <script src="pcm-player.min.js"></script> -->
 <!-- Debug log helpers must load before main.js (used by the ?debug panel buffer). -->
-<script src="debug-log-utils.js?v=15"></script>
-<script src="main.js?v=15"></script>
+<script src="debug-log-utils.js?v=16"></script>
+<script src="main.js?v=16"></script>
 
 <!-- Feedback System Modules -->
-<script src="firebase-config.js?v=15"></script>
-<script src="feedback-service.js?v=15"></script>
-<script src="feedback-dialog.js?v=15"></script>
-<script src="feedback-snackbar.js?v=15"></script>
+<script src="firebase-config.js?v=16"></script>
+<script src="feedback-service.js?v=16"></script>
+<script src="feedback-dialog.js?v=16"></script>
+<script src="feedback-snackbar.js?v=16"></script>
 <script>
     // Initialize Firebase when page loads
     document.addEventListener('DOMContentLoaded', function() {
