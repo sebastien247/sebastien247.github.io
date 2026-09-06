@@ -686,6 +686,29 @@ canvas, video {
     line-height: 1.45;
 }
 
+/* Both open in a NEW tab: navigating this tab away would tear the session down.
+   Touch targets sized for a driver stabbing at a dashboard, not a mouse. */
+.hus-qr-link {
+    display: block;
+    flex: 0 0 auto;
+    line-height: 0;
+    border-radius: 6px;
+}
+
+.hus-qr-link:focus-visible,
+.hus-video-url:focus-visible {
+    outline: 2px solid #4fc3f7;
+    outline-offset: 3px;
+}
+
+.hus-video-url {
+    color: #4fc3f7;
+    font-weight: 700;
+    text-decoration: underline;
+    display: inline-block;
+    padding: 2px 4px;
+}
+
 .hus-steps {
     text-align: left;
     margin: 10px auto 8px;
