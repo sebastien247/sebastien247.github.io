@@ -889,6 +889,16 @@ function initializeAudioOnFirstTouch() {
  * @param {TouchEvent} event - L'événement tactile
  */
 function handleTouchStart(event) {
+    if (!videoFrameReceived) {
+        // F5/F11 (audit 2026-07-07): while no stream is on screen, an unconditional
+        // preventDefault killed the compatibility click events, so every link and
+        // button on this page was dead to touch: the Play Store badge, the email
+        // reveal, the reset button, and now the video-guide QR. Touches converted
+        // before INIT also used undefined width/height (NaN -> 0) and got REPLAYED to
+        // Android Auto as ghost taps at (0,0) once the stream came up. Nothing on
+        // screen to touch = nothing to send, keep native semantics.
+        return;
+    }
     event.preventDefault();
     initializeAudioOnFirstTouch();
 
@@ -923,6 +933,9 @@ bodyElement.addEventListener('touchstart', handleTouchStart, { passive: false })
  * @param {TouchEvent} event - L'événement tactile
  */
 function handleTouchEnd(event) {
+    if (!videoFrameReceived) {
+        return; // F5/F11: same gate as handleTouchStart
+    }
     event.preventDefault();
 
     // CRITIQUE: Annuler tout MULTITOUCH_MOVE en attente pour éviter le bug "sticky touch"
@@ -997,6 +1010,9 @@ function processTouchMove() {
 }
 
 bodyElement.addEventListener('touchmove', (event) => {
+    if (!videoFrameReceived) {
+        return; // F5/F11: same gate as handleTouchStart
+    }
     // Convertir les données tactiles IMMÉDIATEMENT pour éviter la mutation de l'événement
     // (le navigateur peut réutiliser l'objet TouchEvent pour des raisons de performance)
     latestTouchData = {
