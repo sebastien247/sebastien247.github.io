@@ -663,6 +663,27 @@ canvas, video {
 .headunit-server-message .hus-support {
     margin-bottom: 0;
     color: rgba(255, 255, 255, 0.8) !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    margin-top: 8px;
+}
+
+/* Inlined, not fetched: the driver is already stuck, an external QR service must
+   never sit on the path. Sized so the modules stay scannable from the driver seat
+   while the whole box still fits 1180x919 without scrolling. */
+.hus-qr {
+    width: 104px;
+    height: 104px;
+    flex: 0 0 104px;
+    border-radius: 6px;
+    background: #ffffff;
+}
+
+.hus-support-text {
+    text-align: left;
+    line-height: 1.45;
 }
 
 .hus-steps {

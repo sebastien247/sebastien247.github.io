@@ -23,7 +23,15 @@ const demuxDecodeWorker = new Worker("./async_decoder.js" + ASSET_VERSION),
     errorMessage = document.getElementById('error-message'),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     DEFAULT_HTTPS_PORT = 8081,
-    MAX_PORT_RETRIES = 5;
+    MAX_PORT_RETRIES = 5,
+    // First build that advertises aaHeadunitServerRequired on the FIRST discovery
+    // answer. Earlier builds only wrote it on the reconnect answer, which the browser
+    // never reads, so on those a false flag proves nothing about the phone.
+    AA_FLAG_TRUSTED_BUILD = 83,
+    STEP2_HUS_FLAGGED_MS = 6000,
+    STEP2_HUS_UNTRUSTED_MS = 8000,
+    STEP2_GENERIC_MS = 20000,
+    STEP2_FALLBACK_MS = 45000;
 
 let zoom = Math.max(1, window.innerHeight / 1080),
     appVersion = 0,
@@ -43,6 +51,7 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     timeoutId,
     isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
     step2TimeoutId = null,
+    step2FallbackTimeoutId = null,
     // Set from the phone's discovery response: true when the installed Android Auto
     // (>= 17.4) can only start through its developer head unit server.
     aaHeadunitServerRequired = false,
@@ -221,20 +230,57 @@ function updateConnectionProgress(step, message) {
     // phone") is simply wrong and step 2 will never clear on its own, so show the
     // head unit server instructions instead, and show them fast: a driver staring at a
     // frozen screen for 20 s has already given up.
-    const stalledEl = aaHeadunitServerRequired ? husEl : troubleshootEl;
-    const stallDelayMs = aaHeadunitServerRequired ? 6000 : 20000;
-
+    // The flag is only ever set true for Android Auto >= 17.4, so a TRUE flag is
+    // trustworthy on any build. A FALSE flag is not: builds older than
+    // AA_FLAG_TRUSTED_BUILD wrote the field on the reconnect answer only, never on the
+    // first one the browser reads. Android Auto 17.4 is the dominant cause of a stalled
+    // step 2 today, so on those builds lead with the head unit guide and hand the
+    // generic advice back only if the driver is still stuck much later.
     if (step2TimeoutId) {
         clearTimeout(step2TimeoutId);
         step2TimeoutId = null;
     }
+    if (step2FallbackTimeoutId) {
+        clearTimeout(step2FallbackTimeoutId);
+        step2FallbackTimeoutId = null;
+    }
     if (troubleshootEl) troubleshootEl.style.display = 'none';
     if (husEl) husEl.style.display = 'none';
 
-    if (step === 2 && stalledEl) {
-        step2TimeoutId = setTimeout(() => {
-            stalledEl.style.display = 'block';
-        }, stallDelayMs);
+    if (step === 2 && (husEl || troubleshootEl)) {
+        const step2At = Date.now();
+        // Re-read the state on every tick instead of deciding once at scheduling time:
+        // aaHeadunitServerRequired and appVersion both land in the discovery handler,
+        // and this makes the choice independent of which runs first.
+        const tick = () => {
+            step2TimeoutId = null;
+            const flagged = aaHeadunitServerRequired === true;
+            const trusted = appVersion >= AA_FLAG_TRUSTED_BUILD;
+            const useHus = !!husEl && (flagged || !trusted);
+            const dueMs = flagged ? STEP2_HUS_FLAGGED_MS
+                : useHus ? STEP2_HUS_UNTRUSTED_MS
+                : STEP2_GENERIC_MS;
+            const remaining = dueMs - (Date.now() - step2At);
+            if (remaining > 0) {
+                step2TimeoutId = setTimeout(tick, Math.min(remaining, 1000));
+                return;
+            }
+            if (useHus) {
+                husEl.style.display = 'block';
+                if (!flagged && troubleshootEl) {
+                    // The five steps take a driver well over half a minute to perform;
+                    // pulling the guide sooner would cut them off mid-way.
+                    step2FallbackTimeoutId = setTimeout(() => {
+                        step2FallbackTimeoutId = null;
+                        husEl.style.display = 'none';
+                        troubleshootEl.style.display = 'block';
+                    }, Math.max(0, STEP2_FALLBACK_MS - (Date.now() - step2At)));
+                }
+            } else if (troubleshootEl) {
+                troubleshootEl.style.display = 'block';
+            }
+        };
+        step2TimeoutId = setTimeout(tick, 1000);
     }
 
 }
