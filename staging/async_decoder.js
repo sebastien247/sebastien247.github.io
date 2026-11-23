@@ -29,7 +29,6 @@ let pendingFrames = [],
     // a SECOND WebSocket carries PING/PONG + binary touch so they don't queue behind
     // bulk H.264 video. Both stay falsy/null on older phones ⇒ single-socket legacy path.
     controlChannelPort = null, controlSocket = null,
-    b1Param = null, // ?b1 override ("1" on / "0" off) relayed by main.js INIT — see the B1 gate below
     frameCounterTimer = 0,
     broadwayDecoder = null,
     lastheart = 0, pongtimer, frameRate,
@@ -1215,12 +1214,6 @@ function forceReconnect(reason) {
 // falsy: no second socket is opened and every send falls back to the video socket,
 // preserving the legacy single-socket behaviour byte-for-byte.
 
-// HOTFIX 2026-07-12: builds 66-70 carry the B1 server without the dead-man re-arm
-// (Fix A, vc71+), so B1 is gated on the advertised buildversion. Applied on the
-// in-worker rediscovery path; the INIT path is gated by main.js. ?b1=1 forces on,
-// ?b1=0 forces off. Keep in sync with main.js.
-const B1_MIN_BUILDVERSION = 71;
-
 /** True only when the dedicated control socket exists AND is OPEN. */
 function controlChannelOpen() {
     return controlSocket !== null && controlSocket.readyState === WebSocket.OPEN;
@@ -1560,11 +1553,7 @@ function socketClose(event) {
             // B1: the phone re-randomises ALL its ports on a service restart, so the
             // control port can change too. Adopt the fresh one (still null on an old
             // phone). startControlSocket() in the video 'open' handler picks it up.
-            // HOTFIX 2026-07-12: same B1 buildversion gate as main.js — without it the
-            // first in-worker rediscovery would silently re-adopt the control port.
-            const b1Enabled = b1Param === "1"
-                || (b1Param !== "0" && parseInt(discovery.buildversion) >= B1_MIN_BUILDVERSION);
-            controlChannelPort = b1Enabled ? (discovery.controlChannelPort || null) : null;
+            controlChannelPort = discovery.controlChannelPort || null;
             applyRediscoveredConfig(discovery);
             debugLog('reconnect #' + reconnectionAttempt + ' → discovered port ' + discovery.port
                 + (portChanged ? ' (CHANGED — phone service restarted)' : ' (same — in-place reconnect)'));
@@ -1701,7 +1690,6 @@ self.addEventListener('message', async (message) => {
     if (message.data.action === 'INIT') {
         port = message.data.port;
         controlChannelPort = message.data.controlChannelPort || null;
-        b1Param = message.data.b1Param || null;
         appVersion=parseInt(message.data.appVersion);
 
 
