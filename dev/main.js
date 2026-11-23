@@ -521,13 +521,24 @@ function findGetParameter(parameterName) {
  * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
  */
 /**
+ * True when ?hidpi=1 made the phone draw the content at the window's physical size, which
+ * only happens when the stream is at least that big (1080p on a Tesla 2026.26 window). At
+ * 720p the phone draws 924x720 for a 1183x920 window: that picture must still be scaled.
+ */
+function isPixelExact(imageWidth, imageHeight) {
+    if (findGetParameter("hidpi") !== "1" || !window.devicePixelRatio) return false;
+    const dpr = window.devicePixelRatio;
+    return Math.abs(imageWidth - window.innerWidth * dpr) <= 2
+        && Math.abs(imageHeight - window.innerHeight * dpr) <= 2;
+}
+
+/**
  * CSS pixels per stream pixel. Default: "contain" the Android Auto content in the window.
- * With ?hidpi=1 the phone drew the content at the window's physical size, so one stream
- * pixel must map to exactly one device pixel: any other factor, even 0.9997, makes the
+ * Pixel-exact: one stream pixel per device pixel; any other factor, even 0.9997, makes the
  * browser resample the whole picture (measured on a live phone: half the text sharpness).
  */
 function displayZoom(imageWidth, imageHeight) {
-    if (findGetParameter("hidpi") === "1" && window.devicePixelRatio) {
+    if (isPixelExact(imageWidth, imageHeight)) {
         return 1 / window.devicePixelRatio;
     }
     return Math.min(window.innerWidth / imageWidth, window.innerHeight / imageHeight);
@@ -542,7 +553,7 @@ function updateCanvasSize() {
     // At a fractional devicePixelRatio (Tesla: 1.53) Chromium still filters a canvas laid
     // out 1:1, which halved text sharpness on a live phone. Nearest-neighbour is the identity
     // at 1:1, so it only removes that filter; never set it when the picture is scaled.
-    canvasElement.style.imageRendering = findGetParameter("hidpi") === "1" ? 'pixelated' : '';
+    canvasElement.style.imageRendering = isPixelExact(imageWidth, imageHeight) ? 'pixelated' : '';
 }
 
 function postWorkerMessages(json) {  
