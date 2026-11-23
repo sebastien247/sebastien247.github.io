@@ -31,11 +31,28 @@ canvas, video {
     height: 100%;
     display: flex;
     flex-direction: column;
-    justify-content: center;
+    justify-content: flex-start;
     align-items: center;
     background: rgba(0, 0, 0, 0.8);
     z-index: 1;
     color: white;
+    /* The head unit guide is taller than the browser beside the car's left panel (owner
+       photo, 17/09/2026: the QR code was cut off and nothing could scroll to it). The
+       overlay scrolls, and the two flexible spacers below keep the content centred when it
+       fits and collapse to nothing when it does not, so neither its top nor its bottom is
+       ever out of reach (a plain justify-content:center overflows on both sides). */
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.waiting-message::before,
+.waiting-message::after {
+    content: '';
+    flex: 1 0 0;
+}
+
+.waiting-message > * {
+    flex-shrink: 0;
 }
 
 /* 🚨 NOUVEAU: Error overlay styling - Toujours au-dessus */
@@ -616,5 +633,184 @@ canvas, video {
     
     .connection-status, .notification-card, .download-section {
         padding: 15px;
+    }
+}
+
+/* ── Android Auto >= 17.4: head unit server instructions ──────────────────────────────
+   Shown on the Tesla screen when the phone reports that the legacy wireless
+   startup is gone. Larger and higher-contrast than the generic troubleshooting
+   box: read at arm's length by someone who has no idea what a "head unit
+   server" is, and it is the ONLY thing that unblocks the session. Every size
+   below is budgeted so the whole box, under the progress header, fits the
+   Tesla browser viewport (1180x919) with no scrolling. */
+.headunit-server-message {
+    max-width: 880px;
+    margin-top: 10px;
+    padding: 16px 30px 14px;
+    background: rgba(0, 178, 255, 0.12);
+    border: 2px solid rgba(0, 178, 255, 0.55);
+    border-radius: 14px;
+    text-align: center;
+    animation: fadeIn 0.5s ease;
+}
+
+.headunit-server-message .hus-title {
+    font-size: 1.35em !important;
+    font-weight: 700;
+    color: #4fc3f7 !important;
+    margin-bottom: 6px;
+    text-shadow: none;
+}
+
+.headunit-server-message .hus-intro,
+.headunit-server-message .hus-outro,
+.headunit-server-message .hus-support {
+    font-size: 1em !important;
+    color: rgba(255, 255, 255, 0.92) !important;
+    line-height: 1.45;
+    margin-bottom: 6px;
+    text-shadow: none;
+}
+
+.headunit-server-message .hus-outro {
+    font-weight: 600;
+    color: #81c784 !important;
+}
+
+.headunit-server-message .hus-support {
+    margin-bottom: 0;
+    color: rgba(255, 255, 255, 0.8) !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    margin-top: 8px;
+}
+
+/* Inlined, not fetched: the driver is already stuck, an external QR service must
+   never sit on the path. Sized so the modules stay scannable from the driver seat
+   while the whole box still fits 1180x919 without scrolling. */
+.hus-qr {
+    width: 104px;
+    height: 104px;
+    flex: 0 0 104px;
+    border-radius: 6px;
+    background: #ffffff;
+}
+
+.hus-support-text {
+    text-align: left;
+    line-height: 1.45;
+}
+
+/* Both open in a NEW tab: navigating this tab away would tear the session down.
+   Touch targets sized for a driver stabbing at a dashboard, not a mouse. */
+.hus-qr-link {
+    display: block;
+    flex: 0 0 auto;
+    line-height: 0;
+    border-radius: 6px;
+}
+
+.hus-qr-link:focus-visible,
+.hus-video-url:focus-visible {
+    outline: 2px solid #4fc3f7;
+    outline-offset: 3px;
+}
+
+.hus-video-url {
+    color: #4fc3f7;
+    font-weight: 700;
+    text-decoration: underline;
+    display: inline-block;
+    padding: 2px 4px;
+}
+
+.hus-steps {
+    text-align: left;
+    margin: 10px auto 8px;
+    padding-left: 4px;
+    list-style: none;
+    counter-reset: hus;
+    max-width: 800px;
+}
+
+.hus-steps li {
+    font-size: 1.12em;
+    color: #ffffff;
+    line-height: 1.45;
+    margin-bottom: 9px;
+    counter-increment: hus;
+    padding-left: 42px;
+    position: relative;
+    text-shadow: none;
+}
+
+.hus-steps li::before {
+    content: counter(hus);
+    position: absolute;
+    left: 0;
+    top: 1px;
+    width: 30px;
+    height: 30px;
+    line-height: 30px;
+    text-align: center;
+    border-radius: 50%;
+    background: #00b2ff;
+    color: #05121a;
+    font-weight: 800;
+    font-size: 1em;
+}
+
+.hus-steps li:last-child {
+    margin-bottom: 0;
+}
+
+.hus-steps strong {
+    color: #4fc3f7;
+}
+
+.hus-steps em {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.94em;
+}
+
+/* Short browsers (Tesla browser beside the left panel, MCU1): same content, tighter. The
+   overlay still scrolls if even this does not fit.
+   bench/browser/test-aa174-guide-viewport.js checks 1180x919 down to 800x480. */
+@media (max-height: 760px) {
+    .headunit-server-message {
+        margin-top: 4px;
+        padding: 10px 22px 10px;
+    }
+    .headunit-server-message .hus-title {
+        font-size: 1.15em !important;
+        margin-bottom: 4px;
+    }
+    .headunit-server-message .hus-intro,
+    .headunit-server-message .hus-outro,
+    .headunit-server-message .hus-support {
+        font-size: 0.9em !important;
+        line-height: 1.3;
+        margin-bottom: 4px;
+    }
+    .hus-steps {
+        margin: 6px auto 4px;
+    }
+    .hus-steps li {
+        font-size: 0.98em;
+        line-height: 1.3;
+        margin-bottom: 5px;
+        padding-left: 36px;
+    }
+    .hus-steps li::before {
+        width: 26px;
+        height: 26px;
+        line-height: 26px;
+    }
+    .hus-qr {
+        width: 84px;
+        height: 84px;
+        flex: 0 0 84px;
     }
 }

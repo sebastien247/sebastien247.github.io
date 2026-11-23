@@ -29,18 +29,11 @@ let pendingFrames = [],
     // a SECOND WebSocket carries PING/PONG + binary touch so they don't queue behind
     // bulk H.264 video. Both stay falsy/null on older phones ⇒ single-socket legacy path.
     controlChannelPort = null, controlSocket = null,
-    b1Param = null, // ?b1 override ("1" on / "0" off) relayed by main.js INIT — see the B1 gate below
     frameCounterTimer = 0,
     broadwayDecoder = null,
     lastheart = 0, pongtimer, frameRate,
     lastPongAt = 0, // Timestamp of the last server PONG sentinel (unittype 31)
     lastFrameAt = 0, // Timestamp of the last decoded video frame (unittype 1/5)
-    framesThisConn = 0, // Video frames seen on the CURRENT connection — arms the video-starve watchdog (F1)
-    videoStarveStrikes = 0, // Escalation strikes of the video-starve watchdog (B1 only)
-    controlCycledAt = 0, // Wall-clock of the last zombie-control-socket cycle (F4)
-    debugMode = false, // Relayed by main at INIT (?debug / phone debug flag) — gates per-frame telemetry (R5b)
-    glEscalated = false, // F3: fatalFreeze already posted for the current GL loss
-    controlReopenScheduled = false, // F10: a control-socket reopen timer is already pending
     lastHeartbeatAt = 0, // Wall-clock of the last heartbeat() tick — detects Worker suspension (WebView backgrounded during a call)
     pageHidden = false, // Mirror of document.visibilityState, relayed by main.js (action VISIBILITY)
     lastVisibilityHiddenAt = 0, // Wall-clock of the last hidden transition — corroborates a suspension
@@ -148,7 +141,6 @@ const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
 // takes this long to be noticed, but the in-place reconnect is fast once fired.
 const NO_DATA_TIMEOUT = 3000; //8000; // No binary data at all (video OR PONG) for this long ⇒ reconnect (was 3000)
 const PONG_TIMEOUT = 6000; //12000;   // No PONG sentinel for this long ⇒ dead control channel (was 6000)
-const VIDEO_STARVE_TIMEOUT = 4000;    // B1 only: frames stopped this long (PONG still fresh) ⇒ re-prime, then reconnect (F1)
 // Suspension detection (WebView backgrounded during a phone call: timers freeze,
 // the PONG/data gap is sleep time, so we re-prime instead of reconnecting).
 // Two tiers, because heartbeat-tick drift alone CANNOT distinguish a frozen
@@ -236,9 +228,6 @@ function appendByteArray(buffer1, buffer2) {
 function updateFrameCounter() {
     frameTimes[runtime] = frameCounter;
     frameRate = Math.round((frameCounter - frameTimes[runtime - 10]) / 10);
-    // F7: only runtime and runtime-10 are ever read — drop the older entries so
-    // the array stops growing ~36k entries per 10h drive.
-    delete frameTimes[runtime - 11];
     runtime++;
 
     // 1 Hz pipeline sample for the ?debug panel. Cheap: a handful of integers.
@@ -476,7 +465,6 @@ function installGlContextHandlers(canvas) {
             gl = canvas.getContext('webgl2');
             setupGlPipeline();
             glContextLost = false;
-            glEscalated = false;
             awaitingKeyframe = true;     // request a clean IDR; nothing valid to paint yet
             maybeRequestKeyframe();
             debugLog('WebGL context RESTORED after ' + (Date.now() - glContextLostAt) + 'ms — render resumed');
@@ -557,11 +545,7 @@ async function renderFrame() {
         socket.sendObject({action: "ACK"});
     }
     try {
-        // R5b (audit 2026-07-07): this per-frame postMessage crossed the
-        // worker->main boundary 30-60x/s for the whole drive, and main's only
-        // consumer is the ?debug log line. The 1 Hz metrics pipeline carries
-        // diagnostics for everyone else.
-        if (debugMode) self.postMessage({
+        self.postMessage({
             fps: getFrameStats(),
             decodeQueueSize: decoder !== null ? decoder.decodeQueueSize : 0,
             pendingFrames: pendingFrames.length
@@ -615,16 +599,6 @@ function notifyFirstVideoFrame() {
 
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
-    // Liveness anchor for the F1 video-starve watchdog (and the frameAge
-    // metric): every real video NAL lands here, whether its message was led by
-    // the IDR itself or by SPS/PPS/AUD (separateNalUnits→headerMagic path).
-    // Counted even while skip-to-latest drops the backlog — arriving stale
-    // frames still prove the video socket is alive.
-    if (unittype === 1 || unittype === 5) {
-        lastFrameAt = Date.now();
-        framesThisConn++;
-        videoStarveStrikes = 0;
-    }
     // Skip-to-latest drain: after a suspension we drop the stale backlog while it
     // streams back-to-back (sub-SKIP_LIVE_GAP_MS apart). The instant arrivals slow
     // to the live cadence we have caught up — stop dropping, force a keyframe and
@@ -839,10 +813,6 @@ function resumeAfterSuspend(source) {
         // Fresh baselines so the dead-channel checks don't fire on the sleep gap.
         lastPongAt = now;
         lastheart = now;
-        // F1: same grace for the video-starve watchdog — the frame gap was sleep
-        // time, not a dead video socket (distorts one frameAge metric sample).
-        if (lastFrameAt !== 0) { lastFrameAt = now; }
-        videoStarveStrikes = 0;
         if (pongtimer) { clearTimeout(pongtimer); }
         pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
         // Skip-to-latest: the stale backlog queued during the freeze is about to
@@ -930,17 +900,6 @@ function heartbeat() {
         texturePool.length = 0;
         debugLog('WebGL context LOST (silent, no event) — render paused, awaiting restore');
     }
-    // F3 escalation (audit 2026-07-07): a SILENT loss never fires
-    // webglcontextlost, so per spec webglcontextrestored never comes either —
-    // detection alone left a permanent freeze with healthy watchdogs. 15s with
-    // no restore (either path) means this context is not coming back: ask the
-    // main thread for a reload-when-online.
-    if (glContextLost && glContextLostAt !== 0 && !glEscalated
-        && (Date.now() - glContextLostAt) > 15000) {
-        glEscalated = true;
-        debugLog('WebGL context lost >15s with no restore — requesting page reload');
-        try { self.postMessage({ fatalFreeze: 'gl context lost, no restore in 15s' }); } catch (e) { /* ignore */ }
-    }
 
     // Dead control channel: the phone replies to every PING with a PONG sentinel
     // (unittype 31). lastPongAt is updated only by that sentinel, never by video
@@ -948,53 +907,9 @@ function heartbeat() {
     // caught here — independently of video flow.
     if (lastPongAt !== 0 && (Date.now() - lastPongAt) > PONG_TIMEOUT) {
         const gap = Date.now() - lastPongAt;
-        // F4 (audit 2026-07-07): a ZOMBIE control socket (readyState OPEN but a
-        // half-open TCP) swallows the PINGs, so the PONG gap says nothing about
-        // the video link. While frames are demonstrably fresh, cycle the control
-        // socket and route one PING via the video socket instead of dropping a
-        // healthy stream. The 5s guard (< PONG_TIMEOUT) lets the cycle repeat if
-        // the fresh control socket zombifies again; a video that is ALSO stale
-        // exits through the reconnect below or the F1/noData watchdogs.
-        if (controlChannelOpen() && lastFrameAt !== 0 && (Date.now() - lastFrameAt) < 5000
-            && (Date.now() - controlCycledAt) > 5000) {
-            controlCycledAt = Date.now();
-            debugLog('PONG gap ' + gap + 'ms but video fresh (frameAge=' + (Date.now() - lastFrameAt) + 'ms) — cycling zombie control socket (F4)');
-            lastPongAt = Date.now();
-            try { startControlSocket(); } catch (e) { /* next tick falls through to reconnect */ }
-            try { socket.sendObject({action: 'PING'}); } catch (e) { /* video send error → next tick */ }
-        } else {
-            console.warn('No PONG from phone for ' + gap + 'ms — forcing in-place reconnect');
-            forceReconnect('pongTimeout gap=' + gap + 'ms rs=' + (socket ? socket.readyState : -1));
-            return;
-        }
-    }
-
-    // Video-starve watchdog (F1, audit 2026-07-07): under B1 the PONG rides its
-    // own socket, so a dead/half-open VIDEO socket keeps NO_DATA and PONG_TIMEOUT
-    // fed while the picture freezes forever (bench/browser/repro-video-starve.js).
-    // Watch the video flow itself. Armed only when (a) B1 carries the PONGs and
-    // (b) frames have flowed on THIS connection — so a phone that legitimately
-    // projects nothing never trips it, and a reconnect that still gets no video
-    // disarms it instead of looping. Strike 1 re-primes the video socket (START
-    // is idempotent phone-side, REQUEST_KEYFRAME pulls a fresh IDR); if that
-    // brings no frame within ~2 s the socket is dead — reconnect.
-    if (controlChannelOpen() && framesThisConn > 0 && lastFrameAt !== 0
-        && socket && socket.readyState === WebSocket.OPEN
-        && (Date.now() - lastFrameAt) > VIDEO_STARVE_TIMEOUT) {
-        videoStarveStrikes++;
-        if (videoStarveStrikes === 1) {
-            debugLog('video starved ' + (Date.now() - lastFrameAt) + 'ms with fresh PONG — re-priming (strike 1)');
-            try {
-                socket.sendObject({action: 'START'});
-                socket.sendObject({action: 'REQUEST_KEYFRAME'});
-            } catch (e) {
-                forceReconnect('videoStarvedSendError ' + (e && e.message ? e.message : e));
-                return;
-            }
-        } else if (videoStarveStrikes >= 3) {
-            forceReconnect('videoStarved ' + (Date.now() - lastFrameAt) + 'ms (PONG alive, B1 masking)');
-            return;
-        }
+        console.warn('No PONG from phone for ' + gap + 'ms — forcing in-place reconnect');
+        forceReconnect('pongTimeout gap=' + gap + 'ms rs=' + (socket ? socket.readyState : -1));
+        return;
     }
 
     if (lastheart !== 0) {
@@ -1090,10 +1005,7 @@ function handleVideoMessage(dat){
         return;
     }
     if (unittype === 1 || unittype === 5) {
-        // lastFrameAt/framesThisConn now update inside videoMagic: anchoring them
-        // on THIS message-level first-NAL sniff missed every SPS-led AU framing
-        // (Redmi/PixelOS MediaCodec), starving the F1 watchdog on those devices
-        // while video flowed (found by the repro's embedded synthetic source).
+        lastFrameAt = Date.now();
         videoMagic(dat);
         // Stage 2→3 promotion now fires from videoMagic on a decoded IDR, so it
         // also covers the else-branch below (a keyframe whose message is led by
@@ -1101,6 +1013,22 @@ function handleVideoMessage(dat){
     }
     else
         separateNalUnits(dat).forEach(headerMagic)
+}
+
+/**
+ * Réinitialise les compteurs de reconnexion (appelé au démarrage initial)
+ * Permet de réessayer après avoir atteint la limite de tentatives
+ */
+function resetReconnectionState() {
+    isReconnecting = false;
+    reconnectionAttempt = 0;
+
+    if (reconnectionTimeout) {
+        clearTimeout(reconnectionTimeout);
+        reconnectionTimeout = null;
+    }
+
+    console.log('🔄 Reconnection state reset');
 }
 
 /**
@@ -1118,7 +1046,7 @@ async function rediscoverPort() {
         try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 3000);
-            const url = `https://taada.top:${discoveryPort}/getsocketport?w=${width}&h=${height}&webcodec=${typeof VideoDecoder !== 'undefined'}&reconnect=true`;
+            const url = `https://taada.top:${discoveryPort}/getsocketport?w=${width}&h=${height}&webcodec=true&reconnect=true`;
             const response = await fetch(url, {method: 'get', signal: controller.signal});
             clearTimeout(timeout);
             if (!response.ok) {
@@ -1282,12 +1210,6 @@ function forceReconnect(reason) {
 // falsy: no second socket is opened and every send falls back to the video socket,
 // preserving the legacy single-socket behaviour byte-for-byte.
 
-// HOTFIX 2026-07-12: builds 66-70 carry the B1 server without the dead-man re-arm
-// (Fix A, vc71+), so B1 is gated on the advertised buildversion. Applied on the
-// in-worker rediscovery path; the INIT path is gated by main.js. ?b1=1 forces on,
-// ?b1=0 forces off. Keep in sync with main.js.
-const B1_MIN_BUILDVERSION = 71;
-
 /** True only when the dedicated control socket exists AND is OPEN. */
 function controlChannelOpen() {
     return controlSocket !== null && controlSocket.readyState === WebSocket.OPEN;
@@ -1391,13 +1313,8 @@ function startControlSocket() {
         if (isServerShuttingDown || isReconnecting || !controlChannelPort) {
             return; // a full reconnect (or shutdown) will rebuild it via startSocket()
         }
-        if (controlReopenScheduled) {
-            return; // F10: error+close both fire — one reopen timer is enough
-        }
-        controlReopenScheduled = true;
         debugLog('control WS closed (port ' + controlChannelPort + ') — reopening');
         setTimeout(() => {
-            controlReopenScheduled = false;
             // Only reopen if a full reconnect hasn't taken over in the meantime.
             if (!isServerShuttingDown && !isReconnecting && controlChannelPort) {
                 startControlSocket();
@@ -1471,11 +1388,6 @@ function startSocket() {
         // slow (backoff) reconnect is not mistaken for a Worker suspension.
         lastPongAt = Date.now();
         lastHeartbeatAt = Date.now();
-        // F1: the video-starve watchdog only arms once frames flow on THIS
-        // connection — a reconnect that gets no video stays disarmed (no loop
-        // when the phone legitimately projects nothing).
-        framesThisConn = 0;
-        videoStarveStrikes = 0;
 
         console.log('✅ WebSocket connected successfully');
         debugLog('WS open (port ' + port + ')');
@@ -1632,11 +1544,7 @@ function socketClose(event) {
             // B1: the phone re-randomises ALL its ports on a service restart, so the
             // control port can change too. Adopt the fresh one (still null on an old
             // phone). startControlSocket() in the video 'open' handler picks it up.
-            // HOTFIX 2026-07-12: same B1 buildversion gate as main.js — without it the
-            // first in-worker rediscovery would silently re-adopt the control port.
-            const b1Enabled = b1Param === "1"
-                || (b1Param !== "0" && parseInt(discovery.buildversion) >= B1_MIN_BUILDVERSION);
-            controlChannelPort = b1Enabled ? (discovery.controlChannelPort || null) : null;
+            controlChannelPort = discovery.controlChannelPort || null;
             applyRediscoveredConfig(discovery);
             debugLog('reconnect #' + reconnectionAttempt + ' → discovered port ' + discovery.port
                 + (portChanged ? ' (CHANGED — phone service restarted)' : ' (same — in-place reconnect)'));
@@ -1773,9 +1681,7 @@ self.addEventListener('message', async (message) => {
     if (message.data.action === 'INIT') {
         port = message.data.port;
         controlChannelPort = message.data.controlChannelPort || null;
-        b1Param = message.data.b1Param || null;
         appVersion=parseInt(message.data.appVersion);
-        debugMode = message.data.debug === true;
 
 
         let useBroadway = message.data.broadway;

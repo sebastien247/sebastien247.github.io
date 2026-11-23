@@ -21,11 +21,17 @@ const demuxDecodeWorker = new Worker("./async_decoder.js" + ASSET_VERSION),
     waitingMessageElement = document.getElementById('waiting-message'),
     errorOverlay = document.getElementById('error-overlay'),
     errorMessage = document.getElementById('error-message'),
-    // F8: report the REAL capability — hardcoded true made the phone size the
-    // stream for a hardware decoder even when the worker falls back to Broadway.
-    supportedWebCodec = (typeof VideoDecoder !== 'undefined'),
+    supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     DEFAULT_HTTPS_PORT = 8081,
-    MAX_PORT_RETRIES = 5;
+    MAX_PORT_RETRIES = 5,
+    // First build that advertises aaHeadunitServerRequired on the FIRST discovery
+    // answer. Earlier builds only wrote it on the reconnect answer, which the browser
+    // never reads, so on those a false flag proves nothing about the phone.
+    AA_FLAG_TRUSTED_BUILD = 83,
+    STEP2_HUS_FLAGGED_MS = 6000,
+    STEP2_HUS_UNTRUSTED_MS = 8000,
+    STEP2_GENERIC_MS = 20000,
+    STEP2_FALLBACK_MS = 45000;
 
 let zoom = Math.max(1, window.innerHeight / 1080),
     appVersion = 0,
@@ -42,10 +48,13 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     port,
     drageventCounter=0,
     videoFrameReceived = false,
-    cachedCanvasRect = null, // R5a: canvas rect cache, invalidated on resize/updateCanvasSize
     timeoutId,
     isServerShuttingDown = false, // 🚨 Flag pour éviter les actions en double lors du shutdown
     step2TimeoutId = null,
+    step2FallbackTimeoutId = null,
+    // Set from the phone's discovery response: true when the installed Android Auto
+    // (>= 17.4) can only start through its developer head unit server.
+    aaHeadunitServerRequired = false,
     isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
 
 canvasElement.style.display = "none";
@@ -71,30 +80,6 @@ function hideErrorOverlay() {
         errorOverlay.style.display = "none";
     }
 }
-
-// F2 (audit 2026-07-07): a Worker that dies — importScripts failing on a flaky
-// car network (Decoder.js is 290 KB), or an uncaught exception outside the
-// worker's own try/catch — previously died SILENTLY: no watchdogs, no
-// reconnect, the UI parked on "2/3" forever and only a manual reload
-// recovered. Reload (when online) up to twice per tab session; a third crash
-// is deterministic, so surface it instead of reload-looping.
-const WORKER_CRASH_KEY = 'taada_worker_crashes';
-demuxDecodeWorker.addEventListener('error', (e) => {
-    const detail = (e && e.message) ? e.message
-        : ('script error' + (e && e.filename ? ' @ ' + e.filename + ':' + (e.lineno || '?') : ''));
-    appendDebugLog({ ts: Date.now(), msg: '[worker-crash] ' + detail });
-    let crashes = 1;
-    try {
-        crashes = parseInt(sessionStorage.getItem(WORKER_CRASH_KEY) || '0', 10) + 1;
-        sessionStorage.setItem(WORKER_CRASH_KEY, String(crashes));
-    } catch (err) { /* storage unavailable: treat as first crash */ }
-    if (crashes <= 2) {
-        reloadWhenOnline('worker crashed: ' + detail);
-    } else {
-        showErrorOverlay('Video engine failed to load repeatedly (' + detail
-            + '). Check the phone connection, then tap Reload.');
-    }
-});
 
 /**
  * Vérifie si le serveur est accessible
@@ -240,20 +225,62 @@ function updateConnectionProgress(step, message) {
 
     // Troubleshoot message logic for step 2
     const troubleshootEl = document.getElementById('troubleshoot-message');
-    if (troubleshootEl) {
-        if (step === 2) {
-            if (step2TimeoutId) clearTimeout(step2TimeoutId);
-            troubleshootEl.style.display = 'none';
-            step2TimeoutId = setTimeout(() => {
-                troubleshootEl.style.display = 'block';
-            }, 20000);
-        } else {
-            if (step2TimeoutId) {
-                clearTimeout(step2TimeoutId);
-                step2TimeoutId = null;
+    const husEl = document.getElementById('headunit-server-message');
+    // On Android Auto >= 17.4 the generic advice ("clear the cache", "restart your
+    // phone") is simply wrong and step 2 will never clear on its own, so show the
+    // head unit server instructions instead, and show them fast: a driver staring at a
+    // frozen screen for 20 s has already given up.
+    // The flag is only ever set true for Android Auto >= 17.4, so a TRUE flag is
+    // trustworthy on any build. A FALSE flag is not: builds older than
+    // AA_FLAG_TRUSTED_BUILD wrote the field on the reconnect answer only, never on the
+    // first one the browser reads. Android Auto 17.4 is the dominant cause of a stalled
+    // step 2 today, so on those builds lead with the head unit guide and hand the
+    // generic advice back only if the driver is still stuck much later.
+    if (step2TimeoutId) {
+        clearTimeout(step2TimeoutId);
+        step2TimeoutId = null;
+    }
+    if (step2FallbackTimeoutId) {
+        clearTimeout(step2FallbackTimeoutId);
+        step2FallbackTimeoutId = null;
+    }
+    if (troubleshootEl) troubleshootEl.style.display = 'none';
+    if (husEl) husEl.style.display = 'none';
+
+    if (step === 2 && (husEl || troubleshootEl)) {
+        const step2At = Date.now();
+        // Re-read the state on every tick instead of deciding once at scheduling time:
+        // aaHeadunitServerRequired and appVersion both land in the discovery handler,
+        // and this makes the choice independent of which runs first.
+        const tick = () => {
+            step2TimeoutId = null;
+            const flagged = aaHeadunitServerRequired === true;
+            const trusted = appVersion >= AA_FLAG_TRUSTED_BUILD;
+            const useHus = !!husEl && (flagged || !trusted);
+            const dueMs = flagged ? STEP2_HUS_FLAGGED_MS
+                : useHus ? STEP2_HUS_UNTRUSTED_MS
+                : STEP2_GENERIC_MS;
+            const remaining = dueMs - (Date.now() - step2At);
+            if (remaining > 0) {
+                step2TimeoutId = setTimeout(tick, Math.min(remaining, 1000));
+                return;
             }
-            troubleshootEl.style.display = 'none';
-        }
+            if (useHus) {
+                husEl.style.display = 'block';
+                if (!flagged && troubleshootEl) {
+                    // The five steps take a driver well over half a minute to perform;
+                    // pulling the guide sooner would cut them off mid-way.
+                    step2FallbackTimeoutId = setTimeout(() => {
+                        step2FallbackTimeoutId = null;
+                        husEl.style.display = 'none';
+                        troubleshootEl.style.display = 'block';
+                    }, Math.max(0, STEP2_FALLBACK_MS - (Date.now() - step2At)));
+                }
+            } else if (troubleshootEl) {
+                troubleshootEl.style.display = 'block';
+            }
+        };
+        step2TimeoutId = setTimeout(tick, 1000);
     }
 
 }
@@ -266,14 +293,8 @@ function updateConnectionProgress(step, message) {
  * @returns {{x: number, y: number}} The converted coordinates relative to the canvas
  */
 function convertToCanvasCoordinates(screenX, screenY) {
-    // R5a (audit 2026-07-07): getBoundingClientRect ran PER TOUCH (up to 2N per
-    // touchstart, N per native touchmove at 60-120 Hz) — a forced layout each
-    // time any DOM mutation (warning banner, debug panel) left layout dirty.
-    // The canvas only moves on resize/updateCanvasSize, so read once and cache.
-    if (!cachedCanvasRect) {
-        cachedCanvasRect = canvasElement.getBoundingClientRect();
-    }
-    const canvasRect = cachedCanvasRect;
+    // Get the canvas's bounding rectangle, which includes any CSS transformations
+    const canvasRect = canvasElement.getBoundingClientRect();
     
     // Calculate the position relative to the canvas's top-left corner
     const canvasRelativeX = screenX - canvasRect.left;
@@ -337,8 +358,53 @@ function abortFetching() {
  * @param {AbortController} controller - Le contrôleur d'abandon
  * @returns {Promise} Promise qui se résout avec les données ou se rejette
  */
+/**
+ * Tesla software 2026.26 (Chromium 148) raised the browser's devicePixelRatio
+ * from 1.0 to about 1.5 without changing the panel, so innerWidth/innerHeight
+ * now count about two thirds of the physical pixels. Reporting them as-is makes
+ * Android Auto lay out a 773x601 picture that the browser then upscales 1.53x.
+ * With ?hidpi=1 the phone is told the physical size instead; the canvas math
+ * below works in ratios of innerWidth, so the picture then lands 1:1.
+ * Off by default until an in-car run confirms it (issue #366).
+ */
+function discoveryViewport() {
+    const dpr = findGetParameter("hidpi") === "1" ? (window.devicePixelRatio || 1) : 1;
+    return {
+        w: Math.round(window.innerWidth * dpr),
+        h: Math.round(window.innerHeight * dpr),
+        dpr: dpr
+    };
+}
+
+/**
+ * One debug-panel line with everything needed to judge sharpness from a photo:
+ * effectiveScale > 1 means the browser upscales the Android Auto picture.
+ */
+function logGeometry() {
+    const sent = discoveryViewport();
+    const contentW = width - (widthMargin || 0);
+    const contentH = height - (heightMargin || 0);
+    const realDpr = window.devicePixelRatio || 1;
+    const physicalW = window.innerWidth * realDpr;
+    const effectiveScale = contentW > 0 ? Math.round(physicalW / contentW * 100) / 100 : 0;
+    appendDebugLog({ ts: Date.now(), msg: 'geom: css=' + window.innerWidth + 'x' + window.innerHeight
+        + ' dpr=' + Math.round(realDpr * 100) / 100
+        + ' hidpi=' + (findGetParameter("hidpi") === "1" ? 1 : 0)
+        + ' sent=' + sent.w + 'x' + sent.h
+        + ' stream=' + width + 'x' + height
+        + ' margins=' + (widthMargin || 0) + 'x' + (heightMargin || 0)
+        + ' content=' + contentW + 'x' + contentH
+        + ' scale=x' + effectiveScale });
+}
+
 async function tryPort(port, controller) {
-    const urlToFetch = `https://taada.top:${port}/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
+    const viewport = discoveryViewport();
+    const hidpi = findGetParameter("hidpi") === "1" ? 1 : 0;
+    const realDpr = Math.round((window.devicePixelRatio || 1) * 100) / 100;
+    const screenW = window.screen ? screen.width : 0;
+    const screenH = window.screen ? screen.height : 0;
+    const urlToFetch = `https://taada.top:${port}/getsocketport?w=${viewport.w}&h=${viewport.h}&webcodec=${supportedWebCodec}`
+        + `&dpr=${realDpr}&hidpi=${hidpi}&sw=${screenW}&sh=${screenH}`;
     
     console.log(`Trying port ${port}...`);
     
@@ -457,7 +523,6 @@ function findGetParameter(parameterName) {
  * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
  */
 function updateCanvasSize() {
-    cachedCanvasRect = null; // canvas geometry is about to change (R5a cache)
     // Taille réelle de l'image dans le canvas (sans les marges)
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
@@ -520,13 +585,20 @@ function postWorkerMessages(json) {
     if (json.hasOwnProperty("usebt")) {
         usebt = json.usebt;
     }
+    // Android Auto >= 17.4 removed the wireless-startup path, so the session can only
+    // come up through AA's developer head unit server, which the user has to switch on
+    // by hand. The driver is looking at THIS screen, not at the phone, so remember the
+    // flag here and show the two taps instead of the generic "step 2 is slow" advice.
+    if (json.hasOwnProperty("aaHeadunitServerRequired")) {
+        aaHeadunitServerRequired = json.aaHeadunitServerRequired === true;
+    }
     port = json.port;
     // B1 control-channel discovery: a build-66+ phone advertises a SECOND
     // WebSocket port dedicated to PING/PONG + touch, so those small control
     // messages no longer queue behind bulk H.264 video (head-of-line blocking).
     // Absent/null on older phones → controlChannelPort stays falsy and the worker
     // keeps everything on the single video socket (byte-identical legacy path).
-    const advertisedControlChannelPort = json.controlChannelPort || null;
+    const controlChannelPort = json.controlChannelPort || null;
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
@@ -555,6 +627,7 @@ function postWorkerMessages(json) {
         
         updateCanvasSize();
     }
+    logGeometry();
 
     if (json.hasOwnProperty("buildversion")) {
         appVersion = parseInt(json.buildversion);
@@ -566,31 +639,15 @@ function postWorkerMessages(json) {
         }
     }
 
-    // Build 73+ is the floor the DEPLOYED Pages bundle already enforces — this line
-    // was edited directly in the io repo and is repatriated here (F14, audit
-    // 2026-07-07) so a redeploy from this repo no longer regresses the gate to 65.
+    // Build 65+ re-sends the H.264 codec config on reconnect; older APKs leave the decoder black after a Wi-Fi drop.
     if (appVersion < 73) {
-        alert("You need to run TaaDa build 73 or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
+        alert("You need to run TaaDa 2.6.4 (build 73) or newer to use this page. Your current build is " + appVersion + ", please update.\n\nIf the problem persists, contact me at seb.duboc.dev @ gmail.com");
         //return;
     }
 
     const forceBroadway = findGetParameter("broadway") === "1";
     // ?webcodec=1: force WebCodecs and disable the Broadway demotion (diagnostic).
     const forceWebCodec = findGetParameter("webcodec") === "1";
-
-    // HOTFIX 2026-07-12: builds 66-70 ship the B1 server WITHOUT the dead-man
-    // re-arm (Fix A, vc71+), so once the 03/07 root deploy activated B1 their
-    // video-focus stopped tracking browser liveness and AA closes the session
-    // ("AA needs you" window). Gate B1 on the advertised buildversion so those
-    // APKs fall back to the proven single-socket path; vc71+ keep B1 (the
-    // dominant window mode measured on 12/07 happens with NO browser attached,
-    // so disabling B1 fleet-wide would not help and would re-create PONG
-    // head-of-line stalls). ?b1=1 forces B1 on, ?b1=0 forces it off (A/B
-    // diagnostics). Keep the constant in sync with async_decoder.js.
-    const B1_MIN_BUILDVERSION = 71;
-    const b1Param = findGetParameter("b1");
-    const b1Enabled = b1Param === "1" || (b1Param !== "0" && appVersion >= B1_MIN_BUILDVERSION);
-    const controlChannelPort = b1Enabled ? advertisedControlChannelPort : null;
 
 
     canvasElement.width = width;
@@ -604,7 +661,7 @@ function postWorkerMessages(json) {
     
     // Initialiser le worker avec le canvas offscreen
     demuxDecodeWorker.postMessage(
-        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, b1Param: b1Param, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height, debug: debug || debugPanelEnabled},
+        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height},
         [offscreen]
     );
 
@@ -739,14 +796,6 @@ function postWorkerMessages(json) {
             updateConnectionProgress(progress.step, progress.message);
         }
 
-        // F3: the worker declared the GL context unrecoverable (silent loss, no
-        // restore for 15s). Only a page reload rebuilds the canvas pipeline.
-        if (e.data.hasOwnProperty('fatalFreeze')) {
-            appendDebugLog({ ts: Date.now(), msg: '[fatal-freeze] ' + e.data.fatalFreeze });
-            reloadWhenOnline('fatal freeze: ' + e.data.fatalFreeze);
-            return;
-        }
-
         // Hide the waiting message when first video frame is received
         if (e.data.hasOwnProperty('videoFrameReceived')) {
             console.log("Video frame received message received!", e.data);
@@ -754,9 +803,6 @@ function postWorkerMessages(json) {
 
             // Stream is live again — clear any reconnecting overlay.
             hideErrorOverlay();
-
-            // Healthy stream: forget past worker crashes (F2 reload budget resets).
-            try { sessionStorage.removeItem(WORKER_CRASH_KEY); } catch (err) { /* ignore */ }
 
             // Update to step 3/3 - Stream ready
             updateConnectionProgress(3, '3/3 - Stream ready!');
@@ -806,10 +852,7 @@ function getLocation() {
 
 function getPosition(pos) {
     clearTimeout(timeoutId);
-    // F9a: `socket` is never assigned in main.js — the old direct send was a
-    // guaranteed TypeError if the commented GPS poll ever came back. Route via
-    // the worker like the live handlepossition path.
-    demuxDecodeWorker.postMessage({
+    socket.send(JSON.stringify({
         action: "GPS",
         latitude: pos.coords.latitude,
         longitude: pos.coords.longitude,
@@ -817,7 +860,7 @@ function getPosition(pos) {
         accuracy: pos.coords.accuracy,
         heading: pos.coords.heading,
         speed: pos.coords.speed
-    });
+    }));
     timeoutId = setTimeout(getLocation, 250);
 }
 
@@ -893,13 +936,13 @@ function initializeAudioOnFirstTouch() {
  */
 function handleTouchStart(event) {
     if (!videoFrameReceived) {
-        // F5/F11 (audit 2026-07-07): while the landing page is visible, an
-        // unconditional preventDefault killed the compatibility click events —
-        // Play Store badge, email reveal, reset button were dead to touch. And
-        // touches converted before INIT used undefined width/height (NaN -> 0),
-        // then got REPLAYED to Android Auto as ghost taps at (0,0) once the
-        // stream came up. No stream on screen = nothing to send, keep native
-        // semantics.
+        // F5/F11 (audit 2026-07-07): while no stream is on screen, an unconditional
+        // preventDefault killed the compatibility click events, so every link and
+        // button on this page was dead to touch: the Play Store badge, the email
+        // reveal, the reset button, and now the video-guide QR. Touches converted
+        // before INIT also used undefined width/height (NaN -> 0) and got REPLAYED to
+        // Android Auto as ghost taps at (0,0) once the stream came up. Nothing on
+        // screen to touch = nothing to send, keep native semantics.
         return;
     }
     event.preventDefault();
@@ -1032,7 +1075,6 @@ bodyElement.addEventListener('touchmove', (event) => {
 
 // Ajouter un écouteur d'événement pour le redimensionnement de la fenêtre
 window.addEventListener('resize', () => {
-    cachedCanvasRect = null; // R5a cache: viewport changed even if canvas size math doesn't run
     if (width && height) {
         updateCanvasSize();
     }
