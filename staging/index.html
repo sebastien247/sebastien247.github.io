@@ -27,9 +27,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
     <!-- <img src="mute.svg" style="position:fixed;top:calc(50% - 150px);left:calc(50% - 150px);display: none;" id="muteicon"/> -->
-    <link rel="icon" href="favicon.ico?v=18"/>
-    <link rel="stylesheet" href="styles.css?v=18">
-    <link rel="stylesheet" href="feedback.css?v=18">
+    <link rel="icon" href="favicon.ico?v=20"/>
+    <link rel="stylesheet" href="styles.css?v=20">
+    <link rel="stylesheet" href="feedback.css?v=20">
     <!-- Firebase SDK (compat version for simpler integration) -->
     <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore-compat.js"></script>
@@ -57,14 +57,15 @@
             </div>
         </div>
         <div class="loading-indicator"></div>
-        <!-- Android Auto >= 17.4: the session can only start through AA's developer head
-             unit server, which the user must switch on. Shown INSTEAD of the generic
+        <!-- Android Auto >= 17.4 (and >= 16.4 on Android 10 and older, where Google disabled
+             the automatic wireless startup): the session can only start through AA's developer
+             head unit server, which the user must switch on. Shown INSTEAD of the generic
              troubleshooting advice, because that advice cannot unblock this case.
              Sized to fit the Tesla browser viewport (1180x919) without scrolling:
              bench/browser/test-aa174-guidance.js asserts it. -->
         <div id="headunit-server-message" class="headunit-server-message" style="display: none;">
-            <p class="hus-title">📱 Android Auto 17.4 or newer: one switch to turn on, on your phone</p>
-            <p class="hus-intro">Since Android Auto 17.4, the connection only works through Android Auto's built-in <strong>head unit server</strong>. Turn it on once, then this screen connects by itself.</p>
+            <p class="hus-title">📱 One switch to turn on, on your phone</p>
+            <p class="hus-intro">On recent Android Auto versions the connection only works through Android Auto's built-in <strong>head unit server</strong> (since 17.4 on every phone, and since 16.4 on Android 10 and older). Turn it on once, then this screen connects by itself.</p>
             <ol class="hus-steps">
                 <li>On your phone, open <strong>Settings</strong>, type <strong>Android Auto</strong> in the search box and open the Android Auto settings.</li>
                 <li>Scroll to the very bottom, to the line <strong>Version</strong> (or <strong>Version and permission info</strong>).</li>
@@ -162,14 +163,14 @@
 </body>
 <!-- <script src="pcm-player.min.js"></script> -->
 <!-- Debug log helpers must load before main.js (used by the ?debug panel buffer). -->
-<script src="debug-log-utils.js?v=18"></script>
-<script src="main.js?v=18"></script>
+<script src="debug-log-utils.js?v=20"></script>
+<script src="main.js?v=20"></script>
 
 <!-- Feedback System Modules -->
-<script src="firebase-config.js?v=18"></script>
-<script src="feedback-service.js?v=18"></script>
-<script src="feedback-dialog.js?v=18"></script>
-<script src="feedback-snackbar.js?v=18"></script>
+<script src="firebase-config.js?v=20"></script>
+<script src="feedback-service.js?v=20"></script>
+<script src="feedback-dialog.js?v=20"></script>
+<script src="feedback-snackbar.js?v=20"></script>
 <script>
     // Initialize Firebase when page loads
     document.addEventListener('DOMContentLoaded', function() {

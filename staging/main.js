@@ -553,7 +553,7 @@ function postWorkerMessages(json) {
     // messages no longer queue behind bulk H.264 video (head-of-line blocking).
     // Absent/null on older phones → controlChannelPort stays falsy and the worker
     // keeps everything on the single video socket (byte-identical legacy path).
-    const controlChannelPort = json.controlChannelPort || null;
+    const advertisedControlChannelPort = json.controlChannelPort || null;
     if (json.resolution === 2) {
         width = 1920;
         height = 1080;
@@ -603,6 +603,20 @@ function postWorkerMessages(json) {
     // ?webcodec=1: force WebCodecs and disable the Broadway demotion (diagnostic).
     const forceWebCodec = findGetParameter("webcodec") === "1";
 
+    // HOTFIX 2026-07-12: builds 66-70 ship the B1 server WITHOUT the dead-man
+    // re-arm (Fix A, vc71+), so once the 03/07 root deploy activated B1 their
+    // video-focus stopped tracking browser liveness and AA closes the session
+    // ("AA needs you" window). Gate B1 on the advertised buildversion so those
+    // APKs fall back to the proven single-socket path; vc71+ keep B1 (the
+    // dominant window mode measured on 12/07 happens with NO browser attached,
+    // so disabling B1 fleet-wide would not help and would re-create PONG
+    // head-of-line stalls). ?b1=1 forces B1 on, ?b1=0 forces it off (A/B
+    // diagnostics). Keep the constant in sync with async_decoder.js.
+    const B1_MIN_BUILDVERSION = 71;
+    const b1Param = findGetParameter("b1");
+    const b1Enabled = b1Param === "1" || (b1Param !== "0" && appVersion >= B1_MIN_BUILDVERSION);
+    const controlChannelPort = b1Enabled ? advertisedControlChannelPort : null;
+
 
     canvasElement.width = width;
     canvasElement.height = height;
@@ -615,7 +629,7 @@ function postWorkerMessages(json) {
     
     // Initialiser le worker avec le canvas offscreen
     demuxDecodeWorker.postMessage(
-        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height},
+        {canvas: offscreen, port: port, controlChannelPort: controlChannelPort, b1Param: b1Param, action: 'INIT', appVersion: appVersion, broadway: forceBroadway, forceWebCodec: forceWebCodec, width: width, height: height},
         [offscreen]
     );
 
