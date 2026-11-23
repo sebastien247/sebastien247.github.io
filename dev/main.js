@@ -304,10 +304,8 @@ function convertToCanvasCoordinates(screenX, screenY) {
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
     
-    // Calculer les facteurs de zoom appliqués (même logique que updateCanvasSize)
-    const zoomFactorWidth = window.innerWidth / imageWidth;
-    const zoomFactorHeight = window.innerHeight / imageHeight;
-    const actualZoomFactor = Math.min(zoomFactorWidth, zoomFactorHeight);
+    // Same zoom as updateCanvasSize, so a tap lands where the picture is drawn
+    const actualZoomFactor = displayZoom(imageWidth, imageHeight);
     
     // Taille réelle de l'image affichée après zoom
     const displayedImageWidth = imageWidth * actualZoomFactor;
@@ -522,26 +520,29 @@ function findGetParameter(parameterName) {
 /**
  * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
  */
+/**
+ * CSS pixels per stream pixel. Default: "contain" the Android Auto content in the window.
+ * With ?hidpi=1 the phone drew the content at the window's physical size, so one stream
+ * pixel must map to exactly one device pixel: any other factor, even 0.9997, makes the
+ * browser resample the whole picture (measured on a live phone: half the text sharpness).
+ */
+function displayZoom(imageWidth, imageHeight) {
+    if (findGetParameter("hidpi") === "1" && window.devicePixelRatio) {
+        return 1 / window.devicePixelRatio;
+    }
+    return Math.min(window.innerWidth / imageWidth, window.innerHeight / imageHeight);
+}
+
 function updateCanvasSize() {
-    // Taille réelle de l'image dans le canvas (sans les marges)
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
-    
-    // Calculer les facteurs de zoom nécessaires pour chaque dimension
-    const zoomFactorWidth = window.innerWidth / imageWidth;
-    const zoomFactorHeight = window.innerHeight / imageHeight;
-    
-    // Choisir le facteur de zoom le plus petit pour que l'image soit entièrement visible
-    // (comportement "contain" - l'image remplit au maximum une dimension sans déborder)
-    if (zoomFactorWidth <= zoomFactorHeight) {
-        // On zoom en largeur : l'image remplira horizontalement, des bandes noires possibles verticalement
-        canvasElement.style.width = `${width * zoomFactorWidth}px`;
-        canvasElement.style.height = '';
-    } else {
-        // On zoom en hauteur : l'image remplira verticalement, des bandes noires possibles horizontalement
-        canvasElement.style.height = `${height * zoomFactorHeight}px`;
-        canvasElement.style.width = '';
-    }
+    const zoom = displayZoom(imageWidth, imageHeight);
+    canvasElement.style.width = `${width * zoom}px`;
+    canvasElement.style.height = `${height * zoom}px`;
+    // At a fractional devicePixelRatio (Tesla: 1.53) Chromium still filters a canvas laid
+    // out 1:1, which halved text sharpness on a live phone. Nearest-neighbour is the identity
+    // at 1:1, so it only removes that filter; never set it when the picture is scaled.
+    canvasElement.style.imageRendering = findGetParameter("hidpi") === "1" ? 'pixelated' : '';
 }
 
 function postWorkerMessages(json) {  
