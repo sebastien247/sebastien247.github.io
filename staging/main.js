@@ -304,10 +304,8 @@ function convertToCanvasCoordinates(screenX, screenY) {
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
     
-    // Calculer les facteurs de zoom appliqués (même logique que updateCanvasSize)
-    const zoomFactorWidth = window.innerWidth / imageWidth;
-    const zoomFactorHeight = window.innerHeight / imageHeight;
-    const actualZoomFactor = Math.min(zoomFactorWidth, zoomFactorHeight);
+    // Same zoom as updateCanvasSize, so a tap lands where the picture is drawn
+    const actualZoomFactor = displayZoom(imageWidth, imageHeight);
     
     // Taille réelle de l'image affichée après zoom
     const displayedImageWidth = imageWidth * actualZoomFactor;
@@ -358,8 +356,55 @@ function abortFetching() {
  * @param {AbortController} controller - Le contrôleur d'abandon
  * @returns {Promise} Promise qui se résout avec les données ou se rejette
  */
+/**
+ * Tesla software 2026.26 (Chromium 148) raised the browser's devicePixelRatio
+ * from 1.0 to about 1.5 without changing the panel, so innerWidth/innerHeight
+ * now count about two thirds of the physical pixels. Reporting them as-is makes
+ * Android Auto lay out a 773x601 picture that the browser then upscales 1.53x.
+ * With ?hidpi=1 the page sends the physical size itself. Without it the page
+ * sends CSS pixels plus its dpr, and an APK that knows #366 scales the window
+ * and the interface density itself; older APKs ignore the dpr (issue #366).
+ */
+function discoveryViewport() {
+    const dpr = findGetParameter("hidpi") === "1" ? (window.devicePixelRatio || 1) : 1;
+    return {
+        w: Math.round(window.innerWidth * dpr),
+        h: Math.round(window.innerHeight * dpr),
+        dpr: dpr
+    };
+}
+
+/**
+ * One debug-panel line with everything needed to judge sharpness from a photo:
+ * effectiveScale > 1 means the browser upscales the Android Auto picture.
+ */
+function logGeometry() {
+    const sent = discoveryViewport();
+    const contentW = width - (widthMargin || 0);
+    const contentH = height - (heightMargin || 0);
+    const realDpr = window.devicePixelRatio || 1;
+    const physicalW = window.innerWidth * realDpr;
+    const effectiveScale = contentW > 0 ? Math.round(physicalW / contentW * 100) / 100 : 0;
+    appendDebugLog({ ts: Date.now(), msg: 'geom: css=' + window.innerWidth + 'x' + window.innerHeight
+        + ' dpr=' + Math.round(realDpr * 100) / 100
+        + ' hidpi=' + (findGetParameter("hidpi") || 'auto')
+        + ' sent=' + sent.w + 'x' + sent.h
+        + ' stream=' + width + 'x' + height
+        + ' margins=' + (widthMargin || 0) + 'x' + (heightMargin || 0)
+        + ' content=' + contentW + 'x' + contentH
+        + ' scale=x' + effectiveScale });
+}
+
 async function tryPort(port, controller) {
-    const urlToFetch = `https://taada.top:${port}/getsocketport?w=${window.innerWidth}&h=${window.innerHeight}&webcodec=${supportedWebCodec}`;
+    const viewport = discoveryViewport();
+    // ?hidpi=1: w/h are physical. ?hidpi=0: the phone must not scale. Absent: the phone decides.
+    const hidpiParam = findGetParameter("hidpi");
+    const hidpiQuery = hidpiParam === "1" || hidpiParam === "0" ? `&hidpi=${hidpiParam}` : "";
+    const realDpr = Math.round((window.devicePixelRatio || 1) * 100) / 100;
+    const screenW = window.screen ? screen.width : 0;
+    const screenH = window.screen ? screen.height : 0;
+    const urlToFetch = `https://taada.top:${port}/getsocketport?w=${viewport.w}&h=${viewport.h}&webcodec=${supportedWebCodec}`
+        + `&dpr=${realDpr}${hidpiQuery}&sw=${screenW}&sh=${screenH}`;
     
     console.log(`Trying port ${port}...`);
     
@@ -477,26 +522,41 @@ function findGetParameter(parameterName) {
 /**
  * Ajuste la taille d'affichage du canvas pour maximiser l'utilisation de l'écran
  */
+/**
+ * True when the phone drew the content at the window's physical size: an APK that scales by
+ * the dpr this page sends, or ?hidpi=1. Only happens when the stream is at least that big
+ * (1080p on a Tesla 2026.26 window). At 720p the phone draws 924x720 for a 1183x920 window:
+ * that picture must still be scaled. Older APKs draw the CSS size, so this stays false.
+ */
+function isPixelExact(imageWidth, imageHeight) {
+    if (findGetParameter("hidpi") === "0" || !(window.devicePixelRatio > 1)) return false;
+    const dpr = window.devicePixelRatio;
+    return Math.abs(imageWidth - window.innerWidth * dpr) <= 2
+        && Math.abs(imageHeight - window.innerHeight * dpr) <= 2;
+}
+
+/**
+ * CSS pixels per stream pixel. Default: "contain" the Android Auto content in the window.
+ * Pixel-exact: one stream pixel per device pixel; any other factor, even 0.9997, makes the
+ * browser resample the whole picture (measured on a live phone: half the text sharpness).
+ */
+function displayZoom(imageWidth, imageHeight) {
+    if (isPixelExact(imageWidth, imageHeight)) {
+        return 1 / window.devicePixelRatio;
+    }
+    return Math.min(window.innerWidth / imageWidth, window.innerHeight / imageHeight);
+}
+
 function updateCanvasSize() {
-    // Taille réelle de l'image dans le canvas (sans les marges)
     const imageWidth = width - (widthMargin || 0);
     const imageHeight = height - (heightMargin || 0);
-    
-    // Calculer les facteurs de zoom nécessaires pour chaque dimension
-    const zoomFactorWidth = window.innerWidth / imageWidth;
-    const zoomFactorHeight = window.innerHeight / imageHeight;
-    
-    // Choisir le facteur de zoom le plus petit pour que l'image soit entièrement visible
-    // (comportement "contain" - l'image remplit au maximum une dimension sans déborder)
-    if (zoomFactorWidth <= zoomFactorHeight) {
-        // On zoom en largeur : l'image remplira horizontalement, des bandes noires possibles verticalement
-        canvasElement.style.width = `${width * zoomFactorWidth}px`;
-        canvasElement.style.height = '';
-    } else {
-        // On zoom en hauteur : l'image remplira verticalement, des bandes noires possibles horizontalement
-        canvasElement.style.height = `${height * zoomFactorHeight}px`;
-        canvasElement.style.width = '';
-    }
+    const zoom = displayZoom(imageWidth, imageHeight);
+    canvasElement.style.width = `${width * zoom}px`;
+    canvasElement.style.height = `${height * zoom}px`;
+    // At a fractional devicePixelRatio (Tesla: 1.53) Chromium still filters a canvas laid
+    // out 1:1, which halved text sharpness on a live phone. Nearest-neighbour is the identity
+    // at 1:1, so it only removes that filter; never set it when the picture is scaled.
+    canvasElement.style.imageRendering = isPixelExact(imageWidth, imageHeight) ? 'pixelated' : '';
 }
 
 function postWorkerMessages(json) {  
@@ -582,6 +642,7 @@ function postWorkerMessages(json) {
         
         updateCanvasSize();
     }
+    logGeometry();
 
     if (json.hasOwnProperty("buildversion")) {
         appVersion = parseInt(json.buildversion);
