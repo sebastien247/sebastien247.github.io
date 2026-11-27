@@ -34,6 +34,14 @@ let pendingFrames = [],
     lastheart = 0, pongtimer, frameRate,
     lastPongAt = 0, // Timestamp of the last server PONG sentinel (unittype 31)
     lastFrameAt = 0, // Timestamp of the last decoded video frame (unittype 1/5)
+    framesThisConn = 0, // Video frames seen on the CURRENT connection — arms the video-starve watchdog (F1)
+    videoStarveStrikes = 0, // Escalation strikes of the video-starve watchdog (B1 only)
+    lastVideoPongAt = 0, // Timestamp of the last PONG sentinel received on the VIDEO socket (starve probe answer)
+    videoProbeSentAt = 0, // Wall-clock of the pending video-socket PING probe (0 = none pending)
+    videoIdleVerifiedAt = 0, // Wall-clock of the last probe the video socket answered while frames were idle
+    videoIdleLogged = false, // The "static screen" line was written for the current idle episode
+    starveReprimedThisConn = false, // START + REQUEST_KEYFRAME already sent once on THIS connection (each is a phone-side analytics event)
+    controlCycledAt = 0, // Wall-clock of the last zombie-control-socket cycle (F4)
     controlReopenScheduled = false, // F10: a control-socket reopen timer is already pending
     lastHeartbeatAt = 0, // Wall-clock of the last heartbeat() tick — detects Worker suspension (WebView backgrounded during a call)
     pageHidden = false, // Mirror of document.visibilityState, relayed by main.js (action VISIBILITY)
@@ -142,6 +150,7 @@ const MAX_RECONNECTION_DELAY = 30000; // Délai maximum en ms (30 secondes)
 // takes this long to be noticed, but the in-place reconnect is fast once fired.
 const NO_DATA_TIMEOUT = 3000; //8000; // No binary data at all (video OR PONG) for this long ⇒ reconnect (was 3000)
 const PONG_TIMEOUT = 6000; //12000;   // No PONG sentinel for this long ⇒ dead control channel (was 6000)
+const VIDEO_STARVE_TIMEOUT = 4000;    // B1 only: frames stopped this long (PONG still fresh) ⇒ probe the video socket; reconnect only if it stays silent (F1)
 // Suspension detection (WebView backgrounded during a phone call: timers freeze,
 // the PONG/data gap is sleep time, so we re-prime instead of reconnecting).
 // Two tiers, because heartbeat-tick drift alone CANNOT distinguish a frozen
@@ -603,6 +612,22 @@ function notifyFirstVideoFrame() {
 
 function videoMagic(dat){
     let unittype = (dat[4] & 0x1f);
+    // Liveness anchor for the F1 video-starve watchdog (and the frameAge
+    // metric): every real video NAL lands here, whether its message was led by
+    // the IDR itself or by SPS/PPS/AUD (separateNalUnits→headerMagic path).
+    // Counted even while skip-to-latest drops the backlog — arriving stale
+    // frames still prove the video socket is alive.
+    if (unittype === 1 || unittype === 5) {
+        lastFrameAt = Date.now();
+        framesThisConn++;
+        videoStarveStrikes = 0;
+        videoProbeSentAt = 0;
+        videoIdleVerifiedAt = 0;
+        if (videoIdleLogged) {
+            videoIdleLogged = false;
+            debugLog('video resumed after a static screen (same socket)');
+        }
+    }
     // Skip-to-latest drain: after a suspension we drop the stale backlog while it
     // streams back-to-back (sub-SKIP_LIVE_GAP_MS apart). The instant arrivals slow
     // to the live cadence we have caught up — stop dropping, force a keyframe and
@@ -817,6 +842,12 @@ function resumeAfterSuspend(source) {
         // Fresh baselines so the dead-channel checks don't fire on the sleep gap.
         lastPongAt = now;
         lastheart = now;
+        // F1: same grace for the video-starve watchdog — the frame gap was sleep
+        // time, not a dead video socket (distorts one frameAge metric sample).
+        if (lastFrameAt !== 0) { lastFrameAt = now; }
+        videoStarveStrikes = 0;
+        videoProbeSentAt = 0;
+        videoIdleVerifiedAt = 0;
         if (pongtimer) { clearTimeout(pongtimer); }
         pongtimer = setTimeout(noPong, NO_DATA_TIMEOUT);
         // Skip-to-latest: the stale backlog queued during the freeze is about to
@@ -911,9 +942,90 @@ function heartbeat() {
     // caught here — independently of video flow.
     if (lastPongAt !== 0 && (Date.now() - lastPongAt) > PONG_TIMEOUT) {
         const gap = Date.now() - lastPongAt;
-        console.warn('No PONG from phone for ' + gap + 'ms — forcing in-place reconnect');
-        forceReconnect('pongTimeout gap=' + gap + 'ms rs=' + (socket ? socket.readyState : -1));
-        return;
+        // F4 (audit 2026-07-07): a ZOMBIE control socket (readyState OPEN but a
+        // half-open TCP) swallows the PINGs, so the PONG gap says nothing about
+        // the video link. While frames are demonstrably fresh, cycle the control
+        // socket and route one PING via the video socket instead of dropping a
+        // healthy stream. The 5s guard (< PONG_TIMEOUT) lets the cycle repeat if
+        // the fresh control socket zombifies again; a video that is ALSO stale
+        // exits through the reconnect below or the F1/noData watchdogs.
+        if (controlChannelOpen() && lastFrameAt !== 0 && (Date.now() - lastFrameAt) < 5000
+            && (Date.now() - controlCycledAt) > 5000) {
+            controlCycledAt = Date.now();
+            debugLog('PONG gap ' + gap + 'ms but video fresh (frameAge=' + (Date.now() - lastFrameAt) + 'ms) — cycling zombie control socket (F4)');
+            lastPongAt = Date.now();
+            try { startControlSocket(); } catch (e) { /* next tick falls through to reconnect */ }
+            try { socket.sendObject({action: 'PING'}); } catch (e) { /* video send error → next tick */ }
+        } else {
+            console.warn('No PONG from phone for ' + gap + 'ms — forcing in-place reconnect');
+            forceReconnect('pongTimeout gap=' + gap + 'ms rs=' + (socket ? socket.readyState : -1));
+            return;
+        }
+    }
+
+    // Video-starve watchdog (F1, audit 2026-07-07; static-screen fix 2026-09-05):
+    // under B1 the PONG rides its own socket, so a dead/half-open VIDEO socket
+    // keeps NO_DATA and PONG_TIMEOUT fed while the picture freezes forever
+    // (bench/browser/repro-video-starve.js). Watch the video flow itself. Armed
+    // only when (a) B1 carries the PONGs and (b) frames have flowed on THIS
+    // connection, so a phone that legitimately projects nothing never trips it.
+    //
+    // A silent video socket is NOT proof of death: Android Auto sends no frame
+    // at all while its screen does not repaint (ABRP full screen, the preflight
+    // "check your phone" page; the rail clock forces about one frame a minute),
+    // and the 07/07 version reconnected such a healthy session every ~7 s (57
+    // times in 15 min on the OPPO CPH2305, overlay every time; see
+    // bench/browser/repro-static-screen.js). The discriminator is a PING on the
+    // VIDEO socket itself: the phone answers on the socket the PING came from
+    // (ControlSocketServer.handlePingAction replies to the sender), which a
+    // half-open TCP or a wedged sender cannot do.
+    //
+    // Strike 1: probe the video socket, and, once per CONNECTION, re-prime it
+    // (START is idempotent phone-side, REQUEST_KEYFRAME pulls a fresh IDR when
+    // video was merely turned off). Once per connection, not per idle episode:
+    // the phone tracks STREAM_REQUESTED and KEYFRAME_REQUESTED on each of them,
+    // and a screen like ABRP repaints every ~30 s, so a per-episode re-prime
+    // cost four analytics events a minute for the whole drive. A PONG back on
+    // the video socket ⇒ alive but idle: stay quiet, re-probe every
+    // VIDEO_STARVE_TIMEOUT. No PONG within ~2 s (strike 3) ⇒ dead ⇒ reconnect.
+    if (controlChannelOpen() && framesThisConn > 0 && lastFrameAt !== 0
+        && socket && socket.readyState === WebSocket.OPEN
+        && (Date.now() - lastFrameAt) > VIDEO_STARVE_TIMEOUT) {
+        const nowStarve = Date.now();
+        if (videoProbeSentAt !== 0 && lastVideoPongAt !== 0) {
+            // The video socket answered the probe: alive, the screen is static.
+            if (!videoIdleLogged) {
+                videoIdleLogged = true;
+                debugLog('video idle ' + (nowStarve - lastFrameAt) + 'ms but the video socket answers PING: static screen, not reconnecting');
+            }
+            videoStarveStrikes = 0;
+            videoProbeSentAt = 0;
+            videoIdleVerifiedAt = nowStarve;
+        } else if (videoIdleVerifiedAt !== 0 && (nowStarve - videoIdleVerifiedAt) < VIDEO_STARVE_TIMEOUT) {
+            // Verified alive recently: wait before probing again.
+        } else {
+            videoStarveStrikes++;
+            if (videoStarveStrikes === 1) {
+                try {
+                    if (!starveReprimedThisConn) {
+                        starveReprimedThisConn = true;
+                        debugLog('video starved ' + (nowStarve - lastFrameAt) + 'ms with fresh PONG — re-priming and probing the video socket (strike 1)');
+                        socket.sendObject({action: 'START'});
+                        socket.sendObject({action: 'REQUEST_KEYFRAME'});
+                    }
+                    lastVideoPongAt = 0;
+                    videoProbeSentAt = nowStarve;
+                    m.pingsSent++;
+                    socket.sendObject({action: 'PING'});
+                } catch (e) {
+                    forceReconnect('videoStarvedSendError ' + (e && e.message ? e.message : e));
+                    return;
+                }
+            } else if (videoStarveStrikes >= 3) {
+                forceReconnect('videoStarved ' + (nowStarve - lastFrameAt) + 'ms (control PONG alive, video socket silent to PING)');
+                return;
+            }
+        }
     }
 
     if (lastheart !== 0) {
@@ -1004,12 +1116,19 @@ function handleVideoMessage(dat){
     {
         // Server PONG sentinel — proof the control channel is alive. Tracked
         // separately from video so heartbeat() can detect a half-open channel.
+        // On the VIDEO socket it is also the answer to the starve probe: the
+        // phone replies to the sender (ControlSocketServer.handlePingAction), so
+        // a sentinel here proves this socket is alive in both directions.
         m.pongsRx++;
         lastPongAt = Date.now();
+        lastVideoPongAt = lastPongAt;
         return;
     }
     if (unittype === 1 || unittype === 5) {
-        lastFrameAt = Date.now();
+        // lastFrameAt/framesThisConn now update inside videoMagic: anchoring them
+        // on THIS message-level first-NAL sniff missed every SPS-led AU framing
+        // (Redmi/PixelOS MediaCodec), starving the F1 watchdog on those devices
+        // while video flowed (found by the repro's embedded synthetic source).
         videoMagic(dat);
         // Stage 2→3 promotion now fires from videoMagic on a decoded IDR, so it
         // also covers the else-branch below (a keyframe whose message is led by
@@ -1136,6 +1255,10 @@ function resetStreamStateForReconnect() {
     firstVideoFrameReceived = false;
     lastheart = 0;
     lastPongAt = 0;
+    lastVideoPongAt = 0;
+    videoProbeSentAt = 0;
+    videoIdleVerifiedAt = 0;
+    videoIdleLogged = false;
     resumeStrikes = 0;
     lastResumeAt = 0;
     // A real reconnect already discards the backlog via the socket drop; clear any
@@ -1397,6 +1520,16 @@ function startSocket() {
         // slow (backoff) reconnect is not mistaken for a Worker suspension.
         lastPongAt = Date.now();
         lastHeartbeatAt = Date.now();
+        // F1: the video-starve watchdog only arms once frames flow on THIS
+        // connection — a reconnect that gets no video stays disarmed (no loop
+        // when the phone legitimately projects nothing).
+        framesThisConn = 0;
+        videoStarveStrikes = 0;
+        lastVideoPongAt = 0;
+        videoProbeSentAt = 0;
+        videoIdleVerifiedAt = 0;
+        videoIdleLogged = false;
+        starveReprimedThisConn = false;
 
         console.log('✅ WebSocket connected successfully');
         debugLog('WS open (port ' + port + ')');
