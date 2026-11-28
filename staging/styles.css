@@ -96,6 +96,21 @@ canvas, video {
     line-height: 1.4;
 }
 
+/* The overlay lets touches through to the stream (pointer-events: none above);
+   its Reload button must take them. */
+.error-reload {
+    pointer-events: auto;
+    margin-top: 30px;
+    padding: 18px 60px;
+    font-size: 1.6em;
+    font-weight: 600;
+    color: #000;
+    background: #fff;
+    border: 0;
+    border-radius: 12px;
+    cursor: pointer;
+}
+
 .error-subtitle {
     font-size: 1.2em;
     font-weight: 400;

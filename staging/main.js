@@ -21,6 +21,7 @@ const demuxDecodeWorker = new Worker("./async_decoder.js" + ASSET_VERSION),
     waitingMessageElement = document.getElementById('waiting-message'),
     errorOverlay = document.getElementById('error-overlay'),
     errorMessage = document.getElementById('error-message'),
+    errorReloadButton = document.getElementById('error-reload'),
     supportedWebCodec = true, //ToDo consider if older browser should be supported or not, ones without WebCodec, since Tesla does support this might not be needed.
     DEFAULT_HTTPS_PORT = 8081,
     MAX_PORT_RETRIES = 5,
@@ -55,17 +56,26 @@ let zoom = Math.max(1, window.innerHeight / 1080),
     // Set from the phone's discovery response: true when the installed Android Auto
     // (>= 17.4) can only start through its developer head unit server.
     aaHeadunitServerRequired = false,
-    isWaitingForReload = false; // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
+    isWaitingForReload = false, // 🚨 Flag pour indiquer qu'on attend la connexion pour recharger
+    reloadWait = null; // #354: the pending wait for internet, {cancellable, cancel}; one at a time
 
 canvasElement.style.display = "none";
 
 /**
  * 🚨 NOUVEAU: Affiche un message d'erreur dans l'overlay permanent
  * @param {string} message - Le message à afficher
+ * @param {boolean} withReload - show the Reload button (states only a reload can leave)
  */
-function showErrorOverlay(message) {
+function showErrorOverlay(message, withReload = false) {
     if (errorOverlay && errorMessage) {
         errorMessage.textContent = message;
+        if (errorReloadButton) {
+            errorReloadButton.style.display = withReload ? "inline-block" : "none";
+        }
+        // The feedback snackbar (bottom right, z-index 10000, 10 s after each load) sits
+        // above this overlay and covered the button on a 773x601 window. With a button
+        // to press, the overlay goes above it.
+        errorOverlay.style.zIndex = withReload ? "10001" : "";
         errorOverlay.style.display = "flex";
     } else {
         console.error('Error overlay elements not found');
@@ -81,6 +91,73 @@ function hideErrorOverlay() {
     }
 }
 
+// The Reload button of the error overlay. It never navigates blindly: the page is
+// hosted on the internet, so a reload without coverage would replace it with the
+// browser's own error page. reloadWhenOnline reloads now if app.taada.top answers,
+// otherwise as soon as it does.
+if (errorReloadButton) {
+    // Once a stream has been shown, the body's touch handlers call preventDefault
+    // (touches go to Android Auto), which would swallow this click. Today the button
+    // only shows for a worker that never loaded (no stream yet); this keeps it alive
+    // for any later caller.
+    ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach((type) => {
+        errorReloadButton.addEventListener(type, (e) => e.stopPropagation(), { passive: true });
+    });
+    errorReloadButton.addEventListener('click', () => {
+        showErrorOverlay("Reloading...");
+        reloadWhenOnline('manual reload');
+    });
+}
+
+// F2 (audit 2026-07-07): a Worker that never loads (importScripts failing on a
+// flaky car network, Decoder.js is 290 KB) previously died SILENTLY: no watchdogs,
+// no reconnect, the UI parked on "2/3" forever and only a manual reload
+// recovered. Reload (when online) up to twice per tab session; a third crash
+// is deterministic, so surface it instead of reload-looping.
+// An `error` event AFTER the worker loaded is different: an uncaught exception in
+// one of its handlers, which the worker survives (its sockets, timers and watchdogs
+// keep running). Reloading for it would interrupt a healthy stream, and without
+// internet park it behind an overlay, so it is only logged, as production does.
+const WORKER_CRASH_KEY = 'taada_worker_crashes';
+let workerLoaded = false;
+let workerErrorCount = 0;
+demuxDecodeWorker.addEventListener('message', function onWorkerReady(e) {
+    if (e.data && e.data.workerReady) {
+        workerLoaded = true;
+        demuxDecodeWorker.removeEventListener('message', onWorkerReady);
+    }
+});
+demuxDecodeWorker.addEventListener('error', (e) => {
+    const detail = (e && e.message) ? e.message
+        : ('script error' + (e && e.filename ? ' @ ' + e.filename + ':' + (e.lineno || '?') : ''));
+    if (workerLoaded) {
+        // Three, then one in fifty: a throw on every frame would flood the log ring
+        // and its localStorage write.
+        workerErrorCount++;
+        if (workerErrorCount <= 3 || workerErrorCount % 50 === 0) {
+            appendDebugLog({ ts: Date.now(), msg: '[worker-error] #' + workerErrorCount + ' ' + detail });
+        }
+        return;
+    }
+    appendDebugLog({ ts: Date.now(), msg: '[worker-crash] ' + detail });
+    // Without sessionStorage nothing can be counted: no automatic reload at all,
+    // rather than a reload loop.
+    let crashes = 3;
+    try {
+        const counted = parseInt(sessionStorage.getItem(WORKER_CRASH_KEY) || '0', 10) + 1;
+        sessionStorage.setItem(WORKER_CRASH_KEY, String(counted));
+        crashes = counted; // only once the write went through: a read-only storage would count 1 forever
+    } catch (err) { /* storage unavailable */ }
+    if (crashes <= 2) {
+        reloadWhenOnline('worker crashed: ' + detail);
+    } else {
+        // The overlay cannot scroll: keep the text short enough for the Reload button
+        // to stay on a 773x601 window.
+        showErrorOverlay('Video engine failed to load repeatedly (' + String(detail).slice(0, 120)
+            + '). Check the phone connection, then tap Reload.', true);
+    }
+});
+
 /**
  * Vérifie si le serveur est accessible
  * @returns {Promise<boolean>} True si le serveur est accessible
@@ -91,8 +168,12 @@ async function checkServerReachability() {
         const timeoutId = setTimeout(() => controller.abort(), 3000);
 
         // Essayer de ping le serveur principal
+        // no-store: Chromium can answer a HEAD from a cached GET of the same URL
+        // (GitHub Pages sends max-age=600), which would say "online" in a car that
+        // lost coverage minutes ago, and the reload would land on an error page.
         const response = await fetch(`https://app.taada.top`, {
             method: 'HEAD',
+            cache: 'no-store',
             signal: controller.signal
         });
 
@@ -106,20 +187,34 @@ async function checkServerReachability() {
 
 /**
  * Attend que la connexion internet revienne
- * @returns {Promise<void>} Se résout quand la connexion est rétablie
+ * @param {string} message - Overlay text shown while waiting
+ * @param {boolean} cancellable - true when the reload is optional: the stream itself can
+ *        resume first (#354). false when only a reload can repair the page.
+ * @param {string} reason - why the reload is wanted, kept on the wait
+ * @returns {Promise<boolean>} true once internet is back, false when the wait was cancelled
  */
-function waitForConnection() {
+function waitForConnection(message, cancellable, reason) {
     return new Promise((resolve) => {
         console.log('Waiting for internet connection...');
-        showErrorOverlay("No internet connection. Waiting to reconnect...");
+        showErrorOverlay(message);
 
         let checkInterval;
         let isChecking = false;
+        let done = false;
+        const wait = { cancellable: cancellable, reason: reason, message: message, cancel: () => finish(false) };
+        const finish = (online) => {
+            if (done) return;
+            done = true;
+            clearInterval(checkInterval);
+            window.removeEventListener('online', checkConnection);
+            if (reloadWait === wait) reloadWait = null;
+            resolve(online);
+        };
 
         // Fonction pour vérifier la connexion
         const checkConnection = async () => {
             // Éviter les vérifications concurrentes
-            if (isChecking) return;
+            if (isChecking || done) return;
             isChecking = true;
 
             console.log('Checking connection... navigator.onLine =', navigator.onLine);
@@ -128,19 +223,17 @@ function waitForConnection() {
                 const isReachable = await checkServerReachability();
                 console.log('Server reachable:', isReachable);
 
-                if (isReachable) {
+                if (isReachable && !done) {
                     // Connexion rétablie !
-                    if (checkInterval) {
-                        clearInterval(checkInterval);
-                    }
-                    window.removeEventListener('online', checkConnection);
                     showErrorOverlay("Connection restored. Reloading...");
-                    resolve();
+                    finish(true);
                 }
             }
 
             isChecking = false;
         };
+
+        reloadWait = wait;
 
         // Vérifier périodiquement toutes les 2 secondes
         checkInterval = setInterval(checkConnection, 2000);
@@ -157,8 +250,12 @@ function waitForConnection() {
  * Recharge la page seulement quand internet est disponible
  * Attend si nécessaire que la connexion revienne
  * @param {string} reason - Raison du rechargement (pour les logs)
+ * @param {boolean} reconnectLocally - #354: the phone only restarted its service, so
+ *        the stream can come back without a reload. With no internet the worker is told
+ *        to reconnect to the phone (the stream is local), and the first video frame
+ *        cancels the pending reload. With internet nothing changes: the page reloads.
  */
-async function reloadWhenOnline(reason = 'Unknown') {
+async function reloadWhenOnline(reason = 'Unknown', reconnectLocally = false) {
     console.log(`Reload requested: ${reason}`);
 
     // 🚨 Marquer qu'on est en attente de reload
@@ -178,7 +275,27 @@ async function reloadWhenOnline(reason = 'Unknown') {
 
     // Pas de connexion ou serveur injoignable, attendre
     console.log('No connection or server unreachable, waiting...');
-    await waitForConnection();
+    if (reconnectLocally) {
+        isServerShuttingDown = false;
+        demuxDecodeWorker.postMessage({action: 'RECONNECT_LOCAL'});
+        // A wait is already polling, for an earlier shutdown or for a reload that is
+        // owed anyway (worker crash, GL freeze): it covers this shutdown too. Put its
+        // own text back over "Server disconnected. Checking connection...".
+        if (reloadWait) {
+            showErrorOverlay(reloadWait.message);
+            return;
+        }
+    } else if (reloadWait) {
+        // Only a reload repairs this one. An identical wait is already running, or an
+        // optional one (shutdown) is: replace that one so no video frame can cancel it.
+        if (!reloadWait.cancellable) return;
+        reloadWait.cancel();
+    }
+
+    const online = await waitForConnection(
+        reconnectLocally ? "Phone disconnected. Reconnecting..." : "No internet connection. The page reloads as soon as it is back.",
+        reconnectLocally, reason);
+    if (!online) return;
 
     // Une fois la connexion rétablie, attendre 1 seconde puis recharger
     setTimeout(() => {
@@ -714,6 +831,10 @@ function postWorkerMessages(json) {
         if (e.data.hasOwnProperty('serverShutdown')) {
             console.warn('Server shutdown detected:', e.data.reason);
 
+            // The phone announces a restart twice, 500 ms apart (restartService, then
+            // onDestroy). The first one is being handled: one reload request, not two.
+            if (isServerShuttingDown) return;
+
             // Marquer le flag pour éviter les actions en double
             isServerShuttingDown = true;
 
@@ -726,7 +847,7 @@ function postWorkerMessages(json) {
             showErrorOverlay("Server disconnected. Checking connection...");
 
             setTimeout(() => {
-                reloadWhenOnline('Server shutdown');
+                reloadWhenOnline('Server shutdown', true);
             }, 3000);
 
             return;
@@ -809,6 +930,21 @@ function postWorkerMessages(json) {
         if (e.data.hasOwnProperty('connectionProgress')) {
             const progress = e.data.connectionProgress;
             updateConnectionProgress(progress.step, progress.message);
+            // #354: reconnected locally after a phone shutdown, the socket is back and
+            // only the picture is missing (Android Auto not projecting yet). Show the
+            // 2/3 screen and its guidance, as the reload would have.
+            if (progress.step === 2 && reloadWait && reloadWait.cancellable && waitingMessageElement) {
+                waitingMessageElement.style.display = "flex";
+                hideErrorOverlay();
+            }
+        }
+
+        // F3: the worker declared the GL context unrecoverable (silent loss, no
+        // restore for 15s). Only a page reload rebuilds the canvas pipeline.
+        if (e.data.hasOwnProperty('fatalFreeze')) {
+            appendDebugLog({ ts: Date.now(), msg: '[fatal-freeze] ' + e.data.fatalFreeze });
+            reloadWhenOnline('fatal freeze: ' + e.data.fatalFreeze);
+            return;
         }
 
         // Hide the waiting message when first video frame is received
@@ -816,8 +952,19 @@ function postWorkerMessages(json) {
             console.log("Video frame received message received!", e.data);
             videoFrameReceived = true;
 
-            // Stream is live again — clear any reconnecting overlay.
-            hideErrorOverlay();
+            // #354: the stream came back locally while the page was waiting for
+            // internet to reload after a phone shutdown. Drop that reload.
+            if (reloadWait && reloadWait.cancellable) {
+                reloadWait.cancel();
+                isWaitingForReload = false;
+            }
+
+            // Stream is live again — clear any reconnecting overlay, unless a reload
+            // is still owed (worker crash, GL freeze): its overlay says so.
+            if (!reloadWait) hideErrorOverlay();
+
+            // Healthy stream: forget past worker crashes (F2 reload budget resets).
+            try { sessionStorage.removeItem(WORKER_CRASH_KEY); } catch (err) { /* ignore */ }
 
             // Update to step 3/3 - Stream ready
             updateConnectionProgress(3, '3/3 - Stream ready!');
@@ -1582,6 +1729,15 @@ demuxDecodeWorker.addEventListener('message', (e) => {
     }
     if (e && e.data && e.data.hasOwnProperty('metrics')) {
         handleWorkerMetrics(e.data.metrics);
+        // The WebGL context came back after all while the page was waiting for internet
+        // to reload for a fatal freeze: drop that reload. glLost alone decides: on a
+        // still Android Auto screen no frame is drawn for long after the restore.
+        if (e.data.metrics.glLost === false && reloadWait
+            && String(reloadWait.reason).indexOf('fatal freeze') === 0) {
+            reloadWait.cancel();
+            isWaitingForReload = false;
+            hideErrorOverlay();
+        }
     }
 });
 

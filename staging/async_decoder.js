@@ -24,6 +24,7 @@ let pendingFrames = [],
     sps, decoder = null, socket, height, width, port, gl, heart = 0,
     glCanvas = null, // OffscreenCanvas ref, kept so the GL context can be re-fetched after a loss
     glContextLost = false, // True between webglcontextlost and webglcontextrestored — render is paused
+    glEscalated = false, // F3: fatalFreeze already posted for the current GL loss
     glContextLostAt = 0, // Wall-clock of the last context loss (for the restore-latency log + watchdog)
     // B1 control channel: when the phone advertises controlChannelPort (build 66+),
     // a SECOND WebSocket carries PING/PONG + binary touch so they don't queue behind
@@ -478,6 +479,7 @@ function installGlContextHandlers(canvas) {
             gl = canvas.getContext('webgl2');
             setupGlPipeline();
             glContextLost = false;
+            glEscalated = false;
             awaitingKeyframe = true;     // request a clean IDR; nothing valid to paint yet
             maybeRequestKeyframe();
             debugLog('WebGL context RESTORED after ' + (Date.now() - glContextLostAt) + 'ms — render resumed');
@@ -777,8 +779,14 @@ function headerMagic(dat) {
 
         return;
     }
-    else if (unittype === 8)
-        sps=appendByteArray(sps,dat)
+    else if (unittype === 8) {
+        // A PPS that arrives before its SPS (first NAL after a reconnect reset sps)
+        // cannot be used: appending it to undefined threw an uncaught TypeError. Drop
+        // it, the phone re-sends SPS + PPS + IDR on the keyframe request that follows.
+        if (sps) {
+            sps = appendByteArray(sps, dat);
+        }
+    }
     else
         videoMagic(dat);
 }
@@ -934,6 +942,17 @@ function heartbeat() {
         glContextLostAt = Date.now();
         texturePool.length = 0;
         debugLog('WebGL context LOST (silent, no event) — render paused, awaiting restore');
+    }
+    // F3 escalation (audit 2026-07-07): a SILENT loss never fires
+    // webglcontextlost, so per spec webglcontextrestored never comes either —
+    // detection alone left a permanent freeze with healthy watchdogs. 15s with
+    // no restore (either path) means this context is not coming back: ask the
+    // main thread for a reload-when-online.
+    if (glContextLost && glContextLostAt !== 0 && !glEscalated
+        && (Date.now() - glContextLostAt) > 15000) {
+        glEscalated = true;
+        debugLog('WebGL context lost >15s with no restore — requesting page reload');
+        try { self.postMessage({ fatalFreeze: 'gl context lost, no restore in 15s' }); } catch (e) { /* ignore */ }
     }
 
     // Dead control channel: the phone replies to every PING with a PONG sentinel
@@ -1952,6 +1971,17 @@ self.addEventListener('message', async (message) => {
             console.log("Sending RESET_AA_PROFILE to Android");
             socket.sendObject({action: "RESET_AA_PROFILE"});
         }
+    } else if (message.data.action === 'RECONNECT_LOCAL') {
+        // #354: the phone announced a service stop and the page has no internet to
+        // reload itself. The stream is local, so leave the shutdown state and go
+        // through the normal reconnect cycle (backoff, rediscovery, fresh sockets).
+        if (isServerShuttingDown) {
+            isServerShuttingDown = false;
+            // A forceReconnect() cut short by the shutdown leaves this latched.
+            forceReconnectPending = false;
+            debugLog('server shutdown without internet: reconnecting locally');
+            forceReconnect('server shutdown, local reconnect');
+        }
     } else if (message.data.action === 'VISIBILITY') {
         // Relayed by main.js from document.visibilitychange. A worker cannot see
         // page visibility itself; this is what lets workerWasSuspended() tell a
@@ -1967,3 +1997,14 @@ self.addEventListener('message', async (message) => {
         messageHandler(message)
     }
 });
+
+// A rejected promise (the INIT and reconnect bodies are async) raises no `error`
+// event on the Worker object and was lost: keep at least a trace of it.
+self.addEventListener('unhandledrejection', (e) => {
+    debugLog('unhandled rejection: ' + (e && e.reason ? (e.reason.message || String(e.reason)) : 'unknown'));
+});
+
+// Last statement of the script: tells main.js the worker loaded entirely (both
+// importScripts included). An `error` event after this is an exception the worker
+// survived, not a dead worker.
+self.postMessage({workerReady: true});
